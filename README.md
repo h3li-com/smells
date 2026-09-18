@@ -29,4 +29,4 @@ A consuming project's quality runner will invoke this command alongside OSV, Git
 
 `smells` is its own Git repository and future Rust executable, using `src/main.rs`. It is not part of a consuming Cargo workspace and does not import application crates. Consuming applications do not import scanner code into their production dependencies. Architecture rules describe project-supplied package identities; no consuming project is hard-coded into the scanner.
 
-Extracted from the `tiny` design session on 2026-09-18. The generic scanner specification is maintained here; application-specific quality policy remains in each consuming repository. No Git remote has been configured.
+Extracted from the `tiny` design session on 2026-09-18. The generic scanner specification is maintained here; application-specific quality policy remains in each consuming repository. GitHub repository: [mindful-time/smells](https://github.com/mindful-time/smells), private.
