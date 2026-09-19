@@ -1,92 +1,39 @@
 {
-  "schema_version": 1,
-  "status": "specification_only_scanner_not_implemented",
-  "input": "staged_snapshot",
-  "scope": "workspace_production_source",
-  "conditional_source_scope": "active_production_cfg_for_recorded_target_and_features",
-  "required_check_error": "block_commit",
-  "gate_uses_llm": false,
-  "scanner": {
-    "implementation_language": "rust",
-    "method": "fixed_syntax_type_and_dependency_pattern_rules",
-    "interpretation": "pattern_matches_are_smell_indicators",
-    "human_output": "table_of_smell_symbol_metric_value_threshold_status_and_location",
-    "machine_output": "json",
-    "include_function_and_type_metric_summaries": true,
-    "include_below_threshold_values": true,
-    "required_finding_fields": [
-      "rule_id",
-      "smell",
-      "symbol",
-      "location",
-      "metric",
-      "value",
-      "comparison",
-      "threshold",
-      "status",
-      "blocking"
-    ],
-    "unavailable_measurement_value": null,
-    "sort_order": [
-      "location.path",
-      "location.line",
-      "symbol",
-      "rule_id"
-    ],
-    "threshold_source": "quality-policy.json"
-  },
-  "smell_catalog": {
-    "source": "https://refactoring.guru/refactoring/smells",
-    "item_count": 23,
-    "mapping": "docs/rust-smell-checks.md",
-    "passing_verdict_scope": "configured_required_rules_only",
-    "require_explicit_coverage_status": true,
-    "required_unimplemented_check": "error"
-  },
+  "schema_version": 2,
+  "rule_pack": "rust-v1",
+  "scanner_version": "0.1.0",
+  "scope": "authored_all_cfg",
+  "exclude_directories": [".git", "target"],
+  "limits": {"maximum_files": 10000, "maximum_pairs": 100000, "maximum_group_combinations": 100000},
   "rules": {
-    "function_lines": {
-      "maximum": 100,
-      "measurement": "pinned_clippy_too_many_lines"
-    },
-    "function_arguments": {
-      "maximum": 7,
-      "measurement": "pinned_clippy_too_many_arguments"
-    },
-    "type_fields": {
-      "maximum": 15,
-      "measurement": "declared_named_or_tuple_fields_per_struct_or_per_enum_variant"
-    },
-    "enum_variants": {
-      "maximum": 20,
-      "measurement": "declared_variants_per_enum"
-    },
-    "type_functions": {
-      "maximum": 20,
-      "measurement": "source_declared_associated_functions_and_methods_across_all_impls_of_one_qualified_type"
-    },
-    "type_function_lines": {
-      "maximum": 500,
-      "measurement": "sum_of_distinct_nonblank_noncomment_body_lines_of_source_declared_functions_across_all_impls_of_one_qualified_type"
-    },
-    "trait_functions": {
-      "maximum": 20,
-      "measurement": "declared_trait_functions_including_required_and_default_methods"
-    },
-    "compiler_detected_unused_code": {
-      "maximum_findings": 0,
-      "measurement": "pinned_rustc_dead_code_unused_imports_and_unreachable_code_for_checked_targets_and_features"
-    },
-    "duplicate_functions": {
-      "minimum_similarity": 0.82,
-      "minimum_normalized_nodes": 20,
-      "measurement": "cargo_crap_v0_5_0_normalized_ast_jaccard",
-      "maximum_unexcepted_pairs": 0
-    },
-    "function_crap": {
-      "maximum": 30,
-      "measurement": "cargo_crap_v0_5_0_complexity_and_fresh_lcov_line_coverage",
-      "missing_coverage": "pessimistic"
-    }
+    "rust.function_lines": {"version":1,"mode":"required","parameters":{"maximum":100}},
+    "rust.function_arguments": {"version":1,"mode":"required","parameters":{"maximum":7}},
+    "rust.type_fields": {"version":1,"mode":"required","parameters":{"maximum":15}},
+    "rust.enum_variants": {"version":1,"mode":"required","parameters":{"maximum":20}},
+    "rust.type_functions": {"version":1,"mode":"required","parameters":{"maximum":20}},
+    "rust.type_function_lines": {"version":1,"mode":"required","parameters":{"maximum":500}},
+    "rust.trait_functions": {"version":1,"mode":"required","parameters":{"maximum":20}},
+    "rust.primitive_slots": {"version":1,"mode":"report","parameters":{"minimum_raw_slots":5,"minimum_share_percent":80}},
+    "rust.data_clumps": {"version":1,"mode":"report","parameters":{"minimum_group_size":3,"minimum_declarations":3}},
+    "rust.alternative_interfaces": {"version":1,"mode":"report","parameters":{"minimum_similarity_basis_points":8200,"minimum_tokens":20}},
+    "rust.repeated_dispatch": {"version":1,"mode":"report","parameters":{"minimum_sites":3,"minimum_arms":4}},
+    "rust.temporary_fields": {"version":1,"mode":"report","parameters":{"minimum_fields":3,"minimum_methods":4,"maximum_use_percent":25}},
+    "rust.comment_share": {"version":1,"mode":"report","parameters":{"minimum_code_lines":20,"minimum_share_percent":30}},
+    "rust.duplicate_functions": {"version":1,"mode":"report","parameters":{"minimum_similarity_basis_points":8200,"minimum_tokens":20}},
+    "rust.data_class": {"version":1,"mode":"report","parameters":{"minimum_fields":2,"maximum_operations":0}},
+    "rust.lazy_class": {"version":1,"mode":"report","parameters":{"maximum_fields":1,"maximum_functions":1,"maximum_lines":5}},
+    "rust.forwarding_share": {"version":1,"mode":"report","parameters":{"minimum_methods":5,"minimum_share_percent":80}},
+    "rust.function_crap": {"version":1,"mode":"off","parameters":{"maximum":30}},
+    "rust.unused_code": {"version":1,"mode":"off","parameters":{"maximum_findings":0}},
+    "rust.unused_type_parameters": {"version":1,"mode":"off","parameters":{"maximum_findings":0}},
+    "rust.nominal_slot_contract": {"version":1,"mode":"off","parameters":{"maximum_mismatches":0}},
+    "rust.port_conformance": {"version":1,"mode":"off","parameters":{"maximum_failures":0}},
+    "rust.divergent_change": {"version":1,"mode":"off","parameters":{"minimum_changes":3,"minimum_responsibilities":3}},
+    "rust.shotgun_surgery": {"version":1,"mode":"off","parameters":{"maximum_owners":3}},
+    "rust.foreign_accesses": {"version":1,"mode":"off","parameters":{"minimum_foreign_accesses":5,"minimum_share_percent_exclusive":60}},
+    "rust.dependency_contract": {"version":1,"mode":"off","parameters":{"maximum_forbidden_accesses":0}},
+    "rust.library_capabilities": {"version":1,"mode":"off","parameters":{"maximum_failures":0}},
+    "rust.navigation_chains": {"version":1,"mode":"off","parameters":{"minimum_transitions":3}}
   },
   "exceptions": []
 }

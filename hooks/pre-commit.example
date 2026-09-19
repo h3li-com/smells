@@ -1,5 +1,5 @@
 #!/bin/sh
-# Inactive example for the planned CLI. Do not install until the CLI and fixtures work.
+# Inactive example. Validate and pin the scanner before installing it in a project.
 set -eu
 
 if ! command -v smells >/dev/null 2>&1; then
@@ -7,4 +7,6 @@ if ! command -v smells >/dev/null 2>&1; then
     exit 2
 fi
 
-exec smells check --staged --policy quality-policy.json
+# JSON is intentional: agentic coding environments need the complete actionable
+# finding, including source evidence and the mandatory reference-research gate.
+exec smells check --staged --policy quality-policy.json --format json

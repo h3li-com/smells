@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "smells Rust policy v2 (registry validation also required)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "rule_pack", "scanner_version", "scope", "exclude_directories", "limits", "rules", "exceptions"],
+  "properties": {
+    "schema_version": {"const": 2},
+    "rule_pack": {"const": "rust-v1"},
+    "scanner_version": {"const": "0.1.0"},
+    "scope": {"const": "authored_all_cfg"},
+    "exclude_directories": {"type":"array","uniqueItems":true,"contains":{"const":".git"},"items":{"type":"string","minLength":1,"pattern":"^[^/\\\\]+$","not":{"enum":[".",".."]}}},
+    "limits": {"type":"object","additionalProperties":false,"required":["maximum_files","maximum_pairs","maximum_group_combinations"],"properties":{"maximum_files":{"type":"integer","minimum":1},"maximum_pairs":{"type":"integer","minimum":1},"maximum_group_combinations":{"type":"integer","minimum":1}}},
+    "rules": {
+      "type": "object",
+      "minProperties": 28,
+      "maxProperties": 28,
+      "propertyNames": {"enum":["rust.function_lines","rust.function_arguments","rust.type_fields","rust.enum_variants","rust.type_functions","rust.type_function_lines","rust.trait_functions","rust.primitive_slots","rust.data_clumps","rust.alternative_interfaces","rust.repeated_dispatch","rust.temporary_fields","rust.comment_share","rust.duplicate_functions","rust.data_class","rust.lazy_class","rust.forwarding_share","rust.function_crap","rust.unused_code","rust.unused_type_parameters","rust.nominal_slot_contract","rust.port_conformance","rust.divergent_change","rust.shotgun_surgery","rust.foreign_accesses","rust.dependency_contract","rust.library_capabilities","rust.navigation_chains"]},
+      "additionalProperties": {"$ref":"#/$defs/selection"}
+    },
+    "exceptions": {"type":"array","maxItems":0}
+  },
+  "$defs": {
+    "selection": {
+      "type":"object","additionalProperties":false,"required":["version","mode","parameters"],
+      "properties": {
+        "version":{"const":1},
+        "mode":{"enum":["required","report","off"]},
+        "parameters": {
+          "type":"object",
+          "additionalProperties":{"type":"integer","minimum":0},
+          "patternProperties": {
+            "percent":{"type":"integer","minimum":0,"maximum":100},
+            "basis_points":{"type":"integer","minimum":0,"maximum":10000},
+            "^minimum_":{"type":"integer","minimum":1}
+          },
+          "properties":{"minimum_group_size":{"minimum":2},"minimum_tokens":{"minimum":4}}
+        }
+      }
+    }
+  }
+}
