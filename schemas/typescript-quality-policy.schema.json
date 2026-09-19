@@ -1,0 +1,169 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "smells typescript policy v2 (registry validation also required)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "rule_pack",
+    "scanner_version",
+    "scope",
+    "exclude_directories",
+    "limits",
+    "rules",
+    "exceptions"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 2
+    },
+    "rule_pack": {
+      "const": "typescript-v1"
+    },
+    "scanner_version": {
+      "const": "0.1.0"
+    },
+    "scope": {
+      "const": "authored_source"
+    },
+    "exclude_directories": {
+      "type": "array",
+      "uniqueItems": true,
+      "contains": {
+        "const": ".git"
+      },
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^[^/\\\\]+$",
+        "not": {
+          "enum": [
+            ".",
+            ".."
+          ]
+        }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "maximum_files",
+        "maximum_pairs",
+        "maximum_group_combinations"
+      ],
+      "properties": {
+        "maximum_files": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maximum_pairs": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maximum_group_combinations": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "rules": {
+      "type": "object",
+      "minProperties": 28,
+      "maxProperties": 28,
+      "propertyNames": {
+        "enum": [
+          "typescript.function_lines",
+          "typescript.function_arguments",
+          "typescript.class_fields",
+          "typescript.class_methods",
+          "typescript.class_method_lines",
+          "typescript.primitive_slots",
+          "typescript.data_clumps",
+          "typescript.alternative_interfaces",
+          "typescript.repeated_dispatch",
+          "typescript.temporary_fields",
+          "typescript.comment_share",
+          "typescript.duplicate_functions",
+          "typescript.data_class",
+          "typescript.lazy_class",
+          "typescript.forwarding_share",
+          "typescript.function_crap",
+          "typescript.unused_code",
+          "typescript.unused_type_parameters",
+          "typescript.nominal_slot_contract",
+          "typescript.port_conformance",
+          "typescript.refused_bequest",
+          "typescript.divergent_change",
+          "typescript.parallel_inheritance",
+          "typescript.shotgun_surgery",
+          "typescript.foreign_accesses",
+          "typescript.dependency_contract",
+          "typescript.library_capabilities",
+          "typescript.navigation_chains"
+        ]
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/selection"
+      }
+    },
+    "exceptions": {
+      "type": "array",
+      "maxItems": 0
+    }
+  },
+  "$defs": {
+    "selection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "mode",
+        "parameters"
+      ],
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "mode": {
+          "enum": [
+            "required",
+            "report",
+            "off"
+          ]
+        },
+        "parameters": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "patternProperties": {
+            "percent": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100
+            },
+            "basis_points": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10000
+            },
+            "^minimum_": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "properties": {
+            "minimum_group_size": {
+              "minimum": 2
+            },
+            "minimum_tokens": {
+              "minimum": 4
+            }
+          }
+        }
+      }
+    }
+  }
+}

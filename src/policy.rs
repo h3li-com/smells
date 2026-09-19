@@ -111,121 +111,92 @@ where
     deserializer.deserialize_map(UniqueMapVisitor(std::marker::PhantomData))
 }
 
-pub fn registry() -> Result<Registry, String> {
-    let registry: Registry = serde_json::from_str(include_str!("../rules/rust-v1.json"))
-        .map_err(|e| format!("invalid embedded registry: {e}"))?;
+pub fn registry_json(rule_pack: &str) -> Result<&'static str, String> {
+    Ok(match rule_pack {
+        "rust-v1" => include_str!("../rules/rust-v1.json"),
+        "python-v1" => include_str!("../rules/python-v1.json"),
+        "typescript-v1" => include_str!("../rules/typescript-v1.json"),
+        _ => return Err(format!("unsupported rule pack: {rule_pack}")),
+    })
+}
+
+pub fn registry(rule_pack: &str) -> Result<Registry, String> {
+    let source = registry_json(rule_pack)?;
+    let registry: Registry =
+        serde_json::from_str(source).map_err(|e| format!("invalid embedded registry: {e}"))?;
     if registry.schema_version != 1
-        || registry.language != "rust"
+        || registry.rule_pack != rule_pack
+        || !matches!(registry.language.as_str(), "rust" | "python" | "typescript")
         || registry.catalog.source != "https://refactoring.guru/refactoring/smells"
         || registry.catalog.checked_on != "2026-09-19"
         || registry.catalog.item_count != 23
         || registry.smells.len() != registry.catalog.item_count
     {
-        return Err("invalid embedded Rust catalog".into());
+        return Err(format!("invalid embedded {rule_pack} catalog"));
     }
     let canonical: BTreeSet<_> = [
-        ("long-method", "Long Method", "bloaters", "applicable"),
-        ("large-class", "Large Class", "bloaters", "applicable"),
-        (
-            "primitive-obsession",
-            "Primitive Obsession",
-            "bloaters",
-            "applicable",
-        ),
-        (
-            "long-parameter-list",
-            "Long Parameter List",
-            "bloaters",
-            "applicable",
-        ),
-        ("data-clumps", "Data Clumps", "bloaters", "applicable"),
+        ("long-method", "Long Method", "bloaters"),
+        ("large-class", "Large Class", "bloaters"),
+        ("primitive-obsession", "Primitive Obsession", "bloaters"),
+        ("long-parameter-list", "Long Parameter List", "bloaters"),
+        ("data-clumps", "Data Clumps", "bloaters"),
         (
             "alternative-classes-with-different-interfaces",
             "Alternative Classes with Different Interfaces",
             "object-orientation-abusers",
-            "applicable",
         ),
         (
             "refused-bequest",
             "Refused Bequest",
             "object-orientation-abusers",
-            "not_applicable_native_rust",
         ),
         (
             "switch-statements",
             "Switch Statements",
             "object-orientation-abusers",
-            "applicable",
         ),
         (
             "temporary-field",
             "Temporary Field",
             "object-orientation-abusers",
-            "applicable",
         ),
-        (
-            "divergent-change",
-            "Divergent Change",
-            "change-preventers",
-            "applicable",
-        ),
+        ("divergent-change", "Divergent Change", "change-preventers"),
         (
             "parallel-inheritance-hierarchies",
             "Parallel Inheritance Hierarchies",
             "change-preventers",
-            "not_applicable_native_rust",
         ),
-        (
-            "shotgun-surgery",
-            "Shotgun Surgery",
-            "change-preventers",
-            "applicable",
-        ),
-        ("comments", "Comments", "dispensables", "applicable"),
-        (
-            "duplicate-code",
-            "Duplicate Code",
-            "dispensables",
-            "applicable",
-        ),
-        ("data-class", "Data Class", "dispensables", "applicable"),
-        ("dead-code", "Dead Code", "dispensables", "applicable"),
-        ("lazy-class", "Lazy Class", "dispensables", "applicable"),
+        ("shotgun-surgery", "Shotgun Surgery", "change-preventers"),
+        ("comments", "Comments", "dispensables"),
+        ("duplicate-code", "Duplicate Code", "dispensables"),
+        ("data-class", "Data Class", "dispensables"),
+        ("dead-code", "Dead Code", "dispensables"),
+        ("lazy-class", "Lazy Class", "dispensables"),
         (
             "speculative-generality",
             "Speculative Generality",
             "dispensables",
-            "applicable",
         ),
-        ("feature-envy", "Feature Envy", "couplers", "applicable"),
+        ("feature-envy", "Feature Envy", "couplers"),
         (
             "inappropriate-intimacy",
             "Inappropriate Intimacy",
             "couplers",
-            "applicable",
         ),
         (
             "incomplete-library-class",
             "Incomplete Library Class",
             "couplers",
-            "applicable",
         ),
-        ("message-chains", "Message Chains", "couplers", "applicable"),
-        ("middle-man", "Middle Man", "couplers", "applicable"),
+        ("message-chains", "Message Chains", "couplers"),
+        ("middle-man", "Middle Man", "couplers"),
     ]
     .into_iter()
     .collect();
     let smells: BTreeSet<_> = registry
         .smells
         .iter()
-        .map(|s| {
-            (
-                s.id.as_str(),
-                s.name.as_str(),
-                s.category.as_str(),
-                s.applicability.as_str(),
-            )
-        })
+        .map(|s| (s.id.as_str(), s.name.as_str(), s.category.as_str()))
         .collect();
     let rules: BTreeSet<_> = registry.rules.iter().map(|r| &r.id).collect();
     if smells != canonical || rules.len() != registry.rules.len() {
@@ -249,6 +220,26 @@ pub fn registry() -> Result<Registry, String> {
             }
         }
     }
+    if registry.language == "rust" {
+        let inapplicable: BTreeSet<_> = registry
+            .smells
+            .iter()
+            .filter(|smell| smell.applicability == "not_applicable_native_rust")
+            .map(|smell| smell.id.as_str())
+            .collect();
+        if inapplicable != BTreeSet::from(["parallel-inheritance-hierarchies", "refused-bequest"]) {
+            return Err("invalid native Rust applicability exclusions".into());
+        }
+    } else if registry
+        .smells
+        .iter()
+        .any(|smell| smell.applicability != "applicable")
+    {
+        return Err(format!(
+            "{} catalog must mark every canonical smell applicable",
+            registry.language
+        ));
+    }
     for rule in &registry.rules {
         if rule.version != 1
             || rule.inputs.is_empty()
@@ -269,6 +260,16 @@ pub fn registry() -> Result<Registry, String> {
     Ok(registry)
 }
 
+pub fn registry_for_policy(bytes: &str) -> Result<Registry, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(bytes).map_err(|e| format!("invalid policy: {e}"))?;
+    let rule_pack = value
+        .get("rule_pack")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("policy rule_pack must be a string")?;
+    registry(rule_pack)
+}
+
 pub fn parse(bytes: &str, registry: &Registry) -> Result<Policy, String> {
     let policy: Policy = serde_json::from_str(bytes).map_err(|e| format!("invalid policy: {e}"))?;
     if policy.schema_version != 2 || policy.rule_pack != registry.rule_pack {
@@ -277,10 +278,16 @@ pub fn parse(bytes: &str, registry: &Registry) -> Result<Policy, String> {
     if policy.scanner_version != env!("CARGO_PKG_VERSION") {
         return Err("scanner version does not match policy pin".into());
     }
-    if policy.scope != "authored_all_cfg" {
-        return Err(
-            "only authored_all_cfg scope is implemented; active compiler scope is pending".into(),
-        );
+    let expected_scope = if registry.language == "rust" {
+        "authored_all_cfg"
+    } else {
+        "authored_source"
+    };
+    if policy.scope != expected_scope {
+        return Err(format!(
+            "only {expected_scope} scope is implemented for {}",
+            registry.language
+        ));
     }
     if policy.limits.maximum_files == 0
         || policy.limits.maximum_pairs == 0

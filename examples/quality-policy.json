@@ -3,7 +3,22 @@
   "rule_pack": "rust-v1",
   "scanner_version": "0.1.0",
   "scope": "authored_all_cfg",
-  "exclude_directories": [".git", "target"],
+  "exclude_directories": [
+    ".cache",
+    ".git",
+    ".mypy_cache",
+    ".next",
+    ".pnpm-store",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".tox",
+    ".uv-cache",
+    ".venv",
+    "__pycache__",
+    "coverage",
+    "node_modules",
+    "target"
+  ],
   "limits": {"maximum_files": 10000, "maximum_pairs": 100000, "maximum_group_combinations": 100000},
   "rules": {
     "rust.function_lines": {"version":1,"mode":"required","parameters":{"maximum":100}},

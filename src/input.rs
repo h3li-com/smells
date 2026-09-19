@@ -14,6 +14,11 @@ pub struct Input {
     pub mode: &'static str,
 }
 
+pub struct CapturedInput {
+    pub input: Input,
+    pub registry: Registry,
+}
+
 pub fn digest(parts: &[&[u8]]) -> String {
     let mut hash = Sha256::new();
     for part in parts {
@@ -44,10 +49,21 @@ fn excluded(path: &Path, policy: &Policy) -> bool {
     path.components().any(|c| matches!(c,Component::Normal(s) if policy.exclude_directories.iter().any(|e|s == e.as_str())))
 }
 
+fn source_file(path: &Path, language: &str) -> bool {
+    let extension = path.extension().and_then(|value| value.to_str());
+    match language {
+        "rust" => extension == Some("rs"),
+        "python" => matches!(extension, Some("py" | "pyi")),
+        "typescript" => matches!(extension, Some("ts" | "tsx" | "mts" | "cts")),
+        _ => false,
+    }
+}
+
 fn walk(
     root: &Path,
     dir: &Path,
     policy: &Policy,
+    registry: &Registry,
     files: &mut BTreeMap<String, String>,
 ) -> Result<(), String> {
     let mut entries = fs::read_dir(dir)
@@ -67,11 +83,14 @@ fn walk(
             .file_type()
             .map_err(|e| format!("cannot inspect source entry: {e}"))?;
         if kind.is_symlink() {
-            return Err(format!("symlink in source corpus: {}", relative.display()));
+            if source_file(&path, &registry.language) {
+                return Err(format!("symlink in source corpus: {}", relative.display()));
+            }
+            continue;
         }
         if kind.is_dir() {
-            walk(root, &path, policy, files)?;
-        } else if path.extension().is_some_and(|ext| ext == "rs") {
+            walk(root, &path, policy, registry, files)?;
+        } else if source_file(&path, &registry.language) {
             if files.len() >= policy.limits.maximum_files {
                 return Err("maximum_files budget exceeded".into());
             }
@@ -103,7 +122,7 @@ fn snapshot_digest(files: &BTreeMap<String, String>, policy: &str) -> String {
     digest(&parts)
 }
 
-pub fn working_tree(root: &Path, policy_path: &Path, registry: &Registry) -> Result<Input, String> {
+pub fn working_tree(root: &Path, policy_path: &Path) -> Result<CapturedInput, String> {
     let root = fs::canonicalize(root).map_err(|e| format!("cannot open source root: {e}"))?;
     if !root.is_dir() {
         return Err("--path must be a source directory".into());
@@ -112,21 +131,28 @@ pub fn working_tree(root: &Path, policy_path: &Path, registry: &Registry) -> Res
         fs::read(policy_path).map_err(|e| format!("cannot read policy: {e}"))?,
         "policy",
     )?;
-    let policy = crate::policy::parse(&policy_text, registry)?;
+    let registry = crate::policy::registry_for_policy(&policy_text)?;
+    let policy = crate::policy::parse(&policy_text, &registry)?;
     let mut files = BTreeMap::new();
-    walk(&root, &root, &policy, &mut files)?;
+    walk(&root, &root, &policy, &registry, &mut files)?;
     if files.is_empty() {
-        return Err("source corpus contains no Rust files".into());
+        return Err(format!(
+            "source corpus contains no {} files",
+            registry.language
+        ));
     }
-    Ok(Input {
-        digest: snapshot_digest(&files, &policy_text),
-        files,
-        policy,
-        mode: "working_tree",
+    Ok(CapturedInput {
+        input: Input {
+            digest: snapshot_digest(&files, &policy_text),
+            files,
+            policy,
+            mode: "working_tree",
+        },
+        registry,
     })
 }
 
-pub fn staged(policy_path: &Path, registry: &Registry) -> Result<Input, String> {
+pub fn staged(policy_path: &Path) -> Result<CapturedInput, String> {
     if policy_path
         .components()
         .any(|c| !matches!(c, Component::Normal(_)))
@@ -165,11 +191,12 @@ pub fn staged(policy_path: &Path, registry: &Registry) -> Result<Input, String> 
         return Err("staged policy is not a regular file".into());
     }
     let policy_text = text(git(&root, &["cat-file", "blob", oid])?, name)?;
-    let policy = crate::policy::parse(&policy_text, registry)?;
+    let registry = crate::policy::registry_for_policy(&policy_text)?;
+    let policy = crate::policy::parse(&policy_text, &registry)?;
     let mut files = BTreeMap::new();
     for (name, (mode, oid)) in &entries {
         let path = Path::new(name);
-        if excluded(path, &policy) || path.extension().is_none_or(|ext| ext != "rs") {
+        if excluded(path, &policy) || !source_file(path, &registry.language) {
             continue;
         }
         if name.contains('\\')
@@ -194,12 +221,18 @@ pub fn staged(policy_path: &Path, registry: &Registry) -> Result<Input, String> 
         return Err("Git index changed during snapshot capture".into());
     }
     if files.is_empty() {
-        return Err("staged corpus contains no Rust files".into());
+        return Err(format!(
+            "staged corpus contains no {} files",
+            registry.language
+        ));
     }
-    Ok(Input {
-        digest: snapshot_digest(&files, &policy_text),
-        files,
-        policy,
-        mode: "staged_snapshot",
+    Ok(CapturedInput {
+        input: Input {
+            digest: snapshot_digest(&files, &policy_text),
+            files,
+            policy,
+            mode: "staged_snapshot",
+        },
+        registry,
     })
 }

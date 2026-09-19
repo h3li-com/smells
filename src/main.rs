@@ -1,6 +1,7 @@
 mod input;
 mod patterns;
 mod policy;
+mod portable;
 mod report;
 mod scan;
 
@@ -10,13 +11,18 @@ fn run() -> Result<u8, String> {
     let args: Vec<_> = env::args().skip(1).collect();
     if args.is_empty() || args == ["--help"] {
         println!(
-            "smells check (--path DIR | --staged) --policy FILE [--format table|json]\nsmells contracts validate --policy FILE\nsmells rules"
+            "smells check (--path DIR | --staged) --policy FILE [--format table|json]\nsmells contracts validate --policy FILE\nsmells rules [--rule-pack rust-v1|python-v1|typescript-v1]"
         );
         return Ok(0);
     }
-    let registry = policy::registry()?;
-    if args == ["rules"] {
-        println!("{}", include_str!("../rules/rust-v1.json").trim());
+    if args.first().is_some_and(|argument| argument == "rules") {
+        let rule_pack = match args.as_slice() {
+            [_] => "rust-v1",
+            [_, flag, value] if flag == "--rule-pack" => value,
+            _ => return Err("usage: smells rules [--rule-pack PACK]".into()),
+        };
+        let _registry = policy::registry(rule_pack)?;
+        println!("{}", policy::registry_json(rule_pack)?.trim());
         return Ok(0);
     }
     let contracts = args.starts_with(&["contracts".into(), "validate".into()]);
@@ -54,6 +60,7 @@ fn run() -> Result<u8, String> {
     if contracts {
         let text =
             fs::read_to_string(policy_path).map_err(|e| format!("cannot read policy: {e}"))?;
+        let registry = policy::registry_for_policy(&text)?;
         let _policy = policy::parse(&text, &registry)?;
         println!(
             "{{\"status\":\"valid_contracts\",\"smells\":{},\"rules\":{},\"implemented_source_rules\":{}}}",
@@ -70,12 +77,16 @@ fn run() -> Result<u8, String> {
     if staged == source.is_some() {
         return Err("select exactly one of --staged and --path".into());
     }
-    let input = if staged {
-        input::staged(&policy_path, &registry)?
+    let captured = if staged {
+        input::staged(&policy_path)?
     } else {
-        input::working_tree(&source.unwrap(), &policy_path, &registry)?
+        input::working_tree(&source.unwrap(), &policy_path)?
     };
-    let mut report = scan::check(&input, &registry);
+    let mut report = match captured.registry.language.as_str() {
+        "rust" => scan::check(&captured.input, &captured.registry),
+        "python" | "typescript" => portable::check(&captured.input, &captured.registry),
+        language => return Err(format!("unsupported registry language: {language}")),
+    };
     report.finish();
     if format.as_deref() == Some("json") {
         println!(

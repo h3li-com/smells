@@ -9,4 +9,6 @@ fi
 
 # JSON is intentional: agentic coding environments need the complete actionable
 # finding, including source evidence and the mandatory reference-research gate.
+# quality-policy.json may select rust-v1, python-v1, or typescript-v1. A mixed
+# repository should invoke this command once per checked-in language policy.
 exec smells check --staged --policy quality-policy.json --format json

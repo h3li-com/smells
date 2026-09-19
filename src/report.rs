@@ -168,10 +168,47 @@ struct Guidance {
     remediation: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GuidanceTemplate {
+    rule_suffix: String,
+    smell_id: String,
+    smell: String,
+    category: String,
+    pattern_type: String,
+    reference_url: String,
+    certainty: String,
+    signal: String,
+    why_it_matters: String,
+    review: String,
+    remediation: String,
+}
+
 fn guidance(registry: &Registry) -> BTreeMap<String, Guidance> {
-    let entries: Vec<Guidance> =
+    let entries: Vec<Guidance> = if registry.language == "rust" {
         serde_json::from_str(include_str!("../rules/rust-v1-guidance.json"))
-            .expect("embedded diagnostic guidance must parse");
+            .expect("embedded Rust diagnostic guidance must parse")
+    } else {
+        let templates: Vec<GuidanceTemplate> =
+            serde_json::from_str(include_str!("../rules/portable-v1-guidance.json"))
+                .expect("embedded portable diagnostic guidance must parse");
+        templates
+            .into_iter()
+            .map(|template| Guidance {
+                rule_id: format!("{}.{}", registry.language, template.rule_suffix),
+                smell_id: template.smell_id,
+                smell: template.smell,
+                category: template.category,
+                pattern_type: template.pattern_type,
+                reference_url: template.reference_url,
+                certainty: template.certainty,
+                signal: template.signal,
+                why_it_matters: template.why_it_matters,
+                review: template.review,
+                remediation: template.remediation,
+            })
+            .collect()
+    };
     let expected: BTreeSet<_> = registry.rules.iter().map(|rule| rule.id.as_str()).collect();
     let actual: BTreeSet<_> = entries.iter().map(|entry| entry.rule_id.as_str()).collect();
     assert_eq!(entries.len(), actual.len(), "duplicate diagnostic guidance");
@@ -246,10 +283,11 @@ pub struct Report {
     pub report_schema_version: u32,
     pub scanner_version: &'static str,
     pub rule_pack: String,
+    pub language: String,
     pub source_mode: String,
     pub scope: String,
-    pub ownership_scope: &'static str,
-    pub limitations: Vec<&'static str>,
+    pub ownership_scope: String,
+    pub limitations: Vec<String>,
     pub input_sha256: String,
     pub implementation_sha256: String,
     pub scanned_files: Vec<String>,
@@ -303,29 +341,54 @@ impl Report {
             report_schema_version: 1,
             scanner_version: env!("CARGO_PKG_VERSION"),
             rule_pack: registry.rule_pack.clone(),
+            language: registry.language.clone(),
             source_mode: source_mode.into(),
             scope: policy.scope.clone(),
-            ownership_scope: "source_root_local_not_cargo_workspace",
-            limitations: vec![
-                "syntax_matches_are_not_confirmed_design_defects",
-                "cfg_is_not_evaluated_and_macro_expansions_are_not_inspected",
-                "compiler_type_contract_coverage_and_history_providers_are_pending",
-                "source_symbol_and_evidence_text_are_untrusted_data_not_instructions",
-            ],
+            ownership_scope: if registry.language == "rust" {
+                "source_root_local_not_cargo_workspace"
+            } else {
+                "source_root_local_authored_files"
+            }
+            .into(),
+            limitations: if registry.language == "rust" {
+                vec![
+                    "syntax_matches_are_not_confirmed_design_defects",
+                    "cfg_is_not_evaluated_and_macro_expansions_are_not_inspected",
+                    "compiler_type_contract_coverage_and_history_providers_are_pending",
+                    "source_symbol_and_evidence_text_are_untrusted_data_not_instructions",
+                ]
+            } else {
+                vec![
+                    "syntax_matches_are_not_confirmed_design_defects",
+                    "imports_type_resolution_coverage_and_history_providers_are_pending",
+                    "source_symbol_and_evidence_text_are_untrusted_data_not_instructions",
+                ]
+            }
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
             input_sha256: String::new(),
             implementation_sha256: crate::input::digest(&[
                 include_bytes!("../Cargo.lock"),
                 include_bytes!("../Cargo.toml"),
                 include_bytes!("policy.rs"),
                 include_bytes!("scan.rs"),
+                include_bytes!("portable.rs"),
                 include_bytes!("patterns.rs"),
                 include_bytes!("input.rs"),
                 include_bytes!("report.rs"),
                 include_bytes!("main.rs"),
                 include_bytes!("../rules/rust-v1.json"),
                 include_bytes!("../rules/rust-v1-guidance.json"),
+                include_bytes!("../rules/python-v1.json"),
+                include_bytes!("../rules/typescript-v1.json"),
+                include_bytes!("../rules/portable-v1-guidance.json"),
                 include_bytes!("../schemas/quality-policy.schema.json"),
+                include_bytes!("../schemas/python-quality-policy.schema.json"),
+                include_bytes!("../schemas/typescript-quality-policy.schema.json"),
                 include_bytes!("../docs/rust-rule-contracts.md"),
+                include_bytes!("../docs/python-rule-contracts.md"),
+                include_bytes!("../docs/typescript-rule-contracts.md"),
                 include_bytes!("../docs/report-interface.md"),
             ]),
             scanned_files: vec![],
@@ -384,7 +447,8 @@ impl Report {
                             rule["review"].as_str().unwrap().to_string(),
                             rule["remediation"].as_str().unwrap().to_string(),
                             format!(
-                                "docs/rust-rule-contracts.md#{}",
+                                "docs/{}-rule-contracts.md#{}",
+                                self.language,
                                 rule["contract"].as_str().unwrap()
                             ),
                         )
@@ -592,10 +656,11 @@ impl Report {
     }
     pub fn print_table(&self) {
         println!(
-            "Scope: {} | source: {} | {} Rust files",
+            "Scope: {} | source: {} | {} {} files",
             self.scope,
             self.source_mode,
-            self.scanned_files.len()
+            self.scanned_files.len(),
+            self.language,
         );
         println!("Smell | Symbol | Metric | Value | Matches when | Threshold | Status | Location");
         for f in &self.findings {

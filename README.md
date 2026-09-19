@@ -1,8 +1,14 @@
 # smells
 
-A Rust-first, deterministic source-pattern scanner. Run it over a Rust codebase to report which configured smell patterns match, their locations, measurements, and thresholds. No LLM decides a finding or commit verdict.
+A deterministic, Rust-first source-pattern scanner for Rust, Python, and TypeScript. Run it over a codebase to report which configured smell patterns match, their locations, measurements, and thresholds. No LLM decides a finding or commit verdict.
 
-**Status: first executable source pass.** The versioned registry covers the exact 23-item Refactoring.Guru catalog with 28 rules: 17 source rules are implemented, 11 compiler/type/contract/history rules are pending, and 2 original inheritance smells are inapplicable to native Rust. Runtime validation pins the catalog source, audit date, canonical names, categories and mappings rather than merely counting entries. This is not a complete semantic smell detector or a claim to contain every quality concern that could be called a smell. Pending checks never silently pass.
+**Status: executable authored-source passes.** Every language pack maps the exact 23-item Refactoring.Guru catalog to 28 deterministic rules. `rust-v1` implements 17 source rules, with 11 evidence-dependent rules pending and 2 inheritance smells inapplicable to native Rust. `python-v1` and `typescript-v1` each implement 10 portable source rules and explicitly mark 18 semantic/provider rules pending. Runtime validation pins the catalog source, audit date, canonical names, categories, mappings, and readiness. This is not a claim that syntax alone can prove every semantic smell. Pending checks never silently pass.
+
+| Rule pack | Source files | Implemented source rules | Class model |
+| --- | --- | ---: | --- |
+| `rust-v1` | `.rs` | 17 | `struct`/`enum` state plus all resolved inherent and trait `impl` methods; `trait` is an interface-like contract |
+| `python-v1` | `.py`, `.pyi` | 10 | `class` body state plus direct methods and `self`/`cls` field assignments |
+| `typescript-v1` | `.ts`, `.tsx`, `.mts`, `.cts` | 10 | class/abstract class/expression members, method signatures, and constructor parameter-properties |
 
 ## Run it
 
@@ -10,6 +16,10 @@ A Rust-first, deterministic source-pattern scanner. Run it over a Rust codebase 
 cargo build --locked
 ./target/debug/smells contracts validate --policy examples/quality-policy.json
 ./target/debug/smells check --path tests/fixtures/catalog --policy examples/quality-policy.json --format json
+./target/debug/smells contracts validate --policy examples/python-quality-policy.json
+./target/debug/smells check --path path/to/python --policy examples/python-quality-policy.json --format json
+./target/debug/smells contracts validate --policy examples/typescript-quality-policy.json
+./target/debug/smells check --path path/to/typescript --policy examples/typescript-quality-policy.json --format json
 ```
 
 For another codebase, replace the source directory and policy path. Worktree policy paths are relative to the caller's current directory (or absolute). Reports use corpus-relative source paths, never absolute checkout paths.
@@ -20,15 +30,15 @@ For a consuming Git repository with its policy staged:
 smells check --staged --policy quality-policy.json --format json
 ```
 
-The staged mode captures source and policy from Git index blobs and rejects unstaged policy substitution, source symlinks, unmerged entries, and index changes during capture. It does not execute application code, Cargo builds, or build scripts. The CLI returns 0 when configured required source checks complete and pass, 1 for blocking matches, and 2 for errors. Errors take precedence. Report-only indicators do not block.
+The policy's `rule_pack` selects the language; there is no separate language flag. Worktree traversal never follows symlinks: it rejects symlinks named with the selected language's source extensions and skips other symlinks. The staged mode captures source and policy from Git index blobs and rejects unstaged policy substitution, source symlinks, unmerged entries, and index changes during capture. It does not execute application code, compilers, builds, or build scripts. The CLI returns 0 when configured required source checks complete and pass, 1 for blocking matches, and 2 for errors. Errors take precedence. Report-only indicators do not block.
 
 ## What it detects today
 
-Function size and argument count; type/variant fields, enum variants, aggregated associated functions and lines, and trait functions. Structural indicators cover raw primitive slots, repeated named groups, similar implementations with different interfaces, repeated local enum dispatch, low-use optional fields, comment density, normalized token duplication, data-only/tiny types, and forwarding share.
+All three packs measure function size and argument count. Python and TypeScript additionally measure class fields, direct methods, and summed method lines, and detect repeated named parameter groups, comment density, normalized token duplication, data-only classes, and tiny classes. Rust also measures struct/enum/trait size, aggregates methods from every resolved `impl`, and provides its richer Rust-specific structural indicators.
 
-The implemented scope is **authored_all_cfg**: all parsed Rust source files in the corpus, including tests and inactive conditional branches. It is not the future active-production compiler scope. Local type ownership resolves module paths, imports, re-exports, type aliases, and generic impl targets; it is not a general Rust type checker. Unsupported or ambiguous required measurements error. Expansion-only declarations are outside the source pass.
+Rust uses **authored_all_cfg**: all parsed Rust source files in the corpus, including tests and inactive conditional branches. Python and TypeScript use **authored_source** through pinned Tree-sitter grammars. These are not compiler-selected production scopes. Local Rust ownership resolves module paths, imports, re-exports, type aliases, and generic impl targets; the portable packs do not yet resolve imports or types. Unsupported or ambiguous required measurements error.
 
-See the [rule-by-rule contracts](docs/rust-rule-contracts.md) for exact matching definitions, false-positive boundaries, pending rules, and known limitations. The [finding report interface](docs/report-interface.md) defines how a hook or LLM consumes the canonical smell identity, detector type, checked pattern, thresholds, source excerpts, evidence, risk, review guidance, remediation candidates, and the non-negotiable external research call to the per-rule Refactoring.Guru URL. The [registry](rules/rust-v1.json) records readiness and parameters; the [policy example](examples/quality-policy.json) explicitly selects every rule. The [JSON Schema](schemas/quality-policy.schema.json) validates policy shape; Rust validation additionally checks rule-specific keys, versions, duplicate map keys, and bounds.
+See the exact contracts for [Rust](docs/rust-rule-contracts.md), [Python](docs/python-rule-contracts.md), and [TypeScript](docs/typescript-rule-contracts.md). The [finding report interface](docs/report-interface.md) defines how a hook or LLM consumes smell identity, detector type, thresholds, source excerpts, evidence, review/remediation guidance, and the non-negotiable external research call to the exact per-rule Refactoring.Guru URL. Each pack has a registry, explicit policy example, and JSON Schema; runtime validation additionally checks rule-specific keys, versions, duplicate map keys, and bounds.
 
 ## Reproducibility and validation
 
@@ -40,7 +50,7 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 ```
 
-Tests exercise the public CLI against actual Rust source, including threshold boundaries, matching/nonmatching shapes, cross-file ownership, Unicode/comments/raw strings, replay, staged isolation, symlinks, missing implementations, and errors.
+Tests exercise the public CLI against actual Rust, Python, TypeScript, and TSX source, including class ownership, threshold boundaries, matching/nonmatching shapes, cross-file Rust ownership, replay, staged policy/source isolation, selected-source symlink rejection, non-source symlink skipping, monorepo cache exclusions, pending implementations, and errors.
 
 The opt-in live E2E test runs the example hook in a temporary Git repository with a blocking staged smell, verifies that the hook returns actionable JSON, follows the finding's emitted Refactoring.Guru URL with `curl`, and verifies that the expected smell page and guidance were returned. It requires network access and is ignored by the deterministic default suite:
 
@@ -50,7 +60,7 @@ cargo test --locked --test e2e_live -- --ignored --nocapture
 
 ## Integration and independence
 
-Install the executable separately; consuming applications do not import scanner code. Each project owns its policy. Exact exceptions, active compiler configuration, type-aware evidence, contracts, history, and automatic fixes are not implemented yet. Nonempty exceptions or unsupported policy scope are rejected. If a pending rule is required, the source check exits 2.
+Install the executable separately; consuming applications do not import scanner code. Each policy selects exactly one language pack. A mixed-language repository invokes the scanner once per checked-in language policy, from the same pre-commit runner if desired. Exact exceptions, active compiler configuration, type-aware evidence, contracts, history, and automatic fixes are not implemented yet. Nonempty exceptions or unsupported policy scope are rejected. If a pending rule is required, the source check exits 2.
 
 Keep OSV, Gitleaks, formatting, Clippy, application tests, coverage, and other checks in the consuming project's quality runner. The [hook example](hooks/pre-commit.example) remains uninstalled: validate and pin this source pass for the project's chosen scope before integration. Do not overwrite existing hooks. See [project integration](docs/project-integration.md).
 
