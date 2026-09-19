@@ -909,7 +909,7 @@ fn with_sources(mut report: Report, input: &Input) -> Report {
 }
 
 pub fn check(input: &Input, registry: &Registry) -> Report {
-    let mut report = Report::new(registry, &input.policy, input.mode);
+    let mut report = Report::new(registry, &input.policy, input.mode, &input.implementations);
     report.input_sha256 = input.digest.clone();
     report.scanned_files = input.files.keys().cloned().collect();
     for rule in &registry.rules {

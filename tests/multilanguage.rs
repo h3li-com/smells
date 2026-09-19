@@ -20,13 +20,25 @@ impl Workspace {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir(&path).expect("create workspace");
-        fs::write(path.join(file), source).expect("write source");
+        let source_path = path.join(file);
+        if let Some(parent) = source_path.parent() {
+            fs::create_dir_all(parent).expect("create source parent");
+        }
+        fs::write(source_path, source).expect("write source");
         fs::write(
             path.join("quality-policy.json"),
             serde_json::to_vec(policy).expect("serialize policy"),
         )
         .expect("write policy");
         Self { path }
+    }
+
+    fn source(&self, path: &str, source: &str) {
+        let path = self.path.join(path);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create source parent");
+        }
+        fs::write(path, source).expect("write source");
     }
 
     fn check_path(&self) -> Output {
@@ -43,6 +55,22 @@ impl Workspace {
             .current_dir(&self.path)
             .output()
             .expect("run scanner")
+    }
+
+    fn check_path_table(&self) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_smells"))
+            .args([
+                "check",
+                "--path",
+                ".",
+                "--policy",
+                "quality-policy.json",
+                "--format",
+                "table",
+            ])
+            .current_dir(&self.path)
+            .output()
+            .expect("run scanner table")
     }
 
     fn stage(&self) {
@@ -92,6 +120,24 @@ impl Drop for Workspace {
 
 fn selection(mode: &str, parameters: Value) -> Value {
     json!({"version": 1, "mode": mode, "parameters": parameters})
+}
+
+fn smell_result<'a>(report: &'a Value, smell_id: &str) -> &'a Value {
+    report["smell_results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|result| result["smell_id"] == smell_id)
+        .unwrap_or_else(|| panic!("missing smell result {smell_id}"))
+}
+
+fn implementation_result<'a>(report: &'a Value, implementation_id: &str) -> &'a Value {
+    report["implementation_results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|result| result["implementation_id"] == implementation_id)
+        .unwrap_or_else(|| panic!("missing implementation result {implementation_id}"))
 }
 
 fn portable_policy(language: &str) -> Value {
@@ -312,6 +358,27 @@ fn working_tree_rejects_selected_source_symlinks_for_portable_languages() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn working_tree_rejects_runtime_manifest_symlinks() {
+    use std::os::unix::fs::symlink;
+
+    for (language, source, manifest) in [
+        ("python", "app.py", "pyproject.toml"),
+        ("typescript", "app.ts", "package.json"),
+    ] {
+        let workspace = Workspace::new(source, "", &portable_policy(language));
+        symlink(source, workspace.path.join(manifest)).unwrap();
+        let output = workspace.check_path();
+        assert_eq!(output.status.code(), Some(2));
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("symlink runtime manifest"),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
 #[test]
 fn example_policies_exclude_common_monorepo_caches() {
     let cases = [
@@ -396,6 +463,107 @@ fn python_policy_scans_a_full_directory_through_the_public_cli() {
 }
 
 #[test]
+fn runtime_manifests_partition_monorepo_results_by_repository_implementation() {
+    let workspace = Workspace::new(
+        "scripts/root_task.py",
+        "def root_task():\n    return 1\n",
+        &portable_policy("python"),
+    );
+    workspace.source("backend/pyproject.toml", "[project]\nname='backend'\n");
+    workspace.source("backend/app.py", "def backend():\n    return 1\n");
+    workspace.source("frontend/package.json", r#"{"name":"frontend"}"#);
+    workspace.source(
+        "frontend/generate_fixture.py",
+        "def generate_fixture():\n    return 1\n",
+    );
+    workspace.source("services/voice/pyproject.toml", "[project]\nname='voice'\n");
+    workspace.source("services/voice/main.py", "def voice():\n    return 1\n");
+
+    let output = workspace.check_path();
+    assert_eq!(output.status.code(), Some(0));
+    let data = report(&output);
+    assert_eq!(data["report_schema_version"], 3);
+    assert_eq!(
+        data["implementation_results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|result| result["implementation_id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["backend", "frontend", "services/voice", "__unowned__"]
+    );
+
+    let backend = implementation_result(&data, "backend");
+    assert_eq!(backend["implementation_root"], "backend");
+    assert_eq!(backend["ownership"], "runtime_manifest");
+    assert_eq!(backend["implementation_types"], json!(["python_project"]));
+    assert_eq!(backend["runtime_types"], json!(["python"]));
+    assert_eq!(
+        backend["runtime_manifests"],
+        json!(["backend/pyproject.toml"])
+    );
+    assert_eq!(backend["scanned_files"], 1);
+    assert_eq!(backend["smell_results"].as_array().unwrap().len(), 23);
+
+    let frontend = implementation_result(&data, "frontend");
+    assert_eq!(
+        frontend["implementation_types"],
+        json!(["javascript_typescript_package"])
+    );
+    assert_eq!(frontend["runtime_types"], json!(["javascript_typescript"]));
+    assert_eq!(frontend["scanned_files"], 1);
+
+    let unowned = implementation_result(&data, "__unowned__");
+    assert_eq!(unowned["implementation_root"], Value::Null);
+    assert_eq!(unowned["ownership"], "unowned_source");
+    assert_eq!(unowned["implementation_types"], json!(["unowned_source"]));
+    assert_eq!(unowned["runtime_types"], json!([]));
+    assert_eq!(unowned["runtime_manifests"], json!([]));
+    assert_eq!(unowned["scanned_files"], 1);
+
+    let table = workspace.check_path_table();
+    assert_eq!(table.status.code(), Some(0));
+    let table = String::from_utf8(table.stdout).unwrap();
+    for implementation in ["backend", "frontend", "services/voice", "__unowned__"] {
+        assert!(
+            table.contains(&format!("Implementation: {implementation}")),
+            "{implementation}: {table}"
+        );
+    }
+}
+
+#[test]
+fn nearest_runtime_manifest_owns_sources_in_path_and_staged_scans() {
+    let workspace = Workspace::new(
+        "root.py",
+        "def root():\n    return 1\n",
+        &portable_policy("python"),
+    );
+    workspace.source("package.json", r#"{"name":"repository"}"#);
+    workspace.source("backend/pyproject.toml", "[project]\nname='backend'\n");
+    workspace.source("backend/app.py", "def backend():\n    return 1\n");
+
+    for output in [workspace.check_path(), {
+        workspace.stage();
+        workspace.check_staged()
+    }] {
+        assert_eq!(output.status.code(), Some(0));
+        let data = report(&output);
+        assert_eq!(
+            data["implementation_results"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|result| result["implementation_id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [".", "backend"]
+        );
+        assert_eq!(implementation_result(&data, ".")["scanned_files"], 1);
+        assert_eq!(implementation_result(&data, "backend")["scanned_files"], 1);
+    }
+}
+
+#[test]
 fn python_class_metrics_combine_declared_state_and_owned_methods() {
     let source = r#"class Account:
     def __init__(self, a, b, c):
@@ -438,6 +606,17 @@ fn python_class_metrics_combine_declared_state_and_owned_methods() {
         assert_eq!(finding["blocking"], true);
         assert!(finding["source_excerpt"] != Value::Null);
     }
+    let result = smell_result(&data, "large-class");
+    assert_eq!(result["state"], "blocking_match");
+    assert_eq!(result["matched_findings"], 3);
+    assert_eq!(
+        result["matched_rule_ids"],
+        json!([
+            "python.class_fields",
+            "python.class_method_lines",
+            "python.class_methods"
+        ])
+    );
 }
 
 #[test]
@@ -490,6 +669,17 @@ fn typescript_class_metrics_cover_fields_methods_and_method_lines() {
         assert_eq!(finding["evaluation"]["threshold"], threshold);
         assert_eq!(finding["blocking"], true);
     }
+    let result = smell_result(&data, "large-class");
+    assert_eq!(result["state"], "blocking_match");
+    assert_eq!(result["matched_findings"], 3);
+    assert_eq!(
+        result["matched_rule_ids"],
+        json!([
+            "typescript.class_fields",
+            "typescript.class_method_lines",
+            "typescript.class_methods"
+        ])
+    );
 }
 
 #[test]
@@ -683,6 +873,136 @@ def third(x, y, z):
             true
         );
     }
+}
+
+#[test]
+fn duplicate_budget_counts_only_exactly_pruned_candidates() {
+    let mut source = String::new();
+    for index in 0..450 {
+        source.push_str(&format!("def tiny_{index}():\n    return {index}\n\n"));
+    }
+    source.push_str(
+        r#"def duplicate_a(value):
+    first = value + 1
+    second = first * 2
+    third = second - 3
+    fourth = third / 4
+    return fourth
+
+def duplicate_b(item):
+    alpha = item + 8
+    beta = alpha * 9
+    gamma = beta - 10
+    delta = gamma / 11
+    return delta
+"#,
+    );
+    let mut policy = portable_policy("python");
+    policy["limits"]["maximum_pairs"] = json!(1);
+    require_maximum(&mut policy, "python.function_lines", 100);
+    require(
+        &mut policy,
+        "python.duplicate_functions",
+        json!({"minimum_similarity_basis_points":10000,"minimum_tokens":20}),
+    );
+    let workspace = Workspace::new("large.py", &source, &policy);
+    let output = workspace.check_path();
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let data = report(&output);
+    assert!(data["errors"].as_array().unwrap().is_empty());
+    let duplicate = data["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| {
+            finding["rule_id"] == "python.duplicate_functions"
+                && finding["evaluation"]["matched"] == true
+        })
+        .expect("exact duplicate candidate");
+    assert_eq!(duplicate["symbol"], "duplicate_a");
+    assert_eq!(duplicate["related_symbols"], json!(["duplicate_b"]));
+    let result = smell_result(&data, "duplicate-code");
+    assert_eq!(result["matched_findings"], 1);
+    assert_eq!(result["affected_symbols"], 2);
+}
+
+#[test]
+fn duplicate_budget_still_fails_closed_for_too_many_exact_candidates() {
+    let body = r#"    first = value + 1
+    second = first * 2
+    third = second - 3
+    fourth = third / 4
+    return fourth
+"#;
+    let source =
+        format!("def first(value):\n{body}\ndef second(value):\n{body}\ndef third(value):\n{body}");
+    let mut policy = portable_policy("python");
+    policy["limits"]["maximum_pairs"] = json!(1);
+    require_maximum(&mut policy, "python.function_lines", 100);
+    require(
+        &mut policy,
+        "python.duplicate_functions",
+        json!({"minimum_similarity_basis_points":10000,"minimum_tokens":20}),
+    );
+    let workspace = Workspace::new("duplicates.py", &source, &policy);
+    let output = workspace.check_path();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        report(&output)["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error == "maximum_pairs budget exceeded")
+    );
+}
+
+#[test]
+fn typescript_import_type_generic_calls_parse_without_hiding_other_errors() {
+    let valid = r#"async function emptyCall(importOriginal: any) {
+  return importOriginal<typeof import("reactflow")>()
+}
+"#;
+    let workspace = Workspace::new("valid.tsx", valid, &portable_policy("typescript"));
+    fs::write(
+        workspace.path.join("trailing.ts"),
+        r#"async function trailingCall(importOriginal: any) {
+  return importOriginal<typeof import("module")>("module",)
+}
+"#,
+    )
+    .unwrap();
+    let output = workspace.check_path();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(report(&output)["errors"].as_array().unwrap().is_empty());
+
+    fs::write(
+        workspace.path.join("broken.ts"),
+        r#"async function compatible(importOriginal: any) {
+  await importOriginal<typeof import("module")>()
+}
+function broken( {
+"#,
+    )
+    .unwrap();
+    let output = workspace.check_path();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        report(&output)["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error == "parse error in broken.ts")
+    );
 }
 
 #[test]

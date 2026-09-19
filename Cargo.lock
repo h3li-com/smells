@@ -247,6 +247,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "ra-ap-rustc_lexer",
+ "regex",
  "serde",
  "serde_json",
  "sha2",

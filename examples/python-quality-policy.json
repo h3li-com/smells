@@ -21,7 +21,7 @@
   ],
   "limits": {
     "maximum_files": 10000,
-    "maximum_pairs": 100000,
+    "maximum_pairs": 250000,
     "maximum_group_combinations": 100000
   },
   "rules": {

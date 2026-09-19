@@ -1,7 +1,7 @@
 use crate::policy::{Policy, Registry};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Component, Path, PathBuf},
     process::Command,
@@ -9,9 +9,21 @@ use std::{
 
 pub struct Input {
     pub files: BTreeMap<String, String>,
+    pub implementations: Vec<Implementation>,
     pub policy: Policy,
     pub digest: String,
     pub mode: &'static str,
+}
+
+#[derive(Clone, Debug)]
+pub struct Implementation {
+    pub id: String,
+    pub root: Option<String>,
+    pub ownership: &'static str,
+    pub implementation_types: Vec<String>,
+    pub runtime_types: Vec<String>,
+    pub runtime_manifests: Vec<String>,
+    pub source_files: Vec<String>,
 }
 
 pub struct CapturedInput {
@@ -59,12 +71,100 @@ fn source_file(path: &Path, language: &str) -> bool {
     }
 }
 
+fn runtime_manifest(path: &Path) -> Option<(&'static str, &'static str)> {
+    match path.file_name().and_then(|value| value.to_str()) {
+        Some("Cargo.toml") => Some(("rust_cargo_project", "rust")),
+        Some("pyproject.toml") => Some(("python_project", "python")),
+        Some("package.json") => Some(("javascript_typescript_package", "javascript_typescript")),
+        _ => None,
+    }
+}
+
+#[derive(Default)]
+struct ImplementationBuilder {
+    implementation_types: BTreeSet<String>,
+    runtime_types: BTreeSet<String>,
+    runtime_manifests: Vec<String>,
+    source_files: Vec<String>,
+}
+
+fn implementations(
+    files: &BTreeMap<String, String>,
+    manifests: &BTreeMap<String, String>,
+) -> Vec<Implementation> {
+    let mut builders: BTreeMap<String, ImplementationBuilder> = BTreeMap::new();
+    for manifest in manifests.keys() {
+        let path = Path::new(manifest);
+        let root = path
+            .parent()
+            .and_then(Path::to_str)
+            .unwrap_or_default()
+            .to_string();
+        let (implementation_type, runtime_type) =
+            runtime_manifest(path).expect("captured runtime manifest");
+        let builder = builders.entry(root).or_default();
+        builder
+            .implementation_types
+            .insert(implementation_type.to_string());
+        builder.runtime_types.insert(runtime_type.to_string());
+        builder.runtime_manifests.push(manifest.clone());
+    }
+    let roots: Vec<_> = builders.keys().cloned().collect();
+    let mut unowned = vec![];
+    for file in files.keys() {
+        let path = Path::new(file);
+        let owner = roots
+            .iter()
+            .filter(|root| root.is_empty() || path.starts_with(Path::new(root)))
+            .max_by_key(|root| Path::new(root).components().count());
+        if let Some(root) = owner {
+            builders
+                .get_mut(root)
+                .expect("captured implementation root")
+                .source_files
+                .push(file.clone());
+        } else {
+            unowned.push(file.clone());
+        }
+    }
+    let mut result: Vec<_> = builders
+        .into_iter()
+        .filter(|(_, builder)| !builder.source_files.is_empty())
+        .map(|(root, builder)| Implementation {
+            id: if root.is_empty() {
+                ".".into()
+            } else {
+                root.clone()
+            },
+            root: Some(if root.is_empty() { ".".into() } else { root }),
+            ownership: "runtime_manifest",
+            implementation_types: builder.implementation_types.into_iter().collect(),
+            runtime_types: builder.runtime_types.into_iter().collect(),
+            runtime_manifests: builder.runtime_manifests,
+            source_files: builder.source_files,
+        })
+        .collect();
+    if !unowned.is_empty() {
+        result.push(Implementation {
+            id: "__unowned__".into(),
+            root: None,
+            ownership: "unowned_source",
+            implementation_types: vec!["unowned_source".into()],
+            runtime_types: vec![],
+            runtime_manifests: vec![],
+            source_files: unowned,
+        });
+    }
+    result
+}
+
 fn walk(
     root: &Path,
     dir: &Path,
     policy: &Policy,
     registry: &Registry,
     files: &mut BTreeMap<String, String>,
+    manifests: &mut BTreeMap<String, String>,
 ) -> Result<(), String> {
     let mut entries = fs::read_dir(dir)
         .map_err(|e| format!("cannot enumerate source directory: {e}"))?
@@ -86,14 +186,14 @@ fn walk(
             if source_file(&path, &registry.language) {
                 return Err(format!("symlink in source corpus: {}", relative.display()));
             }
+            if runtime_manifest(&path).is_some() {
+                return Err(format!("symlink runtime manifest: {}", relative.display()));
+            }
             continue;
         }
         if kind.is_dir() {
-            walk(root, &path, policy, registry, files)?;
-        } else if source_file(&path, &registry.language) {
-            if files.len() >= policy.limits.maximum_files {
-                return Err("maximum_files budget exceeded".into());
-            }
+            walk(root, &path, policy, registry, files, manifests)?;
+        } else if source_file(&path, &registry.language) || runtime_manifest(&path).is_some() {
             let name = relative
                 .to_str()
                 .ok_or("source path is not UTF-8")?
@@ -107,15 +207,32 @@ fn walk(
                 fs::read(&path).map_err(|e| format!("cannot read {name}: {e}"))?,
                 &name,
             )?;
+            if runtime_manifest(&path).is_some() {
+                manifests.insert(name, source);
+                continue;
+            }
+            if files.len() >= policy.limits.maximum_files {
+                return Err("maximum_files budget exceeded".into());
+            }
             files.insert(name, source);
         }
     }
     Ok(())
 }
 
-fn snapshot_digest(files: &BTreeMap<String, String>, policy: &str) -> String {
+fn snapshot_digest(
+    files: &BTreeMap<String, String>,
+    manifests: &BTreeMap<String, String>,
+    policy: &str,
+) -> String {
     let mut parts = vec![policy.as_bytes()];
+    for (path, source) in manifests {
+        parts.push(b"runtime_manifest");
+        parts.push(path.as_bytes());
+        parts.push(source.as_bytes());
+    }
     for (path, source) in files {
+        parts.push(b"source");
         parts.push(path.as_bytes());
         parts.push(source.as_bytes());
     }
@@ -134,7 +251,8 @@ pub fn working_tree(root: &Path, policy_path: &Path) -> Result<CapturedInput, St
     let registry = crate::policy::registry_for_policy(&policy_text)?;
     let policy = crate::policy::parse(&policy_text, &registry)?;
     let mut files = BTreeMap::new();
-    walk(&root, &root, &policy, &registry, &mut files)?;
+    let mut manifests = BTreeMap::new();
+    walk(&root, &root, &policy, &registry, &mut files, &mut manifests)?;
     if files.is_empty() {
         return Err(format!(
             "source corpus contains no {} files",
@@ -143,7 +261,8 @@ pub fn working_tree(root: &Path, policy_path: &Path) -> Result<CapturedInput, St
     }
     Ok(CapturedInput {
         input: Input {
-            digest: snapshot_digest(&files, &policy_text),
+            digest: snapshot_digest(&files, &manifests, &policy_text),
+            implementations: implementations(&files, &manifests),
             files,
             policy,
             mode: "working_tree",
@@ -194,9 +313,12 @@ pub fn staged(policy_path: &Path) -> Result<CapturedInput, String> {
     let registry = crate::policy::registry_for_policy(&policy_text)?;
     let policy = crate::policy::parse(&policy_text, &registry)?;
     let mut files = BTreeMap::new();
+    let mut manifests = BTreeMap::new();
     for (name, (mode, oid)) in &entries {
         let path = Path::new(name);
-        if excluded(path, &policy) || !source_file(path, &registry.language) {
+        if excluded(path, &policy)
+            || (!source_file(path, &registry.language) && runtime_manifest(path).is_none())
+        {
             continue;
         }
         if name.contains('\\')
@@ -207,15 +329,21 @@ pub fn staged(policy_path: &Path) -> Result<CapturedInput, String> {
             return Err("non-portable or escaping staged source path".into());
         }
         if !matches!(mode.as_str(), "100644" | "100755") {
-            return Err(format!("staged source is not a regular file: {name}"));
+            return Err(if runtime_manifest(path).is_some() {
+                format!("staged runtime manifest is not a regular file: {name}")
+            } else {
+                format!("staged source is not a regular file: {name}")
+            });
         }
-        if files.len() >= policy.limits.maximum_files {
-            return Err("maximum_files budget exceeded".into());
+        let source = text(git(&root, &["cat-file", "blob", oid])?, name)?;
+        if runtime_manifest(path).is_some() {
+            manifests.insert(name.clone(), source);
+        } else {
+            if files.len() >= policy.limits.maximum_files {
+                return Err("maximum_files budget exceeded".into());
+            }
+            files.insert(name.clone(), source);
         }
-        files.insert(
-            name.clone(),
-            text(git(&root, &["cat-file", "blob", oid])?, name)?,
-        );
     }
     if initial != git(&root, &["ls-files", "--stage", "-z"])? {
         return Err("Git index changed during snapshot capture".into());
@@ -228,7 +356,8 @@ pub fn staged(policy_path: &Path) -> Result<CapturedInput, String> {
     }
     Ok(CapturedInput {
         input: Input {
-            digest: snapshot_digest(&files, &policy_text),
+            digest: snapshot_digest(&files, &manifests, &policy_text),
+            implementations: implementations(&files, &manifests),
             files,
             policy,
             mode: "staged_snapshot",

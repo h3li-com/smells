@@ -4,7 +4,7 @@ This is the normative contract for `python-v1`. It maps the exact 23-item Refact
 
 ## Shared source contract
 
-- The policy selects `python-v1` and `authored_source`. Full scans include `.py` and `.pyi`; staged scans read both policy and source from regular Git-index blobs.
+- The policy selects `python-v1` and `authored_source`. Full scans include `.py` and `.pyi`; staged scans read policy and source from regular Git-index blobs. Both modes also capture `Cargo.toml`, `pyproject.toml`, and `package.json` runtime markers so findings are grouped under the nearest repository implementation before the repository rollup.
 - The locked Tree-sitter Python grammar parses every captured file. Any syntax error makes the scan incomplete. No import execution, module loading, type checker, test runner, or application code is run.
 - A callable is a `function_definition` or `lambda`, including a method and an async definition represented by the function grammar node. Parameters are the named children of `parameters`; `self`, `cls`, defaulted, typed, positional-only, keyword-only, `*args`, and `**kwargs` each count once when represented as one parameter node.
 - Body code lines are distinct zero-based syntax rows occupied by non-comment named leaves inside the body, reported as a count. Blank lines, comment-only rows, and delimiter-only rows are excluded; multiline syntax occupies every row spanned by its leaf.
@@ -52,7 +52,7 @@ Count ordinary Tree-sitter comment rows in the function minus rows also occupied
 <a id="python-duplicate-functions"></a>
 ### `python.duplicate_functions@1`
 
-Normalize Tree-sitter leaf tokens in each body: identifier spellings become `identifier`, literal values become literal-kind tags, comments are removed, and keywords/operators/delimiters retain grammar kinds. Build a multiset of consecutive four-token windows. Both bodies must have at least `minimum_tokens` (default 20); multiset Jaccard must be at least `minimum_similarity_basis_points` (default 8200). Overlapping nested bodies in one file are not compared. The unordered-pair budget is enforced before a successful result.
+Normalize Tree-sitter leaf tokens in each body: identifier spellings become `identifier`, literal values become literal-kind tags, comments are removed, and keywords/operators/delimiters retain grammar kinds. Build a multiset of consecutive four-token windows. Both bodies must have at least `minimum_tokens` (default 20); multiset Jaccard must be at least `minimum_similarity_basis_points` (default 8200). Overlapping nested bodies in one file are not compared. Expand multiset occurrences into globally document-frequency-ordered features, then apply exact Jaccard prefix, size-ratio, and positional-overlap filters. These are necessary conditions, so they cannot remove a threshold-matching pair. `maximum_pairs` counts the remaining unique pairs whose full multiset intersection/union is evaluated; exhaustion errors rather than returning a truncated success.
 
 <a id="python-data-class"></a>
 ### `python.data_class@1`

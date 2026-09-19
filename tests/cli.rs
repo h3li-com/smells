@@ -99,6 +99,24 @@ fn matched(report: &Value, rule: &str) -> bool {
     })
 }
 
+fn smell_result<'a>(report: &'a Value, smell_id: &str) -> &'a Value {
+    report["smell_results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|result| result["smell_id"] == smell_id)
+        .unwrap_or_else(|| panic!("missing smell result {smell_id}"))
+}
+
+fn implementation_result<'a>(report: &'a Value, implementation_id: &str) -> &'a Value {
+    report["implementation_results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|result| result["implementation_id"] == implementation_id)
+        .unwrap_or_else(|| panic!("missing implementation result {implementation_id}"))
+}
+
 #[test]
 fn registry_covers_all_23_smells_and_exposes_readiness() {
     let output = Command::new(env!("CARGO_BIN_EXE_smells"))
@@ -339,6 +357,129 @@ fn catalog_fixture_exercises_every_implemented_rule() {
             );
         }
     }
+}
+
+#[test]
+fn report_aggregates_rule_evidence_by_canonical_smell_pattern() {
+    let workspace = Workspace::new(
+        "struct Account { first: i32, second: i32 } impl Account {\nfn open(&self) {\nlet _ = self.first;\n}\nfn close(&self) {\nlet _ = self.second;\n}\n}",
+    );
+    for pointer in [
+        "/rules/rust.type_fields/parameters/maximum",
+        "/rules/rust.type_functions/parameters/maximum",
+        "/rules/rust.type_function_lines/parameters/maximum",
+    ] {
+        workspace.modify(pointer, json!(0));
+    }
+    workspace.modify("/rules/rust.type_function_lines/mode", json!("report"));
+
+    let output = workspace.check();
+    assert_eq!(output.status.code(), Some(1));
+    let data = report(&output);
+    assert_eq!(data["report_schema_version"], 3);
+    let results = data["smell_results"].as_array().unwrap();
+    assert_eq!(results.len(), 23);
+    assert_eq!(results[0]["smell_id"], "long-method");
+    assert_eq!(results[1]["smell_id"], "large-class");
+
+    let large_class = smell_result(&data, "large-class");
+    assert_eq!(large_class["smell"], "Large Class");
+    assert_eq!(large_class["category"], "bloaters");
+    assert_eq!(large_class["state"], "blocking_match");
+    assert_eq!(
+        large_class["coverage_status"],
+        "measured_defined_source_scope"
+    );
+    assert_eq!(large_class["matched_findings"], 3);
+    assert_eq!(large_class["blocking_findings"], 2);
+    assert_eq!(large_class["review_signals"], 1);
+    assert_eq!(large_class["affected_files"], 1);
+    assert_eq!(large_class["affected_symbols"], 1);
+    assert_eq!(
+        large_class["matched_rule_ids"],
+        json!([
+            "rust.type_fields",
+            "rust.type_function_lines",
+            "rust.type_functions"
+        ])
+    );
+    assert_eq!(
+        large_class["reference_url"],
+        "https://refactoring.guru/smells/large-class"
+    );
+    assert_eq!(large_class["reference_check"]["required"], true);
+    assert_eq!(large_class["reference_check"]["non_negotiable"], true);
+    assert_eq!(
+        large_class["reference_check"]["action"],
+        "perform_external_research_call_to_reference_url"
+    );
+    for index in large_class["matched_finding_indices"].as_array().unwrap() {
+        let finding = &data["findings"][index.as_u64().unwrap() as usize];
+        assert_eq!(finding["smell_id"], "large-class");
+        assert_eq!(finding["evaluation"]["matched"], true);
+    }
+
+    assert_eq!(data["summary"]["matched_smell_patterns"], 1);
+    assert_eq!(data["summary"]["blocking_smell_patterns"], 1);
+    assert_eq!(data["summary"]["review_smell_patterns"], 0);
+    assert_eq!(data["summary"]["matched_smell_ids"], json!(["large-class"]));
+}
+
+#[test]
+fn cargo_manifest_marks_the_repository_rust_implementation() {
+    let workspace = Workspace::new("fn concise() {}");
+    workspace.source("Cargo.toml", "[package]\nname='fixture'\nversion='0.1.0'\n");
+    let output = workspace.check();
+    assert_eq!(output.status.code(), Some(0));
+    let data = report(&output);
+    assert_eq!(data["summary"]["implementations"], 1);
+    assert_eq!(data["summary"]["unowned_files"], 0);
+    let implementation = implementation_result(&data, ".");
+    assert_eq!(implementation["implementation_root"], ".");
+    assert_eq!(implementation["ownership"], "runtime_manifest");
+    assert_eq!(
+        implementation["implementation_types"],
+        json!(["rust_cargo_project"])
+    );
+    assert_eq!(implementation["runtime_types"], json!(["rust"]));
+    assert_eq!(implementation["runtime_manifests"], json!(["Cargo.toml"]));
+    assert_eq!(implementation["scanned_files"], 1);
+}
+
+#[test]
+fn smell_results_distinguish_checked_pending_and_inapplicable_patterns() {
+    let workspace = Workspace::new("fn concise() {}");
+    let output = workspace.check();
+    assert_eq!(output.status.code(), Some(0));
+    let data = report(&output);
+
+    let parameters = smell_result(&data, "long-parameter-list");
+    assert_eq!(parameters["state"], "checked_no_match_in_measured_scope");
+    assert_eq!(
+        parameters["coverage_status"],
+        "measured_defined_source_scope"
+    );
+    assert_eq!(parameters["matched_findings"], 0);
+
+    let long_method = smell_result(&data, "long-method");
+    assert_eq!(long_method["state"], "checked_no_match_in_measured_scope");
+    assert_eq!(
+        long_method["coverage_status"],
+        "measured_with_pending_rules"
+    );
+    assert_eq!(
+        long_method["pending_rule_ids"],
+        json!(["rust.function_crap"])
+    );
+
+    let dead_code = smell_result(&data, "dead-code");
+    assert_eq!(dead_code["state"], "pending");
+    assert_eq!(dead_code["coverage_status"], "pending");
+    assert_eq!(dead_code["pending_rule_ids"], json!(["rust.unused_code"]));
+
+    let refused_bequest = smell_result(&data, "refused-bequest");
+    assert_eq!(refused_bequest["state"], "not_applicable");
+    assert_eq!(refused_bequest["coverage_status"], "not_applicable");
 }
 
 #[test]
@@ -686,6 +827,16 @@ fn required_missing_detectors_error_instead_of_passing() {
                 .any(|error| error.as_str().unwrap().contains(rule)),
             "{rule}"
         );
+        let data = report(&output);
+        let smell_id = catalog["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|definition| definition["id"] == rule)
+            .unwrap()["smell"]
+            .as_str()
+            .unwrap();
+        assert_eq!(smell_result(&data, smell_id)["state"], "error", "{rule}");
     }
 }
 

@@ -3,10 +3,12 @@ use crate::{
     policy::{Policy, Registry},
     report::{Location, Report},
 };
+use regex::Regex;
 use serde_json::json;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
+    sync::OnceLock,
 };
 use tree_sitter::{Language, Node, Parser};
 
@@ -29,6 +31,9 @@ struct ClassFact {
     operations: usize,
 }
 
+type FingerprintFeature<'a> = (&'a [String], usize);
+type FeaturePostings<'a> = BTreeMap<FingerprintFeature<'a>, Vec<(usize, usize)>>;
+
 #[derive(Default)]
 struct Facts {
     functions: Vec<FunctionFact>,
@@ -44,6 +49,46 @@ fn language(path: &str, registry: &Registry) -> Result<Language, String> {
         "typescript" => Ok(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()),
         other => Err(format!("unsupported portable language: {other}")),
     }
+}
+
+fn typescript_parser_compatibility_source(source: &str) -> Option<String> {
+    static IMPORT_TYPE_ARGUMENT: OnceLock<Regex> = OnceLock::new();
+    let expression = IMPORT_TYPE_ARGUMENT.get_or_init(|| {
+        Regex::new(
+            r#"(?x)
+            <\s*typeof\s+import\s*\(\s*
+            (?:"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*')
+            \s*\)\s*>
+            "#,
+        )
+        .expect("fixed TypeScript import-type compatibility regex")
+    });
+    let mut bytes = source.as_bytes().to_vec();
+    let mut changed = false;
+    for matched in expression.find_iter(source) {
+        if source[matched.end()..]
+            .chars()
+            .find(|character| !character.is_whitespace())
+            != Some('(')
+        {
+            continue;
+        }
+        for byte in &mut bytes[matched.start()..matched.end()] {
+            if !matches!(*byte, b'\n' | b'\r') {
+                *byte = b' ';
+            }
+        }
+        bytes[matched.start()] = b'<';
+        bytes[matched.end() - 1] = b'>';
+        if let Some(type_byte) = bytes[matched.start() + 1..matched.end() - 1]
+            .iter_mut()
+            .find(|byte| !matches!(**byte, b'\n' | b'\r'))
+        {
+            *type_byte = b'T';
+        }
+        changed = true;
+    }
+    changed.then(|| String::from_utf8(bytes).expect("spaces preserve UTF-8"))
 }
 
 fn location(path: &str, node: Node<'_>) -> Location {
@@ -733,25 +778,88 @@ fn duplicates(facts: &Facts, policy: &Policy, language: &str, report: &mut Repor
         .iter()
         .map(|function| fingerprint(&function.tokens))
         .collect();
-    let mut comparisons = 0;
-    for left in 0..facts.functions.len() {
-        for right in left + 1..facts.functions.len() {
-            let a = &facts.functions[left];
-            let b = &facts.functions[right];
-            if a.location.path == b.location.path
-                && a.body_range.0 < b.body_range.1
-                && b.body_range.0 < a.body_range.1
-            {
-                continue;
+    let mut frequencies: BTreeMap<FingerprintFeature<'_>, usize> = BTreeMap::new();
+    for (index, counts) in fingerprints.iter().enumerate() {
+        if (facts.functions[index].tokens.len() as u64) < minimum {
+            continue;
+        }
+        for (key, count) in counts {
+            for occurrence in 0..*count {
+                *frequencies.entry((key, occurrence)).or_default() += 1;
             }
+        }
+    }
+    let mut ordered_features = Vec::with_capacity(fingerprints.len());
+    for (index, counts) in fingerprints.iter().enumerate() {
+        if (facts.functions[index].tokens.len() as u64) < minimum {
+            ordered_features.push(Vec::new());
+            continue;
+        }
+        let mut features = counts
+            .iter()
+            .flat_map(|(key, count)| {
+                (0..*count).map(move |occurrence| (key.as_slice(), occurrence))
+            })
+            .collect::<Vec<_>>();
+        features.sort_by(|left, right| {
+            frequencies[left]
+                .cmp(&frequencies[right])
+                .then_with(|| left.cmp(right))
+        });
+        ordered_features.push(features);
+    }
+
+    let mut eligible = (0..facts.functions.len())
+        .filter(|index| !ordered_features[*index].is_empty())
+        .collect::<Vec<_>>();
+    eligible.sort_by_key(|index| (ordered_features[*index].len(), *index));
+    let mut postings = FeaturePostings::new();
+    let mut comparisons = 0;
+    for right in eligible {
+        let right_size = ordered_features[right].len();
+        let right_required_overlap =
+            (similarity as u128 * right_size as u128).div_ceil(10_000) as usize;
+        let right_prefix_length = right_size - right_required_overlap + 1;
+        let mut candidates = BTreeSet::new();
+        for (right_position, feature) in ordered_features[right]
+            .iter()
+            .take(right_prefix_length)
+            .enumerate()
+        {
+            if let Some(entries) = postings.get(feature) {
+                for (left, left_position) in entries {
+                    let a = &facts.functions[*left];
+                    let b = &facts.functions[right];
+                    if a.location.path == b.location.path
+                        && a.body_range.0 < b.body_range.1
+                        && b.body_range.0 < a.body_range.1
+                    {
+                        continue;
+                    }
+                    let left_size = ordered_features[*left].len();
+                    if left_size as u128 * 10_000 < similarity as u128 * right_size as u128 {
+                        continue;
+                    }
+                    let maximum_overlap =
+                        1 + (left_size - left_position - 1).min(right_size - right_position - 1);
+                    let required_overlap = (similarity as u128 * (left_size + right_size) as u128)
+                        .div_ceil(10_000 + similarity as u128);
+                    if (maximum_overlap as u128) < required_overlap {
+                        continue;
+                    }
+                    candidates.insert(*left);
+                }
+            }
+        }
+
+        for left in candidates {
             comparisons += 1;
             if comparisons > policy.limits.maximum_pairs {
                 report.errors.push("maximum_pairs budget exceeded".into());
                 return;
             }
-            if (a.tokens.len() as u64) < minimum || (b.tokens.len() as u64) < minimum {
-                continue;
-            }
+            let a = &facts.functions[left];
+            let b = &facts.functions[right];
             let counts_a = &fingerprints[left];
             let counts_b = &fingerprints[right];
             let keys: BTreeSet<_> = counts_a.keys().chain(counts_b.keys()).collect();
@@ -789,6 +897,17 @@ fn duplicates(facts: &Facts, policy: &Policy, language: &str, report: &mut Repor
             finding.related_symbols.push(second.symbol.clone());
             finding.related_locations.push(second.location.clone());
         }
+
+        for (position, feature) in ordered_features[right]
+            .iter()
+            .take(right_prefix_length)
+            .enumerate()
+        {
+            postings
+                .entry(*feature)
+                .or_default()
+                .push((right, position));
+        }
     }
 }
 
@@ -800,7 +919,7 @@ fn patterns(facts: &Facts, policy: &Policy, language: &str, report: &mut Report)
 }
 
 pub fn check(input: &Input, registry: &Registry) -> Report {
-    let mut report = Report::new(registry, &input.policy, input.mode);
+    let mut report = Report::new(registry, &input.policy, input.mode, &input.implementations);
     report.input_sha256 = input.digest.clone();
     report.scanned_files = input.files.keys().cloned().collect();
     for rule in &registry.rules {
@@ -826,10 +945,19 @@ pub fn check(input: &Input, registry: &Registry) -> Report {
                 .push(format!("cannot load grammar for {path}: {error}"));
             continue;
         }
-        let Some(tree) = parser.parse(source, None) else {
+        let Some(mut tree) = parser.parse(source, None) else {
             report.errors.push(format!("parser cancelled for {path}"));
             continue;
         };
+        if tree.root_node().has_error() && registry.language == "typescript" {
+            if let Some(compatible) = typescript_parser_compatibility_source(source) {
+                let Some(compatible_tree) = parser.parse(&compatible, None) else {
+                    report.errors.push(format!("parser cancelled for {path}"));
+                    continue;
+                };
+                tree = compatible_tree;
+            }
+        }
         if tree.root_node().has_error() {
             report.errors.push(format!("parse error in {path}"));
             continue;
