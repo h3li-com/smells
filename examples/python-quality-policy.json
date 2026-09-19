@@ -146,7 +146,7 @@
       "version": 1,
       "mode": "off",
       "parameters": {
-        "maximum": 30
+        "maximum": 5
       }
     },
     "python.unused_code": {

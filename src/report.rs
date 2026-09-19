@@ -1010,6 +1010,120 @@ impl Report {
             0
         }
     }
+}
+
+fn print_implementation_header(implementation: &ImplementationResult, language: &str) {
+    let implementation_types = implementation.implementation_types.join(",");
+    let runtime_types = implementation.runtime_types.join(",");
+    let runtime_manifests = implementation.runtime_manifests.join(",");
+    println!(
+        "Implementation: {} | root: {} | ownership: {} | types: {} | runtimes: {} | manifests: {} | {} {} files",
+        implementation.implementation_id,
+        implementation
+            .implementation_root
+            .as_deref()
+            .unwrap_or("unowned"),
+        implementation.ownership,
+        if implementation_types.is_empty() {
+            "-"
+        } else {
+            &implementation_types
+        },
+        if runtime_types.is_empty() {
+            "-"
+        } else {
+            &runtime_types
+        },
+        if runtime_manifests.is_empty() {
+            "-"
+        } else {
+            &runtime_manifests
+        },
+        implementation.scanned_files,
+        language,
+    );
+}
+
+fn print_smell_results(implementation: &ImplementationResult) {
+    println!("Smell pattern | Pattern ID | Result | Matches | Blocking | Review | Coverage");
+    for result in &implementation.smell_results {
+        println!(
+            "{} | {} | {} | {} | {} | {} | {}",
+            result.smell,
+            result.smell_id,
+            result.state,
+            result.matched_findings,
+            result.blocking_findings,
+            result.review_signals,
+            result.coverage_status,
+        );
+    }
+}
+
+fn print_matched_findings(
+    report: &Report,
+    implementation: &ImplementationResult,
+    scope: &Implementation,
+) {
+    println!("Matched evidence for {}:", implementation.implementation_id);
+    println!(
+        "Finding | Smell | Repository symbols | Metric | Value | Matches when | Threshold | Status | Repository evidence locations"
+    );
+    for (index, finding) in report.findings.iter().enumerate().filter(|(_, finding)| {
+        finding.evaluation.matched && Report::finding_in_source_files(finding, &scope.source_files)
+    }) {
+        print_finding(index, finding, scope);
+    }
+}
+
+fn print_finding(index: usize, finding: &Finding, scope: &Implementation) {
+    let mut symbols = vec![];
+    let mut locations = vec![];
+    push_table_evidence(
+        &finding.symbol,
+        &finding.location,
+        scope,
+        &mut symbols,
+        &mut locations,
+    );
+    for (symbol, location) in finding
+        .related_symbols
+        .iter()
+        .zip(&finding.related_locations)
+    {
+        push_table_evidence(symbol, location, scope, &mut symbols, &mut locations);
+    }
+    println!(
+        "{} | {} | {} | {} | {} | {} | {} | {} | {}",
+        index,
+        finding.smell,
+        symbols.join(","),
+        finding.evaluation.metric,
+        finding.evaluation.observed,
+        finding.evaluation.match_condition,
+        finding.evaluation.threshold,
+        finding.status,
+        locations.join(",")
+    );
+}
+
+fn push_table_evidence<'a>(
+    symbol: &'a str,
+    location: &Location,
+    scope: &Implementation,
+    symbols: &mut Vec<&'a str>,
+    locations: &mut Vec<String>,
+) {
+    if Report::path_in_source_files(&location.path, Some(&scope.source_files)) {
+        symbols.push(symbol);
+        locations.push(format!(
+            "{}:{}:{}",
+            location.path, location.line, location.column
+        ));
+    }
+}
+
+impl Report {
     pub fn print_table(&self) {
         println!(
             "Scope: {} | source: {} | {} {} files",
@@ -1023,89 +1137,9 @@ impl Report {
             .iter()
             .zip(&self.implementation_scopes)
         {
-            let implementation_types = implementation.implementation_types.join(",");
-            let runtime_types = implementation.runtime_types.join(",");
-            let runtime_manifests = implementation.runtime_manifests.join(",");
-            println!(
-                "Implementation: {} | root: {} | ownership: {} | types: {} | runtimes: {} | manifests: {} | {} {} files",
-                implementation.implementation_id,
-                implementation
-                    .implementation_root
-                    .as_deref()
-                    .unwrap_or("unowned"),
-                implementation.ownership,
-                if implementation_types.is_empty() {
-                    "-"
-                } else {
-                    &implementation_types
-                },
-                if runtime_types.is_empty() {
-                    "-"
-                } else {
-                    &runtime_types
-                },
-                if runtime_manifests.is_empty() {
-                    "-"
-                } else {
-                    &runtime_manifests
-                },
-                implementation.scanned_files,
-                self.language,
-            );
-            println!(
-                "Smell pattern | Pattern ID | Result | Matches | Blocking | Review | Coverage"
-            );
-            for result in &implementation.smell_results {
-                println!(
-                    "{} | {} | {} | {} | {} | {} | {}",
-                    result.smell,
-                    result.smell_id,
-                    result.state,
-                    result.matched_findings,
-                    result.blocking_findings,
-                    result.review_signals,
-                    result.coverage_status,
-                );
-            }
-            println!("Matched evidence for {}:", implementation.implementation_id);
-            println!(
-                "Finding | Smell | Repository symbols | Metric | Value | Matches when | Threshold | Status | Repository evidence locations"
-            );
-            for (index, f) in self.findings.iter().enumerate().filter(|(_, finding)| {
-                finding.evaluation.matched
-                    && Self::finding_in_source_files(finding, &scope.source_files)
-            }) {
-                let mut symbols = vec![];
-                let mut locations = vec![];
-                if Self::path_in_source_files(&f.location.path, Some(&scope.source_files)) {
-                    symbols.push(f.symbol.as_str());
-                    locations.push(format!(
-                        "{}:{}:{}",
-                        f.location.path, f.location.line, f.location.column
-                    ));
-                }
-                for (symbol, location) in f.related_symbols.iter().zip(&f.related_locations) {
-                    if Self::path_in_source_files(&location.path, Some(&scope.source_files)) {
-                        symbols.push(symbol);
-                        locations.push(format!(
-                            "{}:{}:{}",
-                            location.path, location.line, location.column
-                        ));
-                    }
-                }
-                println!(
-                    "{} | {} | {} | {} | {} | {} | {} | {} | {}",
-                    index,
-                    f.smell,
-                    symbols.join(","),
-                    f.evaluation.metric,
-                    f.evaluation.observed,
-                    f.evaluation.match_condition,
-                    f.evaluation.threshold,
-                    f.status,
-                    locations.join(",")
-                );
-            }
+            print_implementation_header(implementation, &self.language);
+            print_smell_results(implementation);
+            print_matched_findings(self, implementation, scope);
         }
         for error in &self.errors {
             eprintln!("ERROR: {error}");

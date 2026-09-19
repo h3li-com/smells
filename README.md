@@ -62,18 +62,22 @@ make pre-commit-push
 
 The shared gate checks formatting, performs a locked all-target Cargo build,
 runs Clippy and tests, scans this repository with `quality-policy.json`, enforces
-the committed CRAP regression baseline, runs Gitleaks, and checks `Cargo.lock`
-with OSV-Scanner. A failing self-scan prints the complete JSON evidence for an
-agent; a passing scan is saved at `target/quality/smells-report.json`.
+the CRAP limits, runs Gitleaks, and checks `Cargo.lock` with OSV-Scanner. A
+failing self-scan prints the complete JSON evidence for an agent; a passing scan
+is saved at `target/quality/smells-report.json`.
 Gitleaks checks both the staged patch and repository history, so the shared gate
 has the correct coverage in both hook contexts.
 
 The toolchain is intentionally pinned by `scripts/check-quality-tools.sh`:
 `cargo-crap 0.5.0`, `cargo-llvm-cov 0.8.7`, Gitleaks 8.30.1, and OSV-Scanner
-2.3.8. The CRAP classification threshold is 30. Existing scores are recorded in
-`.cargo-crap-baseline.json`, and any function-level regression fails the gate.
-On a rustup toolchain, `cargo-llvm-cov` discovers `llvm-tools-preview`; the gate
-also supports the matching Homebrew LLVM installation used by Homebrew Rust.
+2.3.8. CRAP has a required target of 5 and an absolute hard limit of 10. Every
+function above 5 is emitted as an agent-readable annotation with file, line,
+score, complexity, and coverage; any function above 10 blocks the hook. The
+complete report is saved at `target/quality/crap-report.json`, and a blocking
+result includes remediation guidance plus the mandatory Refactoring.Guru Long
+Method research URL. On a rustup toolchain, `cargo-llvm-cov` discovers
+`llvm-tools-preview`; the gate also supports the matching Homebrew LLVM
+installation used by Homebrew Rust.
 
 Tests exercise the public CLI against actual Rust, Python, TypeScript, and TSX source, including class ownership, threshold boundaries, matching/nonmatching shapes, cross-file Rust ownership, replay, staged policy/source isolation, selected-source symlink rejection, non-source symlink skipping, monorepo cache exclusions, pending implementations, and errors.
 

@@ -236,94 +236,172 @@ impl<'ast> Visit<'ast> for FieldUses {
     fn visit_item_fn(&mut self, _: &'ast ItemFn) {}
 }
 
+struct TypeMetrics<'a> {
+    functions: Vec<&'a Function>,
+    receivers: Vec<&'a Function>,
+    operations: usize,
+    lines: usize,
+}
+
+fn type_metrics<'a>(ty: &crate::scan::TypeFacts, facts: &'a Facts) -> TypeMetrics<'a> {
+    let functions: Vec<_> = ty
+        .functions
+        .iter()
+        .map(|index| &facts.functions[*index])
+        .collect();
+    let receivers = functions
+        .iter()
+        .copied()
+        .filter(|function| function.signature.receiver().is_some())
+        .collect();
+    TypeMetrics {
+        operations: functions
+            .iter()
+            .filter(|function| !accessor(function))
+            .count(),
+        lines: functions.iter().map(|function| function.lines).sum(),
+        functions,
+        receivers,
+    }
+}
+
+fn data_class(
+    symbol: &str,
+    ty: &crate::scan::TypeFacts,
+    metrics: &TypeMetrics<'_>,
+    policy: &Policy,
+    report: &mut Report,
+) {
+    let id = "rust.data_class";
+    if !policy.enabled(id) {
+        return;
+    }
+    let minimum = parameter(policy, id, "minimum_fields");
+    let maximum = parameter(policy, id, "maximum_operations");
+    report.finding(
+        policy,
+        id,
+        symbol,
+        &ty.location,
+        "fields and non-accessor operations",
+        json!({"fields":ty.field_count,"operations":metrics.operations}),
+        "fields >= and operations <=",
+        json!({"minimum_fields":minimum,"maximum_operations":maximum}),
+        ty.field_count as u64 >= minimum && metrics.operations as u64 <= maximum,
+        json!({"accessor_definition":"strict_source_shape","enum_fields":"maximum_per_variant"}),
+    );
+}
+
+fn lazy_class(
+    symbol: &str,
+    ty: &crate::scan::TypeFacts,
+    metrics: &TypeMetrics<'_>,
+    policy: &Policy,
+    report: &mut Report,
+) {
+    let id = "rust.lazy_class";
+    if !policy.enabled(id) {
+        return;
+    }
+    let fields = parameter(policy, id, "maximum_fields");
+    let count = parameter(policy, id, "maximum_functions");
+    let code = parameter(policy, id, "maximum_lines");
+    report.finding(
+        policy,
+        id,
+        symbol,
+        &ty.location,
+        "fields/functions/code lines",
+        json!({"fields":ty.field_count,"functions":metrics.functions.len(),"lines":metrics.lines}),
+        "all <=",
+        json!({"maximum_fields":fields,"maximum_functions":count,"maximum_lines":code}),
+        ty.field_count as u64 <= fields
+            && metrics.functions.len() as u64 <= count
+            && metrics.lines as u64 <= code,
+        json!({"scope":"source_authored_members"}),
+    );
+}
+
+fn forwarding_share(
+    symbol: &str,
+    ty: &crate::scan::TypeFacts,
+    metrics: &TypeMetrics<'_>,
+    policy: &Policy,
+    report: &mut Report,
+) {
+    let id = "rust.forwarding_share";
+    if !policy.enabled(id) || metrics.receivers.is_empty() {
+        return;
+    }
+    let forward = metrics
+        .receivers
+        .iter()
+        .filter(|function| forwarding(function))
+        .count();
+    let minimum = parameter(policy, id, "minimum_methods");
+    let share = parameter(policy, id, "minimum_share_percent");
+    report.finding(
+        policy,
+        id,
+        symbol,
+        &ty.location,
+        "syntactic forwarding share",
+        json!({"forwarding":forward,"methods":metrics.receivers.len()}),
+        "methods and share >=",
+        json!({"minimum_methods":minimum,"minimum_share_percent":share}),
+        metrics.receivers.len() as u64 >= minimum
+            && 100_u128 * forward as u128 >= share as u128 * metrics.receivers.len() as u128,
+        json!({"resolved_type_equivalence":"not_checked"}),
+    );
+}
+
+fn field_uses(function: &Function) -> BTreeSet<String> {
+    let mut used = FieldUses::default();
+    if let Some(body) = &function.body {
+        used.visit_block(body);
+    }
+    used.fields
+}
+
+fn temporary_fields(
+    symbol: &str,
+    ty: &crate::scan::TypeFacts,
+    metrics: &TypeMetrics<'_>,
+    policy: &Policy,
+    report: &mut Report,
+) {
+    let id = "rust.temporary_fields";
+    if !policy.enabled(id) || ty.is_enum || metrics.receivers.is_empty() {
+        return;
+    }
+    let uses: Vec<_> = metrics.receivers.iter().map(|f| field_uses(f)).collect();
+    let maximum = parameter(policy, id, "maximum_use_percent");
+    let min_methods = parameter(policy, id, "minimum_methods");
+    let min_fields = parameter(policy, id, "minimum_fields");
+    let fields: Vec<_> = ty
+        .fields
+        .iter()
+        .filter(|(_, ty)| optional(ty))
+        .map(|(name, _)| {
+            let count = uses.iter().filter(|used| used.contains(name)).count();
+            (name, count)
+        })
+        .filter(|(_, count)| {
+            100_u128 * (*count as u128) <= maximum as u128 * metrics.receivers.len() as u128
+        })
+        .collect();
+    report.finding(policy,id,symbol,&ty.location,"low-use optional syntax fields",json!({"fields":fields.len(),"methods":metrics.receivers.len()}),"field/method minima and use <=",
+        json!({"minimum_fields":min_fields,"minimum_methods":min_methods,"maximum_use_percent":maximum}),fields.len() as u64>=min_fields && metrics.receivers.len() as u64>=min_methods,
+        json!({"field_use_counts":fields,"option_interpretation":"spelled_syntax","access_scope":"direct_receiver_projections"}));
+}
+
 fn types(facts: &Facts, policy: &Policy, report: &mut Report) {
     for (symbol, ty) in &facts.types {
-        let functions: Vec<_> = ty.functions.iter().map(|i| &facts.functions[*i]).collect();
-        let receivers: Vec<_> = functions
-            .iter()
-            .copied()
-            .filter(|f| f.signature.receiver().is_some())
-            .collect();
-        let operations = functions.iter().filter(|f| !accessor(f)).count();
-        let lines: usize = functions.iter().map(|f| f.lines).sum();
-        let id = "rust.data_class";
-        if policy.enabled(id) {
-            let minimum = parameter(policy, id, "minimum_fields");
-            let maximum = parameter(policy, id, "maximum_operations");
-            report.finding(policy,id,symbol,&ty.location,"fields and non-accessor operations",json!({"fields":ty.field_count,"operations":operations}),"fields >= and operations <=",
-                json!({"minimum_fields":minimum,"maximum_operations":maximum}),ty.field_count as u64>=minimum && operations as u64<=maximum,
-                json!({"accessor_definition":"strict_source_shape","enum_fields":"maximum_per_variant"}));
-        }
-        let id = "rust.lazy_class";
-        if policy.enabled(id) {
-            let fields = parameter(policy, id, "maximum_fields");
-            let count = parameter(policy, id, "maximum_functions");
-            let code = parameter(policy, id, "maximum_lines");
-            report.finding(
-                policy,
-                id,
-                symbol,
-                &ty.location,
-                "fields/functions/code lines",
-                json!({"fields":ty.field_count,"functions":functions.len(),"lines":lines}),
-                "all <=",
-                json!({"maximum_fields":fields,"maximum_functions":count,"maximum_lines":code}),
-                ty.field_count as u64 <= fields
-                    && functions.len() as u64 <= count
-                    && lines as u64 <= code,
-                json!({"scope":"source_authored_members"}),
-            );
-        }
-        let id = "rust.forwarding_share";
-        if policy.enabled(id) && !receivers.is_empty() {
-            let forward = receivers.iter().filter(|f| forwarding(f)).count();
-            let minimum = parameter(policy, id, "minimum_methods");
-            let share = parameter(policy, id, "minimum_share_percent");
-            report.finding(
-                policy,
-                id,
-                symbol,
-                &ty.location,
-                "syntactic forwarding share",
-                json!({"forwarding":forward,"methods":receivers.len()}),
-                "methods and share >=",
-                json!({"minimum_methods":minimum,"minimum_share_percent":share}),
-                receivers.len() as u64 >= minimum
-                    && 100_u128 * forward as u128 >= share as u128 * receivers.len() as u128,
-                json!({"resolved_type_equivalence":"not_checked"}),
-            );
-        }
-        let id = "rust.temporary_fields";
-        if policy.enabled(id) && !ty.is_enum && !receivers.is_empty() {
-            let uses: Vec<_> = receivers
-                .iter()
-                .map(|f| {
-                    let mut used = FieldUses::default();
-                    if let Some(body) = &f.body {
-                        used.visit_block(body);
-                    }
-                    used.fields
-                })
-                .collect();
-            let maximum = parameter(policy, id, "maximum_use_percent");
-            let min_methods = parameter(policy, id, "minimum_methods");
-            let min_fields = parameter(policy, id, "minimum_fields");
-            let fields: Vec<_> = ty
-                .fields
-                .iter()
-                .filter(|(_, ty)| optional(ty))
-                .map(|(name, _)| {
-                    let count = uses.iter().filter(|used| used.contains(name)).count();
-                    (name, count)
-                })
-                .filter(|(_, count)| {
-                    100_u128 * (*count as u128) <= maximum as u128 * receivers.len() as u128
-                })
-                .collect();
-            report.finding(policy,id,symbol,&ty.location,"low-use optional syntax fields",json!({"fields":fields.len(),"methods":receivers.len()}),"field/method minima and use <=",
-                json!({"minimum_fields":min_fields,"minimum_methods":min_methods,"maximum_use_percent":maximum}),fields.len() as u64>=min_fields && receivers.len() as u64>=min_methods,
-                json!({"field_use_counts":fields,"option_interpretation":"spelled_syntax","access_scope":"direct_receiver_projections"}));
-        }
+        let metrics = type_metrics(ty, facts);
+        data_class(symbol, ty, &metrics, policy, report);
+        lazy_class(symbol, ty, &metrics, policy, report);
+        forwarding_share(symbol, ty, &metrics, policy, report);
+        temporary_fields(symbol, ty, &metrics, policy, report);
     }
 }
 
@@ -448,75 +526,99 @@ fn clumps(facts: &Facts, policy: &Policy, report: &mut Report) {
     }
 }
 
+fn rust_keyword(name: &str) -> bool {
+    matches!(
+        name,
+        "as" | "async"
+            | "await"
+            | "break"
+            | "const"
+            | "continue"
+            | "else"
+            | "enum"
+            | "false"
+            | "fn"
+            | "for"
+            | "if"
+            | "impl"
+            | "in"
+            | "let"
+            | "loop"
+            | "match"
+            | "mod"
+            | "move"
+            | "mut"
+            | "pub"
+            | "ref"
+            | "return"
+            | "self"
+            | "Self"
+            | "static"
+            | "struct"
+            | "super"
+            | "trait"
+            | "true"
+            | "type"
+            | "unsafe"
+            | "use"
+            | "where"
+            | "while"
+            | "yield"
+    )
+}
+
+fn simple_literal_tag(literal: &Lit) -> Option<&'static str> {
+    match literal {
+        Lit::Str(_) => Some("str"),
+        Lit::ByteStr(_) => Some("bytes"),
+        Lit::CStr(_) => Some("cstr"),
+        Lit::Char(_) => Some("char"),
+        Lit::Byte(_) => Some("byte"),
+        _ => None,
+    }
+}
+
+fn numeric_literal_tag(literal: &Lit) -> Option<String> {
+    match literal {
+        Lit::Int(value) => Some(format!("int:{}", value.suffix())),
+        Lit::Float(value) => Some(format!("float:{}", value.suffix())),
+        _ => None,
+    }
+}
+
+fn literal_tag(literal: &proc_macro2::Literal) -> String {
+    let Ok(literal) = syn::parse_str::<Lit>(&literal.to_string()) else {
+        return "other".into();
+    };
+    simple_literal_tag(&literal)
+        .map(str::to_string)
+        .or_else(|| numeric_literal_tag(&literal))
+        .unwrap_or_else(|| "other".into())
+}
+
+fn normalize_token(token: TokenTree, result: &mut Vec<String>) {
+    match token {
+        TokenTree::Group(group) => {
+            result.push(format!("open:{:?}", group.delimiter()));
+            normalized(group.stream(), result);
+            result.push(format!("close:{:?}", group.delimiter()));
+        }
+        TokenTree::Punct(punct) => result.push(format!("punct:{}", punct.as_char())),
+        TokenTree::Ident(ident) => {
+            let name = ident.to_string();
+            result.push(if rust_keyword(&name) {
+                format!("keyword:{name}")
+            } else {
+                "identifier".into()
+            });
+        }
+        TokenTree::Literal(literal) => result.push(format!("literal:{}", literal_tag(&literal))),
+    }
+}
+
 fn normalized(stream: TokenStream, result: &mut Vec<String>) {
     for token in stream {
-        match token {
-            TokenTree::Group(group) => {
-                result.push(format!("open:{:?}", group.delimiter()));
-                normalized(group.stream(), result);
-                result.push(format!("close:{:?}", group.delimiter()));
-            }
-            TokenTree::Punct(punct) => result.push(format!("punct:{}", punct.as_char())),
-            TokenTree::Ident(ident) => {
-                let name = ident.to_string();
-                let keyword = matches!(
-                    name.as_str(),
-                    "as" | "async"
-                        | "await"
-                        | "break"
-                        | "const"
-                        | "continue"
-                        | "else"
-                        | "enum"
-                        | "false"
-                        | "fn"
-                        | "for"
-                        | "if"
-                        | "impl"
-                        | "in"
-                        | "let"
-                        | "loop"
-                        | "match"
-                        | "mod"
-                        | "move"
-                        | "mut"
-                        | "pub"
-                        | "ref"
-                        | "return"
-                        | "self"
-                        | "Self"
-                        | "static"
-                        | "struct"
-                        | "super"
-                        | "trait"
-                        | "true"
-                        | "type"
-                        | "unsafe"
-                        | "use"
-                        | "where"
-                        | "while"
-                        | "yield"
-                );
-                result.push(if keyword {
-                    format!("keyword:{name}")
-                } else {
-                    "identifier".into()
-                });
-            }
-            TokenTree::Literal(literal) => {
-                let tag = match syn::parse_str::<Lit>(&literal.to_string()) {
-                    Ok(Lit::Str(_)) => "str".into(),
-                    Ok(Lit::ByteStr(_)) => "bytes".into(),
-                    Ok(Lit::CStr(_)) => "cstr".into(),
-                    Ok(Lit::Char(_)) => "char".into(),
-                    Ok(Lit::Byte(_)) => "byte".into(),
-                    Ok(Lit::Int(value)) => format!("int:{}", value.suffix()),
-                    Ok(Lit::Float(value)) => format!("float:{}", value.suffix()),
-                    _ => "other".into(),
-                };
-                result.push(format!("literal:{tag}"));
-            }
-        }
+        normalize_token(token, result);
     }
 }
 
@@ -559,27 +661,144 @@ fn interface(function: &Function) -> String {
     )
 }
 
+type Fingerprint = (usize, BTreeMap<Vec<String>, usize>);
+
+fn duplicate_functions(facts: &Facts) -> Vec<&Function> {
+    let mut declarations = BTreeSet::new();
+    facts
+        .functions
+        .iter()
+        .filter(|function| function.body.is_some())
+        .filter(|function| {
+            declarations.insert((
+                &function.location.path,
+                function.location.line,
+                function.location.column,
+            ))
+        })
+        .collect()
+}
+
+fn overlapping_bodies(first: &Function, second: &Function) -> bool {
+    first.location.path == second.location.path
+        && matches!(
+            (first.body_bytes, second.body_bytes),
+            (Some((first_start, first_end)), Some((second_start, second_end)))
+                if first_start < second_end && second_start < first_end
+        )
+}
+
+fn multiset_similarity(
+    first: &BTreeMap<Vec<String>, usize>,
+    second: &BTreeMap<Vec<String>, usize>,
+) -> Option<(usize, usize)> {
+    let keys: BTreeSet<_> = first.keys().chain(second.keys()).collect();
+    let (mut intersection, mut union) = (0, 0);
+    for key in keys {
+        let first_count = *first.get(key).unwrap_or(&0);
+        let second_count = *second.get(key).unwrap_or(&0);
+        intersection += first_count.min(second_count);
+        union += first_count.max(second_count);
+    }
+    (union > 0).then_some((intersection, union))
+}
+
+fn ordered_pair<'a>(
+    first: &'a Function,
+    second: &'a Function,
+    first_size: usize,
+    second_size: usize,
+) -> (&'a Function, &'a Function, [usize; 2]) {
+    if first.symbol <= second.symbol {
+        (first, second, [first_size, second_size])
+    } else {
+        (second, first, [second_size, first_size])
+    }
+}
+
+fn duplicate_rule_applies(
+    id: &str,
+    alternative: &str,
+    first: &Function,
+    second: &Function,
+) -> bool {
+    id != alternative
+        || (first.owner.is_some()
+            && second.owner.is_some()
+            && first.owner != second.owner
+            && interface(first) != interface(second))
+}
+
+struct DuplicateEvidence {
+    token_counts: [usize; 2],
+    intersection: usize,
+    union: usize,
+}
+
+fn report_duplicate(
+    policy: &Policy,
+    id: &str,
+    first: &Function,
+    second: &Function,
+    evidence: &DuplicateEvidence,
+    report: &mut Report,
+) {
+    let minimum = parameter(policy, id, "minimum_tokens");
+    let similarity = parameter(policy, id, "minimum_similarity_basis_points");
+    if evidence.token_counts[0] as u64 >= minimum
+        && evidence.token_counts[1] as u64 >= minimum
+        && evidence.intersection as u128 * 10_000 >= similarity as u128 * evidence.union as u128
+    {
+        report.finding(policy,id,&first.symbol,&first.location,"normalized 4-token multiset Jaccard",json!({"intersection":evidence.intersection,"union":evidence.union}),">=",
+            json!({"minimum_similarity_basis_points":similarity,"minimum_tokens":minimum}),true,
+            json!({"token_counts":evidence.token_counts,"other_location":second.location,"normalization":"syntax_tokens_v1_not_semantic_equivalence"}));
+        let finding = report.findings.last_mut().expect("finding just added");
+        finding.related_symbols.push(second.symbol.clone());
+        finding.related_locations.push(second.location.clone());
+    }
+}
+
+fn compare_duplicates(
+    first: &Function,
+    second: &Function,
+    first_fingerprint: &Fingerprint,
+    second_fingerprint: &Fingerprint,
+    policy: &Policy,
+    report: &mut Report,
+) {
+    let Some((intersection, union)) =
+        multiset_similarity(&first_fingerprint.1, &second_fingerprint.1)
+    else {
+        return;
+    };
+    let (first, second, token_counts) =
+        ordered_pair(first, second, first_fingerprint.0, second_fingerprint.0);
+    let evidence = DuplicateEvidence {
+        token_counts,
+        intersection,
+        union,
+    };
+    for id in ["rust.duplicate_functions", "rust.alternative_interfaces"] {
+        if policy.enabled(id)
+            && duplicate_rule_applies(id, "rust.alternative_interfaces", first, second)
+        {
+            report_duplicate(policy, id, first, second, &evidence, report);
+        }
+    }
+}
+
 fn duplicates(facts: &Facts, policy: &Policy, report: &mut Report) {
     let duplicate = "rust.duplicate_functions";
     let alternative = "rust.alternative_interfaces";
     if !policy.enabled(duplicate) && !policy.enabled(alternative) {
         return;
     }
-    let mut declarations = BTreeSet::new();
-    let functions: Vec<_> = facts
-        .functions
-        .iter()
-        .filter(|f| f.body.is_some())
-        .filter(|f| declarations.insert((&f.location.path, f.location.line, f.location.column)))
-        .collect();
+    let functions = duplicate_functions(facts);
     let fingerprints: Vec<_> = functions.iter().map(|f| fingerprint(f)).collect();
     let mut comparisons = 0;
     for a in 0..functions.len() {
         for b in a + 1..functions.len() {
-            if functions[a].location.path == functions[b].location.path
-                && matches!((functions[a].body_bytes, functions[b].body_bytes),
-                    (Some((start_a,end_a)),Some((start_b,end_b))) if start_a < end_b && start_b < end_a)
-            {
+            if overlapping_bodies(functions[a], functions[b]) {
                 continue;
             }
             comparisons += 1;
@@ -587,84 +806,42 @@ fn duplicates(facts: &Facts, policy: &Policy, report: &mut Report) {
                 report.errors.push("maximum_pairs budget exceeded".into());
                 return;
             }
-            let (size_a, counts_a) = &fingerprints[a];
-            let (size_b, counts_b) = &fingerprints[b];
-            let keys: BTreeSet<_> = counts_a.keys().chain(counts_b.keys()).collect();
-            let mut intersection = 0;
-            let mut union = 0;
-            for key in keys {
-                let a = *counts_a.get(key).unwrap_or(&0);
-                let b = *counts_b.get(key).unwrap_or(&0);
-                intersection += a.min(b);
-                union += a.max(b);
-            }
-            if union == 0 {
-                continue;
-            }
-            let (first, second, ordered_sizes) = if functions[a].symbol <= functions[b].symbol {
-                (functions[a], functions[b], [size_a, size_b])
-            } else {
-                (functions[b], functions[a], [size_b, size_a])
-            };
-            for id in [duplicate, alternative] {
-                if !policy.enabled(id) {
-                    continue;
-                }
-                if id == alternative
-                    && (first.owner.is_none()
-                        || second.owner.is_none()
-                        || first.owner == second.owner
-                        || interface(first) == interface(second))
-                {
-                    continue;
-                }
-                let minimum = parameter(policy, id, "minimum_tokens");
-                let similarity = parameter(policy, id, "minimum_similarity_basis_points");
-                if (*size_a as u64) < minimum
-                    || (*size_b as u64) < minimum
-                    || intersection as u128 * 10_000 < similarity as u128 * union as u128
-                {
-                    continue;
-                }
-                report.finding(policy,id,&first.symbol,&first.location,"normalized 4-token multiset Jaccard",json!({"intersection":intersection,"union":union}),">=",
-                    json!({"minimum_similarity_basis_points":similarity,"minimum_tokens":minimum}),true,
-                    json!({"token_counts":ordered_sizes,"other_location":second.location,"normalization":"syntax_tokens_v1_not_semantic_equivalence"}));
-                report
-                    .findings
-                    .last_mut()
-                    .unwrap()
-                    .related_symbols
-                    .push(second.symbol.clone());
-                report
-                    .findings
-                    .last_mut()
-                    .unwrap()
-                    .related_locations
-                    .push(second.location.clone());
-            }
+            compare_duplicates(
+                functions[a],
+                functions[b],
+                &fingerprints[a],
+                &fingerprints[b],
+                policy,
+                report,
+            );
         }
     }
 }
 
-fn variant_paths(pattern: &Pat, paths: &mut Vec<(Vec<String>, String)>) {
-    let path = match pattern {
+fn variant_path(pattern: &Pat) -> Option<&Path> {
+    match pattern {
         Pat::Path(p) => Some(&p.path),
         Pat::Struct(p) => Some(&p.path),
         Pat::TupleStruct(p) => Some(&p.path),
-        Pat::Or(p) => {
-            for case in &p.cases {
-                variant_paths(case, paths);
-            }
-            None
-        }
         _ => None,
-    };
-    if let Some(path) = path {
-        let mut segments: Vec<_> = path.segments.iter().map(|s| s.ident.to_string()).collect();
-        if segments.len() > 1 {
-            let variant = segments.pop().unwrap();
-            paths.push((segments, variant));
+    }
+}
+
+fn push_variant_path(path: &Path, paths: &mut Vec<(Vec<String>, String)>) {
+    let mut segments: Vec<_> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+    if segments.len() > 1 {
+        let variant = segments.pop().expect("qualified path has a variant");
+        paths.push((segments, variant));
+    }
+}
+
+fn variant_paths(pattern: &Pat, paths: &mut Vec<(Vec<String>, String)>) {
+    if let Pat::Or(pattern) = pattern {
+        for case in &pattern.cases {
+            variant_paths(case, paths);
         }
+    } else if let Some(path) = variant_path(pattern) {
+        push_variant_path(path, paths);
     }
 }
 

@@ -201,7 +201,7 @@ fn portable_policy(language: &str) -> Value {
         "off",
         json!({"minimum_methods": 5, "minimum_share_percent": 80}),
     );
-    add("function_crap", "off", json!({"maximum": 30}));
+    add("function_crap", "off", json!({"maximum": 5}));
     add("unused_code", "off", json!({"maximum_findings": 0}));
     add(
         "unused_type_parameters",

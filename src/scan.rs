@@ -91,34 +91,39 @@ fn clean_path(path: &Path) -> Result<String, String> {
 fn path_attribute(item: &ItemMod) -> Result<Option<String>, String> {
     let mut found = None;
     for attr in &item.attrs {
-        if attr.path().is_ident("cfg_attr") {
-            if let Meta::List(list) = &attr.meta {
-                if mentions_path(list.tokens.clone()) {
-                    return Err("conditional module path requires active-cfg analysis".into());
-                }
-            }
+        if conditional_path_attribute(attr) {
+            return Err("conditional module path requires active-cfg analysis".into());
         }
         if attr.path().is_ident("path") {
-            if let Meta::NameValue(value) = &attr.meta {
-                if let Expr::Lit(ExprLit {
-                    lit: Lit::Str(path),
-                    ..
-                }) = &value.value
-                {
-                    if found.is_some()
-                        || path.value().contains('\\')
-                        || Path::new(&path.value()).is_absolute()
-                    {
-                        return Err("ambiguous or non-portable module path attribute".into());
-                    }
-                    found = Some(path.value());
-                    continue;
-                }
-            }
-            return Err("unsupported module path attribute".into());
+            found = authored_path_attribute(attr, found)?;
         }
     }
     Ok(found)
+}
+
+fn conditional_path_attribute(attribute: &Attribute) -> bool {
+    attribute.path().is_ident("cfg_attr")
+        && matches!(&attribute.meta, Meta::List(list) if mentions_path(list.tokens.clone()))
+}
+
+fn authored_path_attribute(
+    attribute: &Attribute,
+    found: Option<String>,
+) -> Result<Option<String>, String> {
+    let Meta::NameValue(value) = &attribute.meta else {
+        return Err("unsupported module path attribute".into());
+    };
+    let Expr::Lit(ExprLit {
+        lit: Lit::Str(path),
+        ..
+    }) = &value.value
+    else {
+        return Err("unsupported module path attribute".into());
+    };
+    if found.is_some() || path.value().contains('\\') || Path::new(&path.value()).is_absolute() {
+        return Err("ambiguous or non-portable module path attribute".into());
+    }
+    Ok(Some(path.value()))
 }
 
 fn mentions_path(tokens: proc_macro2::TokenStream) -> bool {
@@ -211,111 +216,164 @@ fn imports(
         UseTree::Path(path) => {
             let mut next = prefix.to_vec();
             next.push(path.ident.to_string());
-            imports(&path.tree, &next, result)?;
+            imports(&path.tree, &next, result)
         }
-        UseTree::Group(group) => {
-            for tree in &group.items {
-                imports(tree, prefix, result)?;
-            }
-        }
-        UseTree::Name(name) => {
-            let mut path = prefix.to_vec();
-            let name = name.ident.to_string();
-            let alias = if name == "self" {
-                path.last().cloned().ok_or("invalid self import")?
-            } else {
-                path.push(name.clone());
-                name
-            };
-            if result.insert(alias.clone(), path).is_some() {
-                return Err(format!("ambiguous import binding: {alias}"));
-            }
-        }
-        UseTree::Rename(rename) => {
-            let mut path = prefix.to_vec();
-            if rename.ident != "self" {
-                path.push(rename.ident.to_string());
-            }
-            let alias = rename.rename.to_string();
-            if alias != "_" && result.insert(alias.clone(), path).is_some() {
-                return Err(format!("ambiguous import binding: {alias}"));
-            }
-        }
+        UseTree::Group(group) => import_group(group, prefix, result),
+        UseTree::Name(name) => import_name(name, prefix, result),
+        UseTree::Rename(rename) => import_rename(rename, prefix, result),
         UseTree::Glob(_) => {
             result.insert(format!("*{}", result.len()), prefix.to_vec());
+            Ok(())
         }
     }
-    Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn modules(
-    root: &str,
-    path: &str,
-    key: &str,
-    items: &[Item],
-    base: &Path,
-    attribute_base: &Path,
-    parsed: &BTreeMap<String, syn::File>,
-    stack: &mut Vec<String>,
-    result: &mut BTreeMap<String, Module>,
+fn import_group(
+    group: &UseGroup,
+    prefix: &[String],
+    result: &mut BTreeMap<String, Vec<String>>,
 ) -> Result<(), String> {
-    if stack.len() > 128 || key.strip_prefix(root).unwrap_or(key).matches("::").count() > 128 {
-        return Err("module nesting limit exceeded".into());
+    group
+        .items
+        .iter()
+        .try_for_each(|tree| imports(tree, prefix, result))
+}
+
+fn insert_import(
+    alias: String,
+    path: Vec<String>,
+    result: &mut BTreeMap<String, Vec<String>>,
+) -> Result<(), String> {
+    if result.insert(alias.clone(), path).is_some() {
+        Err(format!("ambiguous import binding: {alias}"))
+    } else {
+        Ok(())
     }
-    let mut bindings = BTreeMap::new();
-    for item in items {
-        if let Item::Use(item) = item {
-            imports(&item.tree, &[], &mut bindings)?;
-        }
+}
+
+fn import_name(
+    name: &UseName,
+    prefix: &[String],
+    result: &mut BTreeMap<String, Vec<String>>,
+) -> Result<(), String> {
+    let mut path = prefix.to_vec();
+    let name = name.ident.to_string();
+    let alias = if name == "self" {
+        path.last().cloned().ok_or("invalid self import")?
+    } else {
+        path.push(name.clone());
+        name
+    };
+    insert_import(alias, path, result)
+}
+
+fn import_rename(
+    rename: &UseRename,
+    prefix: &[String],
+    result: &mut BTreeMap<String, Vec<String>>,
+) -> Result<(), String> {
+    let mut path = prefix.to_vec();
+    if rename.ident != "self" {
+        path.push(rename.ident.to_string());
     }
-    if result
-        .insert(
-            key.into(),
-            Module {
-                key: key.into(),
-                root: root.into(),
-                path: path.into(),
-                items: items.to_vec(),
-                imports: bindings,
-            },
-        )
-        .is_some()
-    {
-        return Err(format!(
-            "ambiguous authored module: {key}; active-cfg analysis is not implemented"
-        ));
+    let alias = rename.rename.to_string();
+    if alias == "_" {
+        Ok(())
+    } else {
+        insert_import(alias, path, result)
     }
-    for item in items {
-        if let Item::Mod(module) = item {
-            let next_key = format!("{key}::{}", module.ident);
-            if let Some((_, items)) = &module.content {
-                let next = inline_base(module, base, attribute_base)?;
-                modules(
-                    root, path, &next_key, items, &next, &next, parsed, stack, result,
-                )?;
-            } else {
-                let next_path = module_file(module, base, attribute_base, parsed)?;
-                if stack.contains(&next_path) {
-                    return Err(format!("cyclic module source: {next_path}"));
-                }
-                stack.push(next_path.clone());
-                modules(
-                    root,
-                    &next_path,
-                    &next_key,
-                    &parsed[&next_path].items,
-                    &file_base(&next_path),
-                    Path::new(&next_path).parent().unwrap_or(Path::new("")),
-                    parsed,
-                    stack,
-                    result,
-                )?;
-                stack.pop();
+}
+
+struct ModuleWalker<'a> {
+    root: &'a str,
+    parsed: &'a BTreeMap<String, syn::File>,
+    stack: Vec<String>,
+    result: &'a mut BTreeMap<String, Module>,
+}
+
+impl ModuleWalker<'_> {
+    fn bindings(items: &[Item]) -> Result<BTreeMap<String, Vec<String>>, String> {
+        let mut bindings = BTreeMap::new();
+        for item in items {
+            if let Item::Use(item) = item {
+                imports(&item.tree, &[], &mut bindings)?;
             }
         }
+        Ok(bindings)
     }
-    Ok(())
+
+    fn insert(&mut self, path: &str, key: &str, items: &[Item]) -> Result<(), String> {
+        let module = Module {
+            key: key.into(),
+            root: self.root.into(),
+            path: path.into(),
+            items: items.to_vec(),
+            imports: Self::bindings(items)?,
+        };
+        if self.result.insert(key.into(), module).is_some() {
+            Err(format!(
+                "ambiguous authored module: {key}; active-cfg analysis is not implemented"
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn visit_child(
+        &mut self,
+        module: &ItemMod,
+        path: &str,
+        key: &str,
+        base: &Path,
+        attribute_base: &Path,
+    ) -> Result<(), String> {
+        let next_key = format!("{key}::{}", module.ident);
+        if let Some((_, items)) = &module.content {
+            let next = inline_base(module, base, attribute_base)?;
+            return self.visit(path, &next_key, items, &next, &next);
+        }
+        let next_path = module_file(module, base, attribute_base, self.parsed)?;
+        if self.stack.contains(&next_path) {
+            return Err(format!("cyclic module source: {next_path}"));
+        }
+        self.stack.push(next_path.clone());
+        let result = self.visit(
+            &next_path,
+            &next_key,
+            &self.parsed[&next_path].items,
+            &file_base(&next_path),
+            Path::new(&next_path).parent().unwrap_or(Path::new("")),
+        );
+        self.stack.pop();
+        result
+    }
+
+    fn visit(
+        &mut self,
+        path: &str,
+        key: &str,
+        items: &[Item],
+        base: &Path,
+        attribute_base: &Path,
+    ) -> Result<(), String> {
+        if self.stack.len() > 128
+            || key
+                .strip_prefix(self.root)
+                .unwrap_or(key)
+                .matches("::")
+                .count()
+                > 128
+        {
+            return Err("module nesting limit exceeded".into());
+        }
+        self.insert(path, key, items)?;
+        for item in items {
+            if let Item::Mod(module) = item {
+                self.visit_child(module, path, key, base, attribute_base)?;
+            }
+        }
+        Ok(())
+    }
 }
 
 fn body_counts(source: &str, body: &Block) -> Result<(usize, usize), String> {
@@ -370,150 +428,201 @@ fn field_slots(symbol: &str, path: &str, span: Span, fields: &Fields) -> Slots {
     }
 }
 
+fn insert_type(
+    facts: &mut Facts,
+    key: String,
+    ty: TypeFacts,
+    message: String,
+) -> Result<(), String> {
+    if facts.types.insert(key, ty).is_some() {
+        Err(message)
+    } else {
+        Ok(())
+    }
+}
+
+fn struct_declaration(
+    facts: &mut Facts,
+    module: &Module,
+    item: &ItemStruct,
+    policy: &Policy,
+    report: &mut Report,
+) -> Result<(), String> {
+    let key = format!("{}::{}", module.key, item.ident);
+    let loc = location(&module.path, item.ident.span());
+    report.maximum(
+        policy,
+        "rust.type_fields",
+        &key,
+        &loc,
+        item.fields.len(),
+        "declared fields",
+    );
+    facts.slots.push(field_slots(
+        &key,
+        &module.path,
+        item.ident.span(),
+        &item.fields,
+    ));
+    let fields = item
+        .fields
+        .iter()
+        .enumerate()
+        .map(|(index, field)| {
+            (
+                field
+                    .ident
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or(index.to_string()),
+                field.ty.clone(),
+            )
+        })
+        .collect();
+    insert_type(
+        facts,
+        key.clone(),
+        TypeFacts {
+            location: loc,
+            fields,
+            field_count: item.fields.len(),
+            is_enum: false,
+            variants: BTreeSet::new(),
+            functions: vec![],
+        },
+        format!("ambiguous authored type: {key}; active-cfg analysis is pending"),
+    )
+}
+
+fn enum_declaration(
+    facts: &mut Facts,
+    module: &Module,
+    item: &ItemEnum,
+    policy: &Policy,
+    report: &mut Report,
+) -> Result<(), String> {
+    let key = format!("{}::{}", module.key, item.ident);
+    let loc = location(&module.path, item.ident.span());
+    report.maximum(
+        policy,
+        "rust.enum_variants",
+        &key,
+        &loc,
+        item.variants.len(),
+        "declared variants",
+    );
+    for variant in &item.variants {
+        let name = format!("{key}::{}", variant.ident);
+        let variant_location = location(&module.path, variant.ident.span());
+        report.maximum(
+            policy,
+            "rust.type_fields",
+            &name,
+            &variant_location,
+            variant.fields.len(),
+            "declared variant fields",
+        );
+        facts.slots.push(field_slots(
+            &name,
+            &module.path,
+            variant.ident.span(),
+            &variant.fields,
+        ));
+    }
+    insert_type(
+        facts,
+        key.clone(),
+        TypeFacts {
+            location: loc,
+            fields: vec![],
+            field_count: item
+                .variants
+                .iter()
+                .map(|variant| variant.fields.len())
+                .max()
+                .unwrap_or(0),
+            is_enum: true,
+            variants: item
+                .variants
+                .iter()
+                .map(|variant| variant.ident.to_string())
+                .collect(),
+            functions: vec![],
+        },
+        format!("ambiguous authored type: {key}"),
+    )
+}
+
+fn type_alias(facts: &mut Facts, module: &Module, item: &ItemType) -> Result<(), String> {
+    let key = format!("{}::{}", module.key, item.ident);
+    if facts
+        .aliases
+        .insert(key.clone(), (module.key.clone(), (*item.ty).clone()))
+        .is_some()
+    {
+        Err(format!("ambiguous type alias: {key}"))
+    } else {
+        Ok(())
+    }
+}
+
+fn trait_declaration(module: &Module, item: &ItemTrait, policy: &Policy, report: &mut Report) {
+    let key = format!("{}::{}", module.key, item.ident);
+    let loc = location(&module.path, item.ident.span());
+    report.maximum(
+        policy,
+        "rust.trait_functions",
+        &key,
+        &loc,
+        item.items
+            .iter()
+            .filter(|member| matches!(member, TraitItem::Fn(_)))
+            .count(),
+        "trait associated functions",
+    );
+}
+
+fn declaration(
+    facts: &mut Facts,
+    module: &Module,
+    item: &Item,
+    policy: &Policy,
+    report: &mut Report,
+) -> Result<(), String> {
+    match item {
+        Item::Struct(item) => struct_declaration(facts, module, item, policy, report),
+        Item::Enum(item) => enum_declaration(facts, module, item, policy, report),
+        Item::Type(item) => type_alias(facts, module, item),
+        Item::Trait(item) => {
+            trait_declaration(module, item, policy, report);
+            Ok(())
+        }
+        Item::Verbatim(_) => Err(format!("unsupported item syntax in {}", module.path)),
+        _ => Ok(()),
+    }
+}
+
 fn declarations(facts: &mut Facts, policy: &Policy, report: &mut Report) -> Result<(), String> {
-    for module in facts.modules.values() {
+    let modules: Vec<_> = facts.modules.values().cloned().collect();
+    for module in &modules {
         for item in &module.items {
-            match item {
-                Item::Struct(item) => {
-                    let key = format!("{}::{}", module.key, item.ident);
-                    let loc = location(&module.path, item.ident.span());
-                    report.maximum(
-                        policy,
-                        "rust.type_fields",
-                        &key,
-                        &loc,
-                        item.fields.len(),
-                        "declared fields",
-                    );
-                    facts.slots.push(field_slots(
-                        &key,
-                        &module.path,
-                        item.ident.span(),
-                        &item.fields,
-                    ));
-                    let fields = item
-                        .fields
-                        .iter()
-                        .enumerate()
-                        .map(|(i, f)| {
-                            (
-                                f.ident
-                                    .as_ref()
-                                    .map(ToString::to_string)
-                                    .unwrap_or(i.to_string()),
-                                f.ty.clone(),
-                            )
-                        })
-                        .collect();
-                    if facts
-                        .types
-                        .insert(
-                            key.clone(),
-                            TypeFacts {
-                                location: loc,
-                                fields,
-                                field_count: item.fields.len(),
-                                is_enum: false,
-                                variants: BTreeSet::new(),
-                                functions: vec![],
-                            },
-                        )
-                        .is_some()
-                    {
-                        return Err(format!(
-                            "ambiguous authored type: {key}; active-cfg analysis is pending"
-                        ));
-                    }
-                }
-                Item::Enum(item) => {
-                    let key = format!("{}::{}", module.key, item.ident);
-                    let loc = location(&module.path, item.ident.span());
-                    report.maximum(
-                        policy,
-                        "rust.enum_variants",
-                        &key,
-                        &loc,
-                        item.variants.len(),
-                        "declared variants",
-                    );
-                    for variant in &item.variants {
-                        let name = format!("{key}::{}", variant.ident);
-                        let loc = location(&module.path, variant.ident.span());
-                        report.maximum(
-                            policy,
-                            "rust.type_fields",
-                            &name,
-                            &loc,
-                            variant.fields.len(),
-                            "declared variant fields",
-                        );
-                        facts.slots.push(field_slots(
-                            &name,
-                            &module.path,
-                            variant.ident.span(),
-                            &variant.fields,
-                        ));
-                    }
-                    if facts
-                        .types
-                        .insert(
-                            key.clone(),
-                            TypeFacts {
-                                location: loc,
-                                fields: vec![],
-                                field_count: item
-                                    .variants
-                                    .iter()
-                                    .map(|v| v.fields.len())
-                                    .max()
-                                    .unwrap_or(0),
-                                is_enum: true,
-                                variants: item
-                                    .variants
-                                    .iter()
-                                    .map(|variant| variant.ident.to_string())
-                                    .collect(),
-                                functions: vec![],
-                            },
-                        )
-                        .is_some()
-                    {
-                        return Err(format!("ambiguous authored type: {key}"));
-                    }
-                }
-                Item::Type(item) => {
-                    let key = format!("{}::{}", module.key, item.ident);
-                    if facts
-                        .aliases
-                        .insert(key.clone(), (module.key.clone(), (*item.ty).clone()))
-                        .is_some()
-                    {
-                        return Err(format!("ambiguous type alias: {key}"));
-                    }
-                }
-                Item::Trait(item) => {
-                    let key = format!("{}::{}", module.key, item.ident);
-                    let loc = location(&module.path, item.ident.span());
-                    report.maximum(
-                        policy,
-                        "rust.trait_functions",
-                        &key,
-                        &loc,
-                        item.items
-                            .iter()
-                            .filter(|i| matches!(i, TraitItem::Fn(_)))
-                            .count(),
-                        "trait associated functions",
-                    );
-                }
-                Item::Verbatim(_) => {
-                    return Err(format!("unsupported item syntax in {}", module.path));
-                }
-                _ => {}
-            }
+            declaration(facts, module, item, policy, report)?;
         }
     }
     Ok(())
+}
+
+enum OwnerLookup {
+    Missing,
+    Resolved(Option<String>),
+}
+
+enum ResolutionStart {
+    Continue {
+        prefix: String,
+        remaining: Vec<String>,
+    },
+    Resolved(Option<String>),
 }
 
 impl Facts {
@@ -548,111 +657,175 @@ impl Facts {
     ) -> Result<Option<String>, String> {
         self.resolve_bounded(path, module, depth, &mut 0)
     }
-    fn resolve_bounded(
+
+    fn super_prefix(
+        &self,
+        path: &[String],
+        module: &str,
+        source_root: &str,
+    ) -> Result<(String, usize), String> {
+        let consumed = path
+            .iter()
+            .position(|part| part != "super")
+            .unwrap_or(path.len());
+        let prefix = (0..consumed).try_fold(module.to_string(), |prefix, _| {
+            parent_module(&prefix, source_root, module)
+        })?;
+        Ok((prefix, consumed))
+    }
+
+    fn resolution_start(
         &self,
         path: &[String],
         module: &str,
         depth: usize,
         visits: &mut usize,
-    ) -> Result<Option<String>, String> {
-        *visits += 1;
-        if depth > 64 || *visits > 4096 {
-            return Err(format!("owner resolution cycle/budget in {module}"));
-        }
+    ) -> Result<ResolutionStart, String> {
         let context = &self.modules[module];
-        let Some(first) = path.first() else {
-            return Err("empty type path".into());
-        };
-        let (prefix, remaining) = match first.as_str() {
-            "crate" => (context.root.clone(), &path[1..]),
-            "self" => (module.to_string(), &path[1..]),
-            "super" => {
-                let mut prefix = module.to_string();
-                let mut n = 0;
-                while path.get(n).is_some_and(|s| s == "super") {
-                    if prefix == context.root {
-                        return Err(format!("super escapes source root: {module}"));
-                    }
-                    prefix = prefix
-                        .rsplit_once("::")
-                        .ok_or("invalid module parent")?
-                        .0
-                        .into();
-                    n += 1;
-                }
-                (prefix, &path[n..])
-            }
+        let first = path.first().ok_or("empty type path")?;
+        let (prefix, consumed) = match first.as_str() {
+            "crate" => (context.root.clone(), 1),
+            "self" => (module.to_string(), 1),
+            "super" => self.super_prefix(path, module, &context.root)?,
             _ => {
                 if let Some(import) = context.imports.get(first) {
                     let mut next = import.clone();
                     next.extend_from_slice(&path[1..]);
-                    return self.resolve_bounded(&next, module, depth + 1, visits);
+                    return self
+                        .resolve_bounded(&next, module, depth + 1, visits)
+                        .map(ResolutionStart::Resolved);
                 }
-                (module.to_string(), path)
+                (module.to_string(), 0)
             }
         };
-        let key = format!("{prefix}::{}", remaining.join("::"));
-        if self.types.contains_key(&key) {
-            return Ok(Some(key));
+        Ok(ResolutionStart::Continue {
+            prefix,
+            remaining: path[consumed..].to_vec(),
+        })
+    }
+
+    fn exact_owner(
+        &self,
+        key: &str,
+        depth: usize,
+        visits: &mut usize,
+    ) -> Result<OwnerLookup, String> {
+        if self.types.contains_key(key) {
+            return Ok(OwnerLookup::Resolved(Some(key.to_string())));
         }
-        if let Some((module, alias)) = self.aliases.get(&key) {
-            return match alias {
-                Type::Path(path) if path.qself.is_none() => self.resolve_bounded(
+        let Some((module, alias)) = self.aliases.get(key) else {
+            return Ok(OwnerLookup::Missing);
+        };
+        match alias {
+            Type::Path(path) if path.qself.is_none() => self
+                .resolve_bounded(
                     &path
                         .path
                         .segments
                         .iter()
-                        .map(|s| s.ident.to_string())
+                        .map(|segment| segment.ident.to_string())
                         .collect::<Vec<_>>(),
                     module,
                     depth + 1,
                     visits,
-                ),
-                _ => Ok(None),
-            };
+                )
+                .map(OwnerLookup::Resolved),
+            _ => Ok(OwnerLookup::Resolved(None)),
         }
-        let mut parent = prefix;
+    }
+
+    fn imported_owner(
+        &self,
+        prefix: &str,
+        remaining: &[String],
+        depth: usize,
+        visits: &mut usize,
+    ) -> Result<(OwnerLookup, String), String> {
+        let mut parent = prefix.to_string();
         for (index, part) in remaining.iter().enumerate() {
             if let Some(import) = self.modules.get(&parent).and_then(|m| m.imports.get(part)) {
                 let mut next = import.clone();
                 next.extend_from_slice(&remaining[index + 1..]);
-                return self.resolve_bounded(&next, &parent, depth + 1, visits);
+                let owner = self.resolve_bounded(&next, &parent, depth + 1, visits)?;
+                return Ok((OwnerLookup::Resolved(owner), parent));
             }
             if index + 1 < remaining.len() {
                 parent = format!("{parent}::{part}");
             }
         }
-        let mut matches = vec![];
-        if let Some(context) = self.modules.get(&parent) {
-            for (name, import) in &context.imports {
-                if name.starts_with('*') {
-                    let mut candidate = import.clone();
-                    candidate.push(remaining.last().ok_or("empty resolved type path")?.clone());
-                    match self.resolve_bounded(&candidate, &parent, depth + 1, visits) {
-                        Ok(Some(owner)) => matches.push(owner),
-                        Err(error)
-                            if error.contains("cycle/budget") || error.starts_with("ambiguous") =>
-                        {
-                            return Err(error);
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
+        Ok((OwnerLookup::Missing, parent))
+    }
+
+    fn glob_owner(
+        &self,
+        parent: &str,
+        remaining: &[String],
+        module: &str,
+        original: &[String],
+        depth: usize,
+        visits: &mut usize,
+    ) -> Result<Option<String>, String> {
+        let leaf = remaining.last().ok_or("empty resolved type path")?;
+        let mut matches = self.glob_matches(parent, leaf, depth, visits)?;
         matches.sort();
         matches.dedup();
         if matches.len() > 1 {
             return Err(format!(
                 "ambiguous glob owner in {module}: {}",
-                path.join("::")
+                original.join("::")
             ));
         }
-        if let Some(owner) = matches.pop() {
-            return Ok(Some(owner));
+        Ok(matches.pop())
+    }
+
+    fn glob_matches(
+        &self,
+        parent: &str,
+        leaf: &str,
+        depth: usize,
+        visits: &mut usize,
+    ) -> Result<Vec<String>, String> {
+        let mut matches = vec![];
+        let Some(context) = self.modules.get(parent) else {
+            return Ok(matches);
+        };
+        for (name, import) in &context.imports {
+            if name.starts_with('*')
+                && let Some(owner) = self.glob_match(import, leaf, parent, depth, visits)?
+            {
+                matches.push(owner);
+            }
         }
+        Ok(matches)
+    }
+
+    fn glob_match(
+        &self,
+        import: &[String],
+        leaf: &str,
+        parent: &str,
+        depth: usize,
+        visits: &mut usize,
+    ) -> Result<Option<String>, String> {
+        let mut candidate = import.to_vec();
+        candidate.push(leaf.to_string());
+        match self.resolve_bounded(&candidate, parent, depth + 1, visits) {
+            Ok(owner) => Ok(owner),
+            Err(error) if error.contains("cycle/budget") || error.starts_with("ambiguous") => {
+                Err(error)
+            }
+            Err(_) => Ok(None),
+        }
+    }
+
+    fn unresolved_owner(
+        &self,
+        first: &str,
+        path: &[String],
+        module: &str,
+    ) -> Result<Option<String>, String> {
         let primitive = matches!(
-            first.as_str(),
+            first,
             "bool"
                 | "char"
                 | "str"
@@ -671,10 +844,10 @@ impl Facts {
                 | "f32"
                 | "f64"
         );
-        let external = matches!(first.as_str(), "std" | "core" | "alloc")
+        let external = matches!(first, "std" | "core" | "alloc")
             || (path.len() > 1
                 && !self.modules.contains_key(&format!("{module}::{first}"))
-                && !matches!(first.as_str(), "crate" | "self" | "super"));
+                && !matches!(first, "crate" | "self" | "super"));
         if primitive || external {
             Ok(None)
         } else {
@@ -683,6 +856,71 @@ impl Facts {
                 path.join("::")
             ))
         }
+    }
+
+    fn resolved_owner(
+        &self,
+        prefix: &str,
+        remaining: &[String],
+        module: &str,
+        original: &[String],
+        depth: usize,
+        visits: &mut usize,
+    ) -> Result<OwnerLookup, String> {
+        let key = format!("{prefix}::{}", remaining.join("::"));
+        if let OwnerLookup::Resolved(owner) = self.exact_owner(&key, depth, visits)? {
+            return Ok(OwnerLookup::Resolved(owner));
+        }
+        let (imported, parent) = self.imported_owner(prefix, remaining, depth, visits)?;
+        if let OwnerLookup::Resolved(owner) = imported {
+            return Ok(OwnerLookup::Resolved(owner));
+        }
+        Ok(
+            match self.glob_owner(&parent, remaining, module, original, depth, visits)? {
+                Some(owner) => OwnerLookup::Resolved(Some(owner)),
+                None => OwnerLookup::Missing,
+            },
+        )
+    }
+
+    fn resolve_bounded(
+        &self,
+        path: &[String],
+        module: &str,
+        depth: usize,
+        visits: &mut usize,
+    ) -> Result<Option<String>, String> {
+        consume_resolution_budget(depth, visits, module)?;
+        let first = path.first().ok_or("empty type path")?;
+        let (prefix, remaining) = match self.resolution_start(path, module, depth, visits)? {
+            ResolutionStart::Continue { prefix, remaining } => (prefix, remaining),
+            ResolutionStart::Resolved(owner) => return Ok(owner),
+        };
+        if let OwnerLookup::Resolved(owner) =
+            self.resolved_owner(&prefix, &remaining, module, path, depth, visits)?
+        {
+            return Ok(owner);
+        }
+        self.unresolved_owner(first, path, module)
+    }
+}
+
+fn parent_module(prefix: &str, source_root: &str, module: &str) -> Result<String, String> {
+    if prefix == source_root {
+        return Err(format!("super escapes source root: {module}"));
+    }
+    prefix
+        .rsplit_once("::")
+        .map(|(parent, _)| parent.to_string())
+        .ok_or_else(|| "invalid module parent".into())
+}
+
+fn consume_resolution_budget(depth: usize, visits: &mut usize, module: &str) -> Result<(), String> {
+    *visits += 1;
+    if depth > 64 || *visits > 4096 {
+        Err(format!("owner resolution cycle/budget in {module}"))
+    } else {
+        Ok(())
     }
 }
 
@@ -716,6 +954,24 @@ impl<'ast> Visit<'ast> for Nested<'ast> {
     }
 }
 
+fn function_counts(
+    module: &Module,
+    body: Option<&Block>,
+    input: &Input,
+    report: &mut Report,
+) -> Option<(usize, usize)> {
+    let Some(block) = body else {
+        return Some((0, 0));
+    };
+    match body_counts(&input.files[&module.path], block) {
+        Ok(counts) => Some(counts),
+        Err(error) => {
+            report.errors.push(format!("{}: {error}", module.path));
+            None
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn function(
     facts: &mut Facts,
@@ -728,15 +984,8 @@ fn function(
     report: &mut Report,
 ) {
     let loc = location(&module.path, signature.ident.span());
-    let (lines, comments) = match body {
-        Some(block) => match body_counts(&input.files[&module.path], block) {
-            Ok(counts) => counts,
-            Err(error) => {
-                report.errors.push(format!("{}: {error}", module.path));
-                return;
-            }
-        },
-        None => (0, 0),
+    let Some((lines, comments)) = function_counts(module, body, input, report) else {
+        return;
     };
     report.maximum(
         &input.policy,
@@ -835,68 +1084,94 @@ fn function(
     }
 }
 
+fn free_function(
+    facts: &mut Facts,
+    module: &Module,
+    item: &ItemFn,
+    input: &Input,
+    report: &mut Report,
+) {
+    function(
+        facts,
+        module,
+        format!("{}::{}", module.key, item.sig.ident),
+        &item.sig,
+        Some(&item.block),
+        None,
+        input,
+        report,
+    );
+}
+
+fn trait_functions(
+    facts: &mut Facts,
+    module: &Module,
+    item: &ItemTrait,
+    input: &Input,
+    report: &mut Report,
+) {
+    for member in &item.items {
+        if let TraitItem::Fn(member) = member {
+            function(
+                facts,
+                module,
+                format!("{}::{}::{}", module.key, item.ident, member.sig.ident),
+                &member.sig,
+                member.default.as_ref(),
+                None,
+                input,
+                report,
+            );
+        }
+    }
+}
+
+fn impl_functions(
+    facts: &mut Facts,
+    module: &Module,
+    item: &ItemImpl,
+    input: &Input,
+    report: &mut Report,
+) {
+    let owner = match facts.owner(&item.self_ty, &module.key) {
+        Ok(owner) => owner,
+        Err(error) => {
+            report.errors.push(error);
+            None
+        }
+    };
+    let target = owner
+        .clone()
+        .unwrap_or_else(|| format!("{}::impl({})", module.key, syntax(&item.self_ty)));
+    let trait_name = item
+        .trait_
+        .as_ref()
+        .map(|(_, path, _)| format!("[{}]", syntax(path)))
+        .unwrap_or_default();
+    for member in &item.items {
+        if let ImplItem::Fn(member) = member {
+            function(
+                facts,
+                module,
+                format!("{target}{trait_name}::{}", member.sig.ident),
+                &member.sig,
+                Some(&member.block),
+                owner.clone(),
+                input,
+                report,
+            );
+        }
+    }
+}
+
 fn functions(facts: &mut Facts, input: &Input, report: &mut Report) {
     let modules: Vec<_> = facts.modules.values().cloned().collect();
     for module in modules {
         for item in &module.items {
             match item {
-                Item::Fn(item) => function(
-                    facts,
-                    &module,
-                    format!("{}::{}", module.key, item.sig.ident),
-                    &item.sig,
-                    Some(&item.block),
-                    None,
-                    input,
-                    report,
-                ),
-                Item::Trait(item) => {
-                    for member in &item.items {
-                        if let TraitItem::Fn(member) = member {
-                            function(
-                                facts,
-                                &module,
-                                format!("{}::{}::{}", module.key, item.ident, member.sig.ident),
-                                &member.sig,
-                                member.default.as_ref(),
-                                None,
-                                input,
-                                report,
-                            );
-                        }
-                    }
-                }
-                Item::Impl(item) => {
-                    let owner = match facts.owner(&item.self_ty, &module.key) {
-                        Ok(owner) => owner,
-                        Err(error) => {
-                            report.errors.push(error);
-                            None
-                        }
-                    };
-                    let target = owner.clone().unwrap_or_else(|| {
-                        format!("{}::impl({})", module.key, syntax(&item.self_ty))
-                    });
-                    let trait_name = item
-                        .trait_
-                        .as_ref()
-                        .map(|(_, path, _)| format!("[{}]", syntax(path)))
-                        .unwrap_or_default();
-                    for member in &item.items {
-                        if let ImplItem::Fn(member) = member {
-                            function(
-                                facts,
-                                &module,
-                                format!("{target}{trait_name}::{}", member.sig.ident),
-                                &member.sig,
-                                Some(&member.block),
-                                owner.clone(),
-                                input,
-                                report,
-                            );
-                        }
-                    }
-                }
+                Item::Fn(item) => free_function(facts, &module, item, input, report),
+                Item::Trait(item) => trait_functions(facts, &module, item, input, report),
+                Item::Impl(item) => impl_functions(facts, &module, item, input, report),
                 _ => {}
             }
         }
@@ -908,10 +1183,7 @@ fn with_sources(mut report: Report, input: &Input) -> Report {
     report
 }
 
-pub fn check(input: &Input, registry: &Registry) -> Report {
-    let mut report = Report::new(registry, &input.policy, input.mode, &input.implementations);
-    report.input_sha256 = input.digest.clone();
-    report.scanned_files = input.files.keys().cloned().collect();
+fn validate_required_rules(registry: &Registry, input: &Input, report: &mut Report) {
     for rule in &registry.rules {
         if rule.implementation == "not_implemented" && input.policy.required(&rule.id) {
             report
@@ -919,6 +1191,9 @@ pub fn check(input: &Input, registry: &Registry) -> Report {
                 .push(format!("required detector not implemented: {}", rule.id));
         }
     }
+}
+
+fn parse_sources(input: &Input, report: &mut Report) -> BTreeMap<String, syn::File> {
     let mut parsed = BTreeMap::new();
     for (path, source) in &input.files {
         match syn::parse_file(source) {
@@ -930,30 +1205,118 @@ pub fn check(input: &Input, registry: &Registry) -> Report {
                 .push(format!("parse error in {path}: {error}")),
         }
     }
-    if parsed.len() != input.files.len() {
-        return with_sources(report, input);
-    }
+    parsed
+}
+
+fn referenced_sources(
+    parsed: &BTreeMap<String, syn::File>,
+    report: &mut Report,
+) -> BTreeSet<String> {
     let mut referenced = BTreeSet::new();
-    for (path, file) in &parsed {
+    for (path, file) in parsed {
+        let attribute_base = Path::new(path).parent().unwrap_or(Path::new(""));
         if let Err(error) = references(
             &file.items,
             &file_base(path),
-            Path::new(path).parent().unwrap_or(Path::new("")),
-            &parsed,
+            attribute_base,
+            parsed,
             &mut referenced,
             0,
         ) {
             report.errors.push(format!("{path}: {error}"));
         }
     }
+    referenced
+}
+
+fn root_sources(
+    parsed: &BTreeMap<String, syn::File>,
+    referenced: &BTreeSet<String>,
+) -> Vec<String> {
+    parsed
+        .keys()
+        .filter(|path| !referenced.contains(*path))
+        .cloned()
+        .collect()
+}
+
+fn collect_modules(
+    roots: Vec<String>,
+    parsed: &BTreeMap<String, syn::File>,
+    report: &mut Report,
+) -> BTreeMap<String, Module> {
+    let mut modules = BTreeMap::new();
+    for root in roots {
+        let mut walker = ModuleWalker {
+            root: &root,
+            parsed,
+            stack: vec![root.clone()],
+            result: &mut modules,
+        };
+        if let Err(error) = walker.visit(
+            &root,
+            &root,
+            &parsed[&root].items,
+            &file_base(&root),
+            Path::new(&root).parent().unwrap_or(Path::new("")),
+        ) {
+            report.errors.push(error);
+        }
+    }
+    modules
+}
+
+fn validate_module_coverage(
+    modules: &BTreeMap<String, Module>,
+    parsed: &BTreeMap<String, syn::File>,
+    report: &mut Report,
+) {
+    let included: BTreeSet<_> = modules.values().map(|module| &module.path).collect();
+    if included.len() != parsed.len() {
+        report
+            .errors
+            .push("unreachable/cyclic module source omitted from traversal".into());
+    }
+}
+
+fn record_type_metrics(facts: &Facts, policy: &Policy, report: &mut Report) {
+    for (symbol, ty) in &facts.types {
+        report.maximum(
+            policy,
+            "rust.type_functions",
+            symbol,
+            &ty.location,
+            ty.functions.len(),
+            "owned associated functions",
+        );
+        report.maximum(
+            policy,
+            "rust.type_function_lines",
+            symbol,
+            &ty.location,
+            ty.functions
+                .iter()
+                .map(|index| facts.functions[*index].lines)
+                .sum(),
+            "summed associated body code lines",
+        );
+    }
+}
+
+pub fn check(input: &Input, registry: &Registry) -> Report {
+    let mut report = Report::new(registry, &input.policy, input.mode, &input.implementations);
+    report.input_sha256 = input.digest.clone();
+    report.scanned_files = input.files.keys().cloned().collect();
+    validate_required_rules(registry, input, &mut report);
+    let parsed = parse_sources(input, &mut report);
+    if parsed.len() != input.files.len() {
+        return with_sources(report, input);
+    }
+    let referenced = referenced_sources(&parsed, &mut report);
     if !report.errors.is_empty() {
         return with_sources(report, input);
     }
-    let roots: Vec<_> = parsed
-        .keys()
-        .filter(|p| !referenced.contains(*p))
-        .cloned()
-        .collect();
+    let roots = root_sources(&parsed, &referenced);
     if roots.is_empty() {
         report
             .errors
@@ -967,27 +1330,8 @@ pub fn check(input: &Input, registry: &Registry) -> Report {
         slots: vec![],
         aliases: BTreeMap::new(),
     };
-    for root in roots {
-        if let Err(error) = modules(
-            &root,
-            &root,
-            &root,
-            &parsed[&root].items,
-            &file_base(&root),
-            Path::new(&root).parent().unwrap_or(Path::new("")),
-            &parsed,
-            &mut vec![root.clone()],
-            &mut facts.modules,
-        ) {
-            report.errors.push(error);
-        }
-    }
-    let included: BTreeSet<_> = facts.modules.values().map(|m| &m.path).collect();
-    if included.len() != parsed.len() {
-        report
-            .errors
-            .push("unreachable/cyclic module source omitted from traversal".into());
-    }
+    facts.modules = collect_modules(roots, &parsed, &mut report);
+    validate_module_coverage(&facts.modules, &parsed, &mut report);
     if !report.errors.is_empty() {
         return with_sources(report, input);
     }
@@ -996,24 +1340,7 @@ pub fn check(input: &Input, registry: &Registry) -> Report {
         return with_sources(report, input);
     }
     functions(&mut facts, input, &mut report);
-    for (symbol, ty) in &facts.types {
-        report.maximum(
-            &input.policy,
-            "rust.type_functions",
-            symbol,
-            &ty.location,
-            ty.functions.len(),
-            "owned associated functions",
-        );
-        report.maximum(
-            &input.policy,
-            "rust.type_function_lines",
-            symbol,
-            &ty.location,
-            ty.functions.iter().map(|i| facts.functions[*i].lines).sum(),
-            "summed associated body code lines",
-        );
-    }
+    record_type_metrics(&facts, &input.policy, &mut report);
     crate::patterns::check(&facts, &input.policy, &mut report);
     with_sources(report, input)
 }

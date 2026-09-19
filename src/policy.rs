@@ -120,10 +120,7 @@ pub fn registry_json(rule_pack: &str) -> Result<&'static str, String> {
     })
 }
 
-pub fn registry(rule_pack: &str) -> Result<Registry, String> {
-    let source = registry_json(rule_pack)?;
-    let registry: Registry =
-        serde_json::from_str(source).map_err(|e| format!("invalid embedded registry: {e}"))?;
+fn validate_catalog(registry: &Registry, rule_pack: &str) -> Result<(), String> {
     if registry.schema_version != 1
         || registry.rule_pack != rule_pack
         || !matches!(registry.language.as_str(), "rust" | "python" | "typescript")
@@ -134,7 +131,11 @@ pub fn registry(rule_pack: &str) -> Result<Registry, String> {
     {
         return Err(format!("invalid embedded {rule_pack} catalog"));
     }
-    let canonical: BTreeSet<_> = [
+    Ok(())
+}
+
+fn canonical_smells() -> BTreeSet<(&'static str, &'static str, &'static str)> {
+    [
         ("long-method", "Long Method", "bloaters"),
         ("large-class", "Large Class", "bloaters"),
         ("primitive-obsession", "Primitive Obsession", "bloaters"),
@@ -192,16 +193,23 @@ pub fn registry(rule_pack: &str) -> Result<Registry, String> {
         ("middle-man", "Middle Man", "couplers"),
     ]
     .into_iter()
-    .collect();
+    .collect()
+}
+
+fn validate_smell_catalog(registry: &Registry) -> Result<(), String> {
     let smells: BTreeSet<_> = registry
         .smells
         .iter()
         .map(|s| (s.id.as_str(), s.name.as_str(), s.category.as_str()))
         .collect();
     let rules: BTreeSet<_> = registry.rules.iter().map(|r| &r.id).collect();
-    if smells != canonical || rules.len() != registry.rules.len() {
+    if smells != canonical_smells() || rules.len() != registry.rules.len() {
         return Err("registry does not exactly match the pinned canonical smell catalog".into());
     }
+    Ok(())
+}
+
+fn validate_smell_mappings(registry: &Registry) -> Result<(), String> {
     for smell in &registry.smells {
         if !matches!(
             smell.applicability.as_str(),
@@ -220,6 +228,10 @@ pub fn registry(rule_pack: &str) -> Result<Registry, String> {
             }
         }
     }
+    Ok(())
+}
+
+fn validate_applicability(registry: &Registry) -> Result<(), String> {
     if registry.language == "rust" {
         let inapplicable: BTreeSet<_> = registry
             .smells
@@ -240,23 +252,45 @@ pub fn registry(rule_pack: &str) -> Result<Registry, String> {
             registry.language
         ));
     }
+    Ok(())
+}
+
+fn valid_rule(rule: &Rule, registry: &Registry) -> bool {
+    rule.version == 1
+        && !rule.inputs.is_empty()
+        && !rule.contract.is_empty()
+        && matches!(
+            rule.implementation.as_str(),
+            "implemented" | "not_implemented"
+        )
+        && matches!(
+            rule.kind.as_str(),
+            "metric" | "indicator" | "project_contract" | "history"
+        )
+        && registry
+            .smells
+            .iter()
+            .any(|smell| smell.rules.contains(&rule.id))
+}
+
+fn validate_rules(registry: &Registry) -> Result<(), String> {
     for rule in &registry.rules {
-        if rule.version != 1
-            || rule.inputs.is_empty()
-            || rule.contract.is_empty()
-            || !matches!(
-                rule.implementation.as_str(),
-                "implemented" | "not_implemented"
-            )
-            || !matches!(
-                rule.kind.as_str(),
-                "metric" | "indicator" | "project_contract" | "history"
-            )
-            || !registry.smells.iter().any(|s| s.rules.contains(&rule.id))
-        {
+        if !valid_rule(rule, registry) {
             return Err(format!("invalid rule contract: {}", rule.id));
         }
     }
+    Ok(())
+}
+
+pub fn registry(rule_pack: &str) -> Result<Registry, String> {
+    let source = registry_json(rule_pack)?;
+    let registry: Registry =
+        serde_json::from_str(source).map_err(|e| format!("invalid embedded registry: {e}"))?;
+    validate_catalog(&registry, rule_pack)?;
+    validate_smell_catalog(&registry)?;
+    validate_smell_mappings(&registry)?;
+    validate_applicability(&registry)?;
+    validate_rules(&registry)?;
     Ok(registry)
 }
 
@@ -270,14 +304,17 @@ pub fn registry_for_policy(bytes: &str) -> Result<Registry, String> {
     registry(rule_pack)
 }
 
-pub fn parse(bytes: &str, registry: &Registry) -> Result<Policy, String> {
-    let policy: Policy = serde_json::from_str(bytes).map_err(|e| format!("invalid policy: {e}"))?;
+fn validate_policy_header(policy: &Policy, registry: &Registry) -> Result<(), String> {
     if policy.schema_version != 2 || policy.rule_pack != registry.rule_pack {
         return Err("policy schema/rule-pack version mismatch".into());
     }
     if policy.scanner_version != env!("CARGO_PKG_VERSION") {
         return Err("scanner version does not match policy pin".into());
     }
+    Ok(())
+}
+
+fn validate_scope(policy: &Policy, registry: &Registry) -> Result<(), String> {
     let expected_scope = if registry.language == "rust" {
         "authored_all_cfg"
     } else {
@@ -289,6 +326,10 @@ pub fn parse(bytes: &str, registry: &Registry) -> Result<Policy, String> {
             registry.language
         ));
     }
+    Ok(())
+}
+
+fn validate_budgets_and_exceptions(policy: &Policy) -> Result<(), String> {
     if policy.limits.maximum_files == 0
         || policy.limits.maximum_pairs == 0
         || policy.limits.maximum_group_combinations == 0
@@ -300,6 +341,10 @@ pub fn parse(bytes: &str, registry: &Registry) -> Result<Policy, String> {
             "exact exceptions are not implemented; cannot silently apply exceptions".into(),
         );
     }
+    Ok(())
+}
+
+fn validate_exclusions(policy: &Policy) -> Result<(), String> {
     let exclusions: BTreeSet<_> = policy.exclude_directories.iter().collect();
     if exclusions.len() != policy.exclude_directories.len()
         || exclusions.iter().any(|s| {
@@ -309,6 +354,10 @@ pub fn parse(bytes: &str, registry: &Registry) -> Result<Policy, String> {
     {
         return Err("exclude_directories must be unique directory names and include .git".into());
     }
+    Ok(())
+}
+
+fn validate_selected_rules(policy: &Policy, registry: &Registry) -> Result<(), String> {
     let expected: BTreeSet<_> = registry.rules.iter().map(|r| r.id.as_str()).collect();
     let actual: BTreeSet<_> = policy.rules.keys().map(String::as_str).collect();
     if expected != actual {
@@ -316,6 +365,18 @@ pub fn parse(bytes: &str, registry: &Registry) -> Result<Policy, String> {
             "policy must explicitly select every registered rule, with no unknown rules".into(),
         );
     }
+    Ok(())
+}
+
+fn invalid_parameter(name: &str, value: u64) -> bool {
+    (name.contains("percent") && value > 100)
+        || (name.contains("basis_points") && value > 10_000)
+        || (name.starts_with("minimum_") && value == 0)
+        || (name == "minimum_group_size" && value < 2)
+        || (name == "minimum_tokens" && value < 4)
+}
+
+fn validate_rule_parameters(policy: &Policy, registry: &Registry) -> Result<(), String> {
     for rule in &registry.rules {
         let selected = &policy.rules[&rule.id];
         if selected.version != rule.version || selected.parameters.keys().ne(rule.parameters.keys())
@@ -323,16 +384,22 @@ pub fn parse(bytes: &str, registry: &Registry) -> Result<Policy, String> {
             return Err(format!("rule version/parameter keys mismatch: {}", rule.id));
         }
         for (name, value) in &selected.parameters {
-            let invalid = (name.contains("percent") && *value > 100)
-                || (name.contains("basis_points") && *value > 10_000)
-                || (name.starts_with("minimum_") && *value == 0)
-                || (name == "minimum_group_size" && *value < 2)
-                || (name == "minimum_tokens" && *value < 4);
-            if invalid {
+            if invalid_parameter(name, *value) {
                 return Err(format!("invalid parameter {}.{name}", rule.id));
             }
         }
     }
+    Ok(())
+}
+
+pub fn parse(bytes: &str, registry: &Registry) -> Result<Policy, String> {
+    let policy: Policy = serde_json::from_str(bytes).map_err(|e| format!("invalid policy: {e}"))?;
+    validate_policy_header(&policy, registry)?;
+    validate_scope(&policy, registry)?;
+    validate_budgets_and_exceptions(&policy)?;
+    validate_exclusions(&policy)?;
+    validate_selected_rules(&policy, registry)?;
+    validate_rule_parameters(&policy, registry)?;
     Ok(policy)
 }
 

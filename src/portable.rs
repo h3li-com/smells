@@ -10,7 +10,7 @@ use std::{
     path::Path,
     sync::OnceLock,
 };
-use tree_sitter::{Language, Node, Parser};
+use tree_sitter::{Language, Node, Parser, Tree};
 
 struct FunctionFact {
     symbol: String,
@@ -258,37 +258,42 @@ fn receiver_field(node: Node<'_>, source: &str, language: &str) -> bool {
         })
 }
 
-fn strict_accessor(method: Node<'_>, source: &str, language: &str) -> bool {
-    let name = node_name(method, source);
-    if matches!(name.as_str(), "__init__" | "constructor") {
-        return true;
-    }
-    let Some(body) = method.child_by_field_name("body") else {
-        return false;
-    };
+fn only_statement(body: Node<'_>) -> Option<Node<'_>> {
     let mut cursor = body.walk();
     let statements: Vec<_> = body.named_children(&mut cursor).collect();
-    if statements.len() != 1 {
-        return false;
-    }
-    let statement = statements[0];
-    if statement.kind() == "return_statement" {
-        return statement
+    (statements.len() == 1).then_some(statements[0])
+}
+
+fn returned_receiver_field(statement: Node<'_>, source: &str, language: &str) -> bool {
+    statement.kind() == "return_statement"
+        && statement
             .named_child(0)
-            .is_some_and(|field| receiver_field(field, source, language));
-    }
+            .is_some_and(|field| receiver_field(field, source, language))
+}
+
+fn assignment_sides<'tree>(
+    statement: Node<'tree>,
+    language: &str,
+) -> Option<(Node<'tree>, Node<'tree>)> {
     let assignment_kind = if language == "python" {
         "assignment"
     } else {
         "assignment_expression"
     };
-    let Some(assignment) = first_descendant(statement, &[assignment_kind]) else {
-        return false;
-    };
-    let Some(left) = assignment.child_by_field_name("left") else {
-        return false;
-    };
-    let Some(right) = assignment.child_by_field_name("right") else {
+    let assignment = first_descendant(statement, &[assignment_kind])?;
+    Some((
+        assignment.child_by_field_name("left")?,
+        assignment.child_by_field_name("right")?,
+    ))
+}
+
+fn assignment_accessor(
+    method: Node<'_>,
+    statement: Node<'_>,
+    source: &str,
+    language: &str,
+) -> bool {
+    let Some((left, right)) = assignment_sides(statement, language) else {
         return false;
     };
     let ordinary: Vec<_> = parameters(method, source)
@@ -300,6 +305,21 @@ fn strict_accessor(method: Node<'_>, source: &str, language: &str) -> bool {
         && ordinary.len() == 1
         && right.kind() == "identifier"
         && compact_text(right, source) == ordinary[0]
+}
+
+fn strict_accessor(method: Node<'_>, source: &str, language: &str) -> bool {
+    let name = node_name(method, source);
+    if matches!(name.as_str(), "__init__" | "constructor") {
+        return true;
+    }
+    let Some(body) = method.child_by_field_name("body") else {
+        return false;
+    };
+    let Some(statement) = only_statement(body) else {
+        return false;
+    };
+    returned_receiver_field(statement, source, language)
+        || assignment_accessor(method, statement, source, language)
 }
 
 fn node_name(node: Node<'_>, source: &str) -> String {
@@ -433,6 +453,116 @@ fn assignment_fields(node: Node<'_>, source: &str, receiver: bool, fields: &mut 
     }
 }
 
+fn python_fields(body: Node<'_>, methods: &[Node<'_>], source: &str) -> BTreeSet<String> {
+    let mut fields = BTreeSet::new();
+    let mut cursor = body.walk();
+    for child in body.named_children(&mut cursor) {
+        if !matches!(child.kind(), "function_definition" | "decorated_definition") {
+            assignment_fields(child, source, false, &mut fields);
+        }
+    }
+    for method in methods {
+        let Some(method_body) = method.child_by_field_name("body") else {
+            continue;
+        };
+        let mut cursor = method_body.walk();
+        for child in method_body.named_children(&mut cursor) {
+            assignment_fields(child, source, true, &mut fields);
+        }
+    }
+    fields
+}
+
+fn declared_typescript_fields(body: Node<'_>, source: &str) -> BTreeSet<String> {
+    let mut fields = BTreeSet::new();
+    let mut cursor = body.walk();
+    for child in body.named_children(&mut cursor) {
+        if child.kind() == "public_field_definition"
+            && let Some(name) = child.child_by_field_name("name")
+            && let Ok(name) = name.utf8_text(source.as_bytes())
+        {
+            fields.insert(name.to_string());
+        }
+    }
+    fields
+}
+
+fn parameter_property_name(parameter: Node<'_>, source: &str) -> Option<String> {
+    let mut children = parameter.walk();
+    let property = parameter.children(&mut children).any(|child| {
+        matches!(
+            child.kind(),
+            "accessibility_modifier" | "readonly" | "override_modifier"
+        )
+    });
+    if !property {
+        return None;
+    }
+    parameter
+        .child_by_field_name("name")
+        .or_else(|| parameter.child_by_field_name("pattern"))?
+        .utf8_text(source.as_bytes())
+        .ok()
+        .map(str::to_string)
+}
+
+fn typescript_fields(body: Node<'_>, methods: &[Node<'_>], source: &str) -> BTreeSet<String> {
+    let mut fields = declared_typescript_fields(body, source);
+    for method in methods {
+        if node_name(*method, source) != "constructor" {
+            continue;
+        }
+        let Some(parameters) = method.child_by_field_name("parameters") else {
+            continue;
+        };
+        let mut cursor = parameters.walk();
+        fields.extend(
+            parameters
+                .named_children(&mut cursor)
+                .filter_map(|parameter| parameter_property_name(parameter, source)),
+        );
+    }
+    fields
+}
+
+struct ClassSummary<'a> {
+    symbol: &'a str,
+    location: &'a Location,
+    fields: usize,
+    methods: usize,
+    method_lines: usize,
+}
+
+fn record_class_metrics(
+    summary: &ClassSummary<'_>,
+    registry: &Registry,
+    input: &Input,
+    report: &mut Report,
+) {
+    for (suffix, value, description) in [
+        ("class_fields", summary.fields, "source-owned class fields"),
+        (
+            "class_methods",
+            summary.methods,
+            "source-owned class methods",
+        ),
+        (
+            "class_method_lines",
+            summary.method_lines,
+            "summed class method code lines",
+        ),
+    ] {
+        report.maximum(
+            &input.policy,
+            &format!("{}.{}", registry.language, suffix),
+            summary.symbol,
+            summary.location,
+            value,
+            description,
+        );
+    }
+}
+
 fn class_metrics(
     node: Node<'_>,
     path: &str,
@@ -448,90 +578,27 @@ fn class_metrics(
     let symbol = node_name(node, source);
     let location = location(path, node);
     let methods = direct_methods(body, &registry.language);
-    let mut fields = BTreeSet::new();
-    if registry.language == "python" {
-        let mut cursor = body.walk();
-        for child in body.named_children(&mut cursor) {
-            if !matches!(child.kind(), "function_definition" | "decorated_definition") {
-                assignment_fields(child, source, false, &mut fields);
-            }
-        }
-        for method in &methods {
-            if let Some(method_body) = method.child_by_field_name("body") {
-                let mut instance_fields = BTreeSet::new();
-                let mut cursor = method_body.walk();
-                for child in method_body.named_children(&mut cursor) {
-                    assignment_fields(child, source, true, &mut instance_fields);
-                }
-                fields.extend(instance_fields);
-            }
-        }
+    let fields = if registry.language == "python" {
+        python_fields(body, &methods, source)
     } else {
-        let mut cursor = body.walk();
-        for child in body.named_children(&mut cursor) {
-            if child.kind() == "public_field_definition"
-                && let Some(name) = child.child_by_field_name("name")
-                && let Ok(name) = name.utf8_text(source.as_bytes())
-            {
-                fields.insert(name.to_string());
-            }
-        }
-        for method in &methods {
-            if node_name(*method, source) != "constructor" {
-                continue;
-            }
-            let Some(parameters) = method.child_by_field_name("parameters") else {
-                continue;
-            };
-            let mut cursor = parameters.walk();
-            for parameter in parameters.named_children(&mut cursor) {
-                let mut children = parameter.walk();
-                let parameter_property = parameter.children(&mut children).any(|child| {
-                    matches!(
-                        child.kind(),
-                        "accessibility_modifier" | "readonly" | "override_modifier"
-                    )
-                });
-                if parameter_property
-                    && let Some(name) = parameter
-                        .child_by_field_name("name")
-                        .or_else(|| parameter.child_by_field_name("pattern"))
-                    && let Ok(name) = name.utf8_text(source.as_bytes())
-                {
-                    fields.insert(name.to_string());
-                }
-            }
-        }
-    }
-    let prefix = &registry.language;
+        typescript_fields(body, &methods, source)
+    };
     let method_lines: usize = methods
         .iter()
         .filter_map(|method| method.child_by_field_name("body"))
         .map(|body| code_lines(body, source))
         .sum();
-    report.maximum(
-        &input.policy,
-        &format!("{prefix}.class_fields"),
-        &symbol,
-        &location,
-        fields.len(),
-        "source-owned class fields",
-    );
-    report.maximum(
-        &input.policy,
-        &format!("{prefix}.class_methods"),
-        &symbol,
-        &location,
-        methods.len(),
-        "source-owned class methods",
-    );
-    report.maximum(
-        &input.policy,
-        &format!("{prefix}.class_method_lines"),
-        &symbol,
-        &location,
-        method_lines,
-        "summed class method code lines",
+    record_class_metrics(
+        &ClassSummary {
+            symbol: &symbol,
+            location: &location,
+            fields: fields.len(),
+            methods: methods.len(),
+            method_lines,
+        },
+        registry,
+        input,
+        report,
     );
     facts.classes.push(ClassFact {
         symbol,
@@ -546,27 +613,19 @@ fn class_metrics(
     });
 }
 
-fn visit(
-    node: Node<'_>,
-    path: &str,
-    source: &str,
-    registry: &Registry,
-    input: &Input,
-    report: &mut Report,
-    facts: &mut Facts,
-) {
-    let class = match registry.language.as_str() {
+fn is_class(node: Node<'_>, language: &str) -> bool {
+    match language {
         "python" => node.kind() == "class_definition",
         "typescript" => matches!(
             node.kind(),
             "class" | "class_declaration" | "abstract_class_declaration"
         ),
         _ => false,
-    };
-    if class {
-        class_metrics(node, path, source, registry, input, report, facts);
     }
-    let function = match registry.language.as_str() {
+}
+
+fn is_function(node: Node<'_>, language: &str) -> bool {
+    match language {
         "python" => matches!(node.kind(), "function_definition" | "lambda"),
         "typescript" => matches!(
             node.kind(),
@@ -578,8 +637,22 @@ fn visit(
                 | "method_definition"
         ),
         _ => false,
-    };
-    if function {
+    }
+}
+
+fn visit(
+    node: Node<'_>,
+    path: &str,
+    source: &str,
+    registry: &Registry,
+    input: &Input,
+    report: &mut Report,
+    facts: &mut Facts,
+) {
+    if is_class(node, &registry.language) {
+        class_metrics(node, path, source, registry, input, report, facts);
+    }
+    if is_function(node, &registry.language) {
         function_metrics(node, path, source, &registry.language, input, report, facts);
     }
     let mut cursor = node.walk();
@@ -766,6 +839,223 @@ fn fingerprint(tokens: &[String]) -> BTreeMap<Vec<String>, usize> {
     result
 }
 
+fn feature_frequencies<'a>(
+    facts: &Facts,
+    fingerprints: &'a [BTreeMap<Vec<String>, usize>],
+    minimum: u64,
+) -> BTreeMap<FingerprintFeature<'a>, usize> {
+    let mut frequencies = BTreeMap::new();
+    for (index, counts) in fingerprints.iter().enumerate() {
+        if (facts.functions[index].tokens.len() as u64) < minimum {
+            continue;
+        }
+        for (key, count) in counts {
+            for occurrence in 0..*count {
+                *frequencies.entry((key.as_slice(), occurrence)).or_default() += 1;
+            }
+        }
+    }
+    frequencies
+}
+
+fn ordered_features<'a>(
+    facts: &Facts,
+    fingerprints: &'a [BTreeMap<Vec<String>, usize>],
+    frequencies: &BTreeMap<FingerprintFeature<'a>, usize>,
+    minimum: u64,
+) -> Vec<Vec<FingerprintFeature<'a>>> {
+    fingerprints
+        .iter()
+        .enumerate()
+        .map(|(index, counts)| {
+            if (facts.functions[index].tokens.len() as u64) < minimum {
+                return Vec::new();
+            }
+            let mut features = counts
+                .iter()
+                .flat_map(|(key, count)| {
+                    (0..*count).map(move |occurrence| (key.as_slice(), occurrence))
+                })
+                .collect::<Vec<_>>();
+            features.sort_by(|left, right| {
+                frequencies[left]
+                    .cmp(&frequencies[right])
+                    .then_with(|| left.cmp(right))
+            });
+            features
+        })
+        .collect()
+}
+
+fn eligible_functions(ordered_features: &[Vec<FingerprintFeature<'_>>]) -> Vec<usize> {
+    let mut eligible = (0..ordered_features.len())
+        .filter(|index| !ordered_features[*index].is_empty())
+        .collect::<Vec<_>>();
+    eligible.sort_by_key(|index| (ordered_features[*index].len(), *index));
+    eligible
+}
+
+fn prefix_length(size: usize, similarity: u64) -> usize {
+    let required_overlap = (similarity as u128 * size as u128).div_ceil(10_000) as usize;
+    size - required_overlap + 1
+}
+
+fn overlapping_functions(first: &FunctionFact, second: &FunctionFact) -> bool {
+    first.location.path == second.location.path
+        && first.body_range.0 < second.body_range.1
+        && second.body_range.0 < first.body_range.1
+}
+
+fn candidate_possible(
+    left_size: usize,
+    right_size: usize,
+    left_position: usize,
+    right_position: usize,
+    similarity: u64,
+) -> bool {
+    if left_size as u128 * 10_000 < similarity as u128 * right_size as u128 {
+        return false;
+    }
+    let maximum_overlap = 1 + (left_size - left_position - 1).min(right_size - right_position - 1);
+    let required_overlap = (similarity as u128 * (left_size + right_size) as u128)
+        .div_ceil(10_000 + similarity as u128);
+    maximum_overlap as u128 >= required_overlap
+}
+
+fn duplicate_candidates(
+    facts: &Facts,
+    right: usize,
+    ordered_features: &[Vec<FingerprintFeature<'_>>],
+    postings: &FeaturePostings<'_>,
+    similarity: u64,
+) -> BTreeSet<usize> {
+    let right_size = ordered_features[right].len();
+    let mut candidates = BTreeSet::new();
+    for (right_position, feature) in ordered_features[right]
+        .iter()
+        .take(prefix_length(right_size, similarity))
+        .enumerate()
+    {
+        let Some(entries) = postings.get(feature) else {
+            continue;
+        };
+        for (left, left_position) in entries {
+            if !overlapping_functions(&facts.functions[*left], &facts.functions[right])
+                && candidate_possible(
+                    ordered_features[*left].len(),
+                    right_size,
+                    *left_position,
+                    right_position,
+                    similarity,
+                )
+            {
+                candidates.insert(*left);
+            }
+        }
+    }
+    candidates
+}
+
+fn multiset_similarity(
+    first: &BTreeMap<Vec<String>, usize>,
+    second: &BTreeMap<Vec<String>, usize>,
+) -> Option<(usize, usize)> {
+    let keys: BTreeSet<_> = first.keys().chain(second.keys()).collect();
+    let (mut intersection, mut union) = (0, 0);
+    for key in keys {
+        let first_count = *first.get(key).unwrap_or(&0);
+        let second_count = *second.get(key).unwrap_or(&0);
+        intersection += first_count.min(second_count);
+        union += first_count.max(second_count);
+    }
+    (union > 0).then_some((intersection, union))
+}
+
+fn ordered_functions<'a>(
+    first: &'a FunctionFact,
+    second: &'a FunctionFact,
+) -> (&'a FunctionFact, &'a FunctionFact) {
+    if (&first.symbol, &first.location.path, first.location.line)
+        <= (&second.symbol, &second.location.path, second.location.line)
+    {
+        (first, second)
+    } else {
+        (second, first)
+    }
+}
+
+struct DuplicateRule<'a> {
+    id: &'a str,
+    policy: &'a Policy,
+    minimum: u64,
+    similarity: u64,
+}
+
+fn report_duplicate_pair(
+    first: &FunctionFact,
+    second: &FunctionFact,
+    intersection: usize,
+    union: usize,
+    rule: &DuplicateRule<'_>,
+    report: &mut Report,
+) {
+    let (first, second) = ordered_functions(first, second);
+    report.finding(
+        rule.policy,
+        rule.id,
+        &first.symbol,
+        &first.location,
+        "normalized 4-token multiset Jaccard",
+        json!({"intersection":intersection,"union":union}),
+        ">=",
+        json!({"minimum_similarity_basis_points":rule.similarity,"minimum_tokens":rule.minimum}),
+        true,
+        json!({"token_counts":[first.tokens.len(),second.tokens.len()],"other_location":second.location,"normalization":"tree_sitter_tokens_v1_not_semantic_equivalence"}),
+    );
+    let finding = report.findings.last_mut().expect("finding just added");
+    finding.related_symbols.push(second.symbol.clone());
+    finding.related_locations.push(second.location.clone());
+}
+
+fn compare_duplicate_pair(
+    facts: &Facts,
+    fingerprints: &[BTreeMap<Vec<String>, usize>],
+    left: usize,
+    right: usize,
+    rule: &DuplicateRule<'_>,
+    report: &mut Report,
+) {
+    let Some((intersection, union)) =
+        multiset_similarity(&fingerprints[left], &fingerprints[right])
+    else {
+        return;
+    };
+    if intersection as u128 * 10_000 >= rule.similarity as u128 * union as u128 {
+        report_duplicate_pair(
+            &facts.functions[left],
+            &facts.functions[right],
+            intersection,
+            union,
+            rule,
+            report,
+        );
+    }
+}
+
+fn add_to_postings<'a>(
+    right: usize,
+    features: &[FingerprintFeature<'a>],
+    prefix_length: usize,
+    postings: &mut FeaturePostings<'a>,
+) {
+    for (position, feature) in features.iter().take(prefix_length).enumerate() {
+        postings
+            .entry(*feature)
+            .or_default()
+            .push((right, position));
+    }
+}
+
 fn duplicates(facts: &Facts, policy: &Policy, language: &str, report: &mut Report) {
     let id = format!("{language}.duplicate_functions");
     if !policy.enabled(&id) {
@@ -773,141 +1063,40 @@ fn duplicates(facts: &Facts, policy: &Policy, language: &str, report: &mut Repor
     }
     let minimum = policy.parameter(&id, "minimum_tokens");
     let similarity = policy.parameter(&id, "minimum_similarity_basis_points");
+    let rule = DuplicateRule {
+        id: &id,
+        policy,
+        minimum,
+        similarity,
+    };
     let fingerprints: Vec<_> = facts
         .functions
         .iter()
         .map(|function| fingerprint(&function.tokens))
         .collect();
-    let mut frequencies: BTreeMap<FingerprintFeature<'_>, usize> = BTreeMap::new();
-    for (index, counts) in fingerprints.iter().enumerate() {
-        if (facts.functions[index].tokens.len() as u64) < minimum {
-            continue;
-        }
-        for (key, count) in counts {
-            for occurrence in 0..*count {
-                *frequencies.entry((key, occurrence)).or_default() += 1;
-            }
-        }
-    }
-    let mut ordered_features = Vec::with_capacity(fingerprints.len());
-    for (index, counts) in fingerprints.iter().enumerate() {
-        if (facts.functions[index].tokens.len() as u64) < minimum {
-            ordered_features.push(Vec::new());
-            continue;
-        }
-        let mut features = counts
-            .iter()
-            .flat_map(|(key, count)| {
-                (0..*count).map(move |occurrence| (key.as_slice(), occurrence))
-            })
-            .collect::<Vec<_>>();
-        features.sort_by(|left, right| {
-            frequencies[left]
-                .cmp(&frequencies[right])
-                .then_with(|| left.cmp(right))
-        });
-        ordered_features.push(features);
-    }
-
-    let mut eligible = (0..facts.functions.len())
-        .filter(|index| !ordered_features[*index].is_empty())
-        .collect::<Vec<_>>();
-    eligible.sort_by_key(|index| (ordered_features[*index].len(), *index));
+    let frequencies = feature_frequencies(facts, &fingerprints, minimum);
+    let ordered_features = ordered_features(facts, &fingerprints, &frequencies, minimum);
+    let eligible = eligible_functions(&ordered_features);
     let mut postings = FeaturePostings::new();
     let mut comparisons = 0;
     for right in eligible {
         let right_size = ordered_features[right].len();
-        let right_required_overlap =
-            (similarity as u128 * right_size as u128).div_ceil(10_000) as usize;
-        let right_prefix_length = right_size - right_required_overlap + 1;
-        let mut candidates = BTreeSet::new();
-        for (right_position, feature) in ordered_features[right]
-            .iter()
-            .take(right_prefix_length)
-            .enumerate()
-        {
-            if let Some(entries) = postings.get(feature) {
-                for (left, left_position) in entries {
-                    let a = &facts.functions[*left];
-                    let b = &facts.functions[right];
-                    if a.location.path == b.location.path
-                        && a.body_range.0 < b.body_range.1
-                        && b.body_range.0 < a.body_range.1
-                    {
-                        continue;
-                    }
-                    let left_size = ordered_features[*left].len();
-                    if left_size as u128 * 10_000 < similarity as u128 * right_size as u128 {
-                        continue;
-                    }
-                    let maximum_overlap =
-                        1 + (left_size - left_position - 1).min(right_size - right_position - 1);
-                    let required_overlap = (similarity as u128 * (left_size + right_size) as u128)
-                        .div_ceil(10_000 + similarity as u128);
-                    if (maximum_overlap as u128) < required_overlap {
-                        continue;
-                    }
-                    candidates.insert(*left);
-                }
-            }
-        }
-
+        let candidates =
+            duplicate_candidates(facts, right, &ordered_features, &postings, similarity);
         for left in candidates {
             comparisons += 1;
             if comparisons > policy.limits.maximum_pairs {
                 report.errors.push("maximum_pairs budget exceeded".into());
                 return;
             }
-            let a = &facts.functions[left];
-            let b = &facts.functions[right];
-            let counts_a = &fingerprints[left];
-            let counts_b = &fingerprints[right];
-            let keys: BTreeSet<_> = counts_a.keys().chain(counts_b.keys()).collect();
-            let mut intersection = 0;
-            let mut union = 0;
-            for key in keys {
-                let count_a = *counts_a.get(key).unwrap_or(&0);
-                let count_b = *counts_b.get(key).unwrap_or(&0);
-                intersection += count_a.min(count_b);
-                union += count_a.max(count_b);
-            }
-            if union == 0 || intersection as u128 * 10_000 < similarity as u128 * union as u128 {
-                continue;
-            }
-            let (first, second) = if (&a.symbol, &a.location.path, a.location.line)
-                <= (&b.symbol, &b.location.path, b.location.line)
-            {
-                (a, b)
-            } else {
-                (b, a)
-            };
-            report.finding(
-                policy,
-                &id,
-                &first.symbol,
-                &first.location,
-                "normalized 4-token multiset Jaccard",
-                json!({"intersection":intersection,"union":union}),
-                ">=",
-                json!({"minimum_similarity_basis_points":similarity,"minimum_tokens":minimum}),
-                true,
-                json!({"token_counts":[first.tokens.len(),second.tokens.len()],"other_location":second.location,"normalization":"tree_sitter_tokens_v1_not_semantic_equivalence"}),
-            );
-            let finding = report.findings.last_mut().expect("finding just added");
-            finding.related_symbols.push(second.symbol.clone());
-            finding.related_locations.push(second.location.clone());
+            compare_duplicate_pair(facts, &fingerprints, left, right, &rule, report);
         }
-
-        for (position, feature) in ordered_features[right]
-            .iter()
-            .take(right_prefix_length)
-            .enumerate()
-        {
-            postings
-                .entry(*feature)
-                .or_default()
-                .push((right, position));
-        }
+        add_to_postings(
+            right,
+            &ordered_features[right],
+            prefix_length(right_size, similarity),
+            &mut postings,
+        );
     }
 }
 
@@ -918,10 +1107,7 @@ fn patterns(facts: &Facts, policy: &Policy, language: &str, report: &mut Report)
     duplicates(facts, policy, language, report);
 }
 
-pub fn check(input: &Input, registry: &Registry) -> Report {
-    let mut report = Report::new(registry, &input.policy, input.mode, &input.implementations);
-    report.input_sha256 = input.digest.clone();
-    report.scanned_files = input.files.keys().cloned().collect();
+fn validate_required_rules(registry: &Registry, input: &Input, report: &mut Report) {
     for rule in &registry.rules {
         if rule.implementation == "not_implemented" && input.policy.required(&rule.id) {
             report
@@ -929,48 +1115,94 @@ pub fn check(input: &Input, registry: &Registry) -> Report {
                 .push(format!("required detector not implemented: {}", rule.id));
         }
     }
-    let mut facts = Facts::default();
-    for (path, source) in &input.files {
-        let mut parser = Parser::new();
-        let grammar = match language(path, registry) {
-            Ok(grammar) => grammar,
-            Err(error) => {
-                report.errors.push(error);
-                continue;
-            }
-        };
-        if let Err(error) = parser.set_language(&grammar) {
+}
+
+fn configured_parser(path: &str, registry: &Registry, report: &mut Report) -> Option<Parser> {
+    let grammar = language(path, registry)
+        .map_err(|error| report.errors.push(error))
+        .ok()?;
+    let mut parser = Parser::new();
+    parser
+        .set_language(&grammar)
+        .map_err(|error| {
             report
                 .errors
                 .push(format!("cannot load grammar for {path}: {error}"));
-            continue;
-        }
-        let Some(mut tree) = parser.parse(source, None) else {
-            report.errors.push(format!("parser cancelled for {path}"));
-            continue;
-        };
-        if tree.root_node().has_error() && registry.language == "typescript" {
-            if let Some(compatible) = typescript_parser_compatibility_source(source) {
-                let Some(compatible_tree) = parser.parse(&compatible, None) else {
-                    report.errors.push(format!("parser cancelled for {path}"));
-                    continue;
-                };
-                tree = compatible_tree;
-            }
-        }
-        if tree.root_node().has_error() {
-            report.errors.push(format!("parse error in {path}"));
-            continue;
-        }
-        visit(
-            tree.root_node(),
-            path,
-            source,
-            registry,
-            input,
-            &mut report,
-            &mut facts,
-        );
+        })
+        .ok()?;
+    Some(parser)
+}
+
+fn parsed_tree(parser: &mut Parser, source: &str, path: &str, report: &mut Report) -> Option<Tree> {
+    parser.parse(source, None).or_else(|| {
+        report.errors.push(format!("parser cancelled for {path}"));
+        None
+    })
+}
+
+fn compatible_typescript_tree(
+    parser: &mut Parser,
+    tree: Tree,
+    source: &str,
+    path: &str,
+    registry: &Registry,
+    report: &mut Report,
+) -> Option<Tree> {
+    if !tree.root_node().has_error() || registry.language != "typescript" {
+        return Some(tree);
+    }
+    let Some(compatible) = typescript_parser_compatibility_source(source) else {
+        return Some(tree);
+    };
+    parsed_tree(parser, &compatible, path, report)
+}
+
+fn parse_source(
+    path: &str,
+    source: &str,
+    registry: &Registry,
+    report: &mut Report,
+) -> Option<Tree> {
+    let mut parser = configured_parser(path, registry, report)?;
+    let tree = parsed_tree(&mut parser, source, path, report)?;
+    let tree = compatible_typescript_tree(&mut parser, tree, source, path, registry, report)?;
+    if tree.root_node().has_error() {
+        report.errors.push(format!("parse error in {path}"));
+        return None;
+    }
+    Some(tree)
+}
+
+fn collect_source(
+    path: &str,
+    source: &str,
+    registry: &Registry,
+    input: &Input,
+    report: &mut Report,
+    facts: &mut Facts,
+) {
+    let Some(tree) = parse_source(path, source, registry, report) else {
+        return;
+    };
+    visit(
+        tree.root_node(),
+        path,
+        source,
+        registry,
+        input,
+        report,
+        facts,
+    );
+}
+
+pub fn check(input: &Input, registry: &Registry) -> Report {
+    let mut report = Report::new(registry, &input.policy, input.mode, &input.implementations);
+    report.input_sha256 = input.digest.clone();
+    report.scanned_files = input.files.keys().cloned().collect();
+    validate_required_rules(registry, input, &mut report);
+    let mut facts = Facts::default();
+    for (path, source) in &input.files {
+        collect_source(path, source, registry, input, &mut report, &mut facts);
     }
     patterns(&facts, &input.policy, &registry.language, &mut report);
     report.attach_sources(&input.files);

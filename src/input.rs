@@ -172,50 +172,76 @@ fn walk(
         .map_err(|e| format!("cannot enumerate source entry: {e}"))?;
     entries.sort_by_key(|e| e.file_name());
     for entry in entries {
-        let path = entry.path();
-        let relative = path
-            .strip_prefix(root)
-            .map_err(|_| "source path escapes root")?;
-        if excluded(relative, policy) {
-            continue;
+        walk_entry(root, entry, policy, registry, files, manifests)?;
+    }
+    Ok(())
+}
+
+fn reject_symlink(path: &Path, relative: &Path, registry: &Registry) -> Result<(), String> {
+    if source_file(path, &registry.language) {
+        return Err(format!("symlink in source corpus: {}", relative.display()));
+    }
+    if runtime_manifest(path).is_some() {
+        return Err(format!("symlink runtime manifest: {}", relative.display()));
+    }
+    Ok(())
+}
+
+fn capture_working_file(
+    path: &Path,
+    relative: &Path,
+    policy: &Policy,
+    files: &mut BTreeMap<String, String>,
+    manifests: &mut BTreeMap<String, String>,
+) -> Result<(), String> {
+    let name = relative
+        .to_str()
+        .ok_or("source path is not UTF-8")?
+        .to_string();
+    if name.contains('\\') {
+        return Err("backslash source paths are not supported in the portable corpus".into());
+    }
+    let source = text(
+        fs::read(path).map_err(|e| format!("cannot read {name}: {e}"))?,
+        &name,
+    )?;
+    if runtime_manifest(path).is_some() {
+        manifests.insert(name, source);
+    } else {
+        if files.len() >= policy.limits.maximum_files {
+            return Err("maximum_files budget exceeded".into());
         }
-        let kind = entry
-            .file_type()
-            .map_err(|e| format!("cannot inspect source entry: {e}"))?;
-        if kind.is_symlink() {
-            if source_file(&path, &registry.language) {
-                return Err(format!("symlink in source corpus: {}", relative.display()));
-            }
-            if runtime_manifest(&path).is_some() {
-                return Err(format!("symlink runtime manifest: {}", relative.display()));
-            }
-            continue;
-        }
-        if kind.is_dir() {
-            walk(root, &path, policy, registry, files, manifests)?;
-        } else if source_file(&path, &registry.language) || runtime_manifest(&path).is_some() {
-            let name = relative
-                .to_str()
-                .ok_or("source path is not UTF-8")?
-                .to_string();
-            if name.contains('\\') {
-                return Err(
-                    "backslash source paths are not supported in the portable corpus".into(),
-                );
-            }
-            let source = text(
-                fs::read(&path).map_err(|e| format!("cannot read {name}: {e}"))?,
-                &name,
-            )?;
-            if runtime_manifest(&path).is_some() {
-                manifests.insert(name, source);
-                continue;
-            }
-            if files.len() >= policy.limits.maximum_files {
-                return Err("maximum_files budget exceeded".into());
-            }
-            files.insert(name, source);
-        }
+        files.insert(name, source);
+    }
+    Ok(())
+}
+
+fn walk_entry(
+    root: &Path,
+    entry: fs::DirEntry,
+    policy: &Policy,
+    registry: &Registry,
+    files: &mut BTreeMap<String, String>,
+    manifests: &mut BTreeMap<String, String>,
+) -> Result<(), String> {
+    let path = entry.path();
+    let relative = path
+        .strip_prefix(root)
+        .map_err(|_| "source path escapes root")?;
+    if excluded(relative, policy) {
+        return Ok(());
+    }
+    let kind = entry
+        .file_type()
+        .map_err(|e| format!("cannot inspect source entry: {e}"))?;
+    if kind.is_symlink() {
+        return reject_symlink(&path, relative, registry);
+    }
+    if kind.is_dir() {
+        return walk(root, &path, policy, registry, files, manifests);
+    }
+    if source_file(&path, &registry.language) || runtime_manifest(&path).is_some() {
+        capture_working_file(&path, relative, policy, files, manifests)?;
     }
     Ok(())
 }
@@ -271,7 +297,10 @@ pub fn working_tree(root: &Path, policy_path: &Path) -> Result<CapturedInput, St
     })
 }
 
-pub fn staged(policy_path: &Path) -> Result<CapturedInput, String> {
+type IndexEntries = BTreeMap<String, (String, String)>;
+type CapturedCorpus = (BTreeMap<String, String>, BTreeMap<String, String>);
+
+fn validate_staged_policy_path(policy_path: &Path) -> Result<&str, String> {
     if policy_path
         .components()
         .any(|c| !matches!(c, Component::Normal(_)))
@@ -280,10 +309,20 @@ pub fn staged(policy_path: &Path) -> Result<CapturedInput, String> {
             "staged policy must be a repository-relative path without escaping components".into(),
         );
     }
+    policy_path
+        .to_str()
+        .ok_or("policy path is not UTF-8".into())
+}
+
+fn repository_root() -> Result<PathBuf, String> {
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     let root_text = text(git(&cwd, &["rev-parse", "--show-toplevel"])?, "Git root")?;
-    let root = PathBuf::from(root_text.strip_suffix('\n').unwrap_or(&root_text));
-    let initial = git(&root, &["ls-files", "--stage", "-z"])?;
+    Ok(PathBuf::from(
+        root_text.strip_suffix('\n').unwrap_or(&root_text),
+    ))
+}
+
+fn parse_index(initial: &[u8]) -> Result<IndexEntries, String> {
     let mut entries = BTreeMap::new();
     for entry in initial.split(|b| *b == 0).filter(|e| !e.is_empty()) {
         let entry = std::str::from_utf8(entry).map_err(|_| "index contains non-UTF-8 paths")?;
@@ -302,41 +341,73 @@ pub fn staged(policy_path: &Path) -> Result<CapturedInput, String> {
             return Err("duplicate staged path".into());
         }
     }
-    let name = policy_path.to_str().ok_or("policy path is not UTF-8")?;
+    Ok(entries)
+}
+
+fn staged_policy(
+    root: &Path,
+    entries: &IndexEntries,
+    name: &str,
+) -> Result<(String, Registry, Policy), String> {
     let (mode, oid) = entries
         .get(name)
         .ok_or("policy is not staged; refusing unstaged policy")?;
     if !matches!(mode.as_str(), "100644" | "100755") {
         return Err("staged policy is not a regular file".into());
     }
-    let policy_text = text(git(&root, &["cat-file", "blob", oid])?, name)?;
+    let policy_text = text(git(root, &["cat-file", "blob", oid])?, name)?;
     let registry = crate::policy::registry_for_policy(&policy_text)?;
     let policy = crate::policy::parse(&policy_text, &registry)?;
+    Ok((policy_text, registry, policy))
+}
+
+fn validate_staged_path(name: &str, path: &Path) -> Result<(), String> {
+    if name.contains('\\')
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err("non-portable or escaping staged source path".into());
+    }
+    Ok(())
+}
+
+fn capture_staged_blob(
+    root: &Path,
+    name: &str,
+    mode: &str,
+    oid: &str,
+    is_manifest: bool,
+) -> Result<String, String> {
+    if !matches!(mode, "100644" | "100755") {
+        return Err(if is_manifest {
+            format!("staged runtime manifest is not a regular file: {name}")
+        } else {
+            format!("staged source is not a regular file: {name}")
+        });
+    }
+    text(git(root, &["cat-file", "blob", oid])?, name)
+}
+
+fn staged_corpus(
+    root: &Path,
+    entries: &IndexEntries,
+    registry: &Registry,
+    policy: &Policy,
+) -> Result<CapturedCorpus, String> {
     let mut files = BTreeMap::new();
     let mut manifests = BTreeMap::new();
-    for (name, (mode, oid)) in &entries {
+    for (name, (mode, oid)) in entries {
         let path = Path::new(name);
-        if excluded(path, &policy)
+        if excluded(path, policy)
             || (!source_file(path, &registry.language) && runtime_manifest(path).is_none())
         {
             continue;
         }
-        if name.contains('\\')
-            || path
-                .components()
-                .any(|c| !matches!(c, Component::Normal(_)))
-        {
-            return Err("non-portable or escaping staged source path".into());
-        }
-        if !matches!(mode.as_str(), "100644" | "100755") {
-            return Err(if runtime_manifest(path).is_some() {
-                format!("staged runtime manifest is not a regular file: {name}")
-            } else {
-                format!("staged source is not a regular file: {name}")
-            });
-        }
-        let source = text(git(&root, &["cat-file", "blob", oid])?, name)?;
-        if runtime_manifest(path).is_some() {
+        validate_staged_path(name, path)?;
+        let is_manifest = runtime_manifest(path).is_some();
+        let source = capture_staged_blob(root, name, mode, oid, is_manifest)?;
+        if is_manifest {
             manifests.insert(name.clone(), source);
         } else {
             if files.len() >= policy.limits.maximum_files {
@@ -345,9 +416,24 @@ pub fn staged(policy_path: &Path) -> Result<CapturedInput, String> {
             files.insert(name.clone(), source);
         }
     }
-    if initial != git(&root, &["ls-files", "--stage", "-z"])? {
-        return Err("Git index changed during snapshot capture".into());
+    Ok((files, manifests))
+}
+
+fn validate_stable_index(root: &Path, initial: &[u8]) -> Result<(), String> {
+    if initial == git(root, &["ls-files", "--stage", "-z"])? {
+        Ok(())
+    } else {
+        Err("Git index changed during snapshot capture".into())
     }
+}
+
+fn staged_input(
+    files: BTreeMap<String, String>,
+    manifests: BTreeMap<String, String>,
+    policy_text: &str,
+    policy: Policy,
+    registry: Registry,
+) -> Result<CapturedInput, String> {
     if files.is_empty() {
         return Err(format!(
             "staged corpus contains no {} files",
@@ -356,7 +442,7 @@ pub fn staged(policy_path: &Path) -> Result<CapturedInput, String> {
     }
     Ok(CapturedInput {
         input: Input {
-            digest: snapshot_digest(&files, &manifests, &policy_text),
+            digest: snapshot_digest(&files, &manifests, policy_text),
             implementations: implementations(&files, &manifests),
             files,
             policy,
@@ -364,4 +450,15 @@ pub fn staged(policy_path: &Path) -> Result<CapturedInput, String> {
         },
         registry,
     })
+}
+
+pub fn staged(policy_path: &Path) -> Result<CapturedInput, String> {
+    let policy_name = validate_staged_policy_path(policy_path)?;
+    let root = repository_root()?;
+    let initial = git(&root, &["ls-files", "--stage", "-z"])?;
+    let entries = parse_index(&initial)?;
+    let (policy_text, registry, policy) = staged_policy(&root, &entries, policy_name)?;
+    let (files, manifests) = staged_corpus(&root, &entries, &registry, &policy)?;
+    validate_stable_index(&root, &initial)?;
+    staged_input(files, manifests, &policy_text, policy, registry)
 }
