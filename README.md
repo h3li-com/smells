@@ -50,6 +50,31 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 ```
 
+## Repository quality hooks
+
+This repository dogfoods the scanner through one fail-closed gate used by both
+the checked-in pre-commit and pre-push hooks:
+
+```sh
+make install-hooks
+make pre-commit-push
+```
+
+The shared gate checks formatting, performs a locked all-target Cargo build,
+runs Clippy and tests, scans this repository with `quality-policy.json`, enforces
+the committed CRAP regression baseline, runs Gitleaks, and checks `Cargo.lock`
+with OSV-Scanner. A failing self-scan prints the complete JSON evidence for an
+agent; a passing scan is saved at `target/quality/smells-report.json`.
+Gitleaks checks both the staged patch and repository history, so the shared gate
+has the correct coverage in both hook contexts.
+
+The toolchain is intentionally pinned by `scripts/check-quality-tools.sh`:
+`cargo-crap 0.5.0`, `cargo-llvm-cov 0.8.7`, Gitleaks 8.30.1, and OSV-Scanner
+2.3.8. The CRAP classification threshold is 30. Existing scores are recorded in
+`.cargo-crap-baseline.json`, and any function-level regression fails the gate.
+On a rustup toolchain, `cargo-llvm-cov` discovers `llvm-tools-preview`; the gate
+also supports the matching Homebrew LLVM installation used by Homebrew Rust.
+
 Tests exercise the public CLI against actual Rust, Python, TypeScript, and TSX source, including class ownership, threshold boundaries, matching/nonmatching shapes, cross-file Rust ownership, replay, staged policy/source isolation, selected-source symlink rejection, non-source symlink skipping, monorepo cache exclusions, pending implementations, and errors.
 
 The opt-in live E2E test runs the example hook in a temporary Git repository with a blocking staged smell, verifies that the hook returns actionable JSON, follows the finding's emitted Refactoring.Guru URL with `curl`, and verifies that the expected smell page and guidance were returned. It requires network access and is ignored by the deterministic default suite:
@@ -62,6 +87,6 @@ cargo test --locked --test e2e_live -- --ignored --nocapture
 
 Install the executable separately; consuming applications do not import scanner code. Each policy selects exactly one language pack. A mixed-language repository invokes the scanner once per checked-in language policy, from the same pre-commit runner if desired. Exact exceptions, active compiler configuration, type-aware evidence, contracts, history, and automatic fixes are not implemented yet. Nonempty exceptions or unsupported policy scope are rejected. If a pending rule is required, the source check exits 2.
 
-Keep OSV, Gitleaks, formatting, Clippy, application tests, coverage, and other checks in the consuming project's quality runner. The [hook example](hooks/pre-commit.example) remains uninstalled: validate and pin this source pass for the project's chosen scope before integration. Do not overwrite existing hooks. See [project integration](docs/project-integration.md).
+Keep OSV, Gitleaks, formatting, Clippy, application tests, coverage, and other checks in each consuming project's quality runner. This scanner repository has its own checked-in hooks and deliberately runs those checks against itself. The [consumer hook example](hooks/pre-commit.example) remains uninstalled: validate and pin this source pass for the consuming project's chosen scope before integration. Do not overwrite existing hooks. See [project integration](docs/project-integration.md).
 
 Extracted from the tiny design session on 2026-09-18. This standalone repository is maintained independently of consuming applications. Private GitHub repository: [mindful-time/smells](https://github.com/mindful-time/smells).
