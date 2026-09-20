@@ -10,8 +10,6 @@ script_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repository_root=$(CDPATH= cd -- "$script_directory/.." && pwd)
 packager="$script_directory/package-npm.sh"
 
-mkdir -p "$work"
-work=$(CDPATH= cd -- "$work" && pwd)
 platform_output="$work/platform"
 root_output="$work/root"
 consumer="$work/consumer"
@@ -55,7 +53,8 @@ if grep -F '__SMELLS_VERSION__' \
 fi
 
 node -e '
-const root = require(process.argv[1]);
+const { resolve } = require("node:path");
+const root = require(resolve(process.argv[1]));
 const expected = process.argv[2];
 if (root.name !== "@mindful-time/smells" || root.version !== expected) process.exit(1);
 if (root.scripts) process.exit(1);

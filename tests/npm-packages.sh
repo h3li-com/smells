@@ -46,9 +46,23 @@ printf '%s\n' \
     'exit 7' > "$fake_binary"
 chmod +x "$fake_binary"
 
+real_node=$(command -v node)
+mkdir -p "$temporary/bin"
+printf '%s\n' \
+    '#!/bin/sh' \
+    'if [ "${1##*/}" = build-package.mjs ] && [ "${4#/}" != "$4" ]; then' \
+    '    printf '\''packager output crossed the shell/runtime boundary as an absolute path: %s\n'\'' "$4" >&2' \
+    '    exit 91' \
+    'fi' \
+    'exec "$SMELLS_TEST_REAL_NODE" "$@"' \
+    > "$temporary/bin/node"
+chmod +x "$temporary/bin/node"
+
 relative_work=${absolute_work#"$repository_root/"}
 (
     cd "$repository_root"
+    PATH="$temporary/bin:$PATH" \
+        SMELLS_TEST_REAL_NODE="$real_node" \
     "$smoke_test" "$target" "$fake_binary" "$relative_work" "$version"
 )
 
