@@ -77,6 +77,21 @@ fi
 test "$status" = 7
 test "$(cat "$forwarded")" = 'alpha two words'
 
+windows_launcher="$temporary/windows-npm-launcher.mjs"
+printf '%s\n' \
+    'import { pathToFileURL } from "node:url";' \
+    'Object.defineProperty(process, "platform", { value: "win32" });' \
+    'const [script, ...args] = process.argv.slice(2);' \
+    'process.argv = [process.execPath, script, ...args];' \
+    'await import(pathToFileURL(script));' \
+    > "$windows_launcher"
+windows_output="$temporary/windows-output"
+PATH="$temporary/no-tools" TEMP="$temporary" TMP="$temporary" \
+    "$real_node" "$windows_launcher" \
+    "$repository_root/npm/build-package.mjs" \
+    "$target" "$fake_binary" "$windows_output" "$version"
+test "$(find "$windows_output" -maxdepth 1 -name '*.tgz' | wc -l | tr -d ' ')" = 1
+
 if "$packager" unsupported-target "$fake_binary" "$temporary/invalid" "$version" \
     >/dev/null 2>&1; then
     printf 'npm packager accepted an unsupported target\n' >&2

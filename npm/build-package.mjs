@@ -5,6 +5,7 @@ import {
   chmodSync,
   copyFileSync,
   cpSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -21,6 +22,33 @@ const platforms = Object.freeze(
   JSON.parse(readFileSync(path.join(packageRoot, "platforms.json"), "utf8")),
 );
 const [kind, binary, output, version] = process.argv.slice(2);
+
+function npmInvocation() {
+  if (process.platform !== "win32") {
+    return { command: "npm", prefix: [] };
+  }
+
+  const executableDirectory = path.dirname(process.execPath);
+  const candidates = [
+    path.join(executableDirectory, "node_modules", "npm", "bin", "npm-cli.js"),
+    path.join(
+      executableDirectory,
+      "..",
+      "lib",
+      "node_modules",
+      "npm",
+      "bin",
+      "npm-cli.js",
+    ),
+  ];
+  const npmCli = candidates.find((candidate) => existsSync(candidate));
+  if (!npmCli) {
+    throw new Error(
+      `cannot locate npm-cli.js beside the Node executable: ${process.execPath}`,
+    );
+  }
+  return { command: process.execPath, prefix: [npmCli] };
+}
 
 if (!kind || !binary || !output || !/^\d+\.\d+\.\d+$/.test(version ?? "")) {
   console.error("usage: build-package.mjs TARGET|root BINARY|- OUTPUT VERSION");
@@ -100,11 +128,16 @@ try {
     path.join(temporary, "package.json"),
     `${JSON.stringify(manifest, null, 2)}\n`,
   );
+  const npm = npmInvocation();
   const packed = spawnSync(
-    "npm",
-    ["pack", temporary, "--pack-destination", output],
+    npm.command,
+    [...npm.prefix, "pack", temporary, "--pack-destination", output],
     { encoding: "utf8", stdio: ["ignore", "pipe", "inherit"] },
   );
+  if (packed.error) {
+    console.error(`failed to start npm pack: ${packed.error.message}`);
+    process.exit(1);
+  }
   if (packed.status !== 0) {
     process.exit(packed.status ?? 1);
   }
