@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag matching Cargo.toml, for example v0.2.1
+        description: Release tag matching Cargo.toml, for example v0.3.0
         required: true
         type: string
 
@@ -78,6 +78,11 @@ jobs:
         with:
           python-version: "3.12"
 
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.15.0"
+          package-manager-cache: false
+
       - name: Build wheel and binary
         uses: PyO3/maturin-action@423a6347767a8b16e65c2a7a7042e4a921528da8 # v1
         env:
@@ -119,12 +124,23 @@ jobs:
           "target/archive-smoke/smells-${{ matrix.target }}/smells" --version
           "target/archive-smoke/smells-${{ matrix.target }}/smells" --help
 
+      - name: Smoke-test the npm packages offline
+        env:
+          NPM_CONFIG_CACHE: ${{ runner.temp }}/npm-cache
+        run: |
+          ./scripts/smoke-test-npm.sh \
+            "${{ matrix.target }}" \
+            "target/${{ matrix.target }}/release/smells" \
+            target/npm-package-smoke \
+            "${{ needs.validate.outputs.version }}"
+
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-${{ matrix.target }}
           path: |
             dist/*.whl
             release/*
+            target/npm-package-smoke/platform/*.tgz
           if-no-files-found: error
           retention-days: 7
 
@@ -153,6 +169,11 @@ jobs:
         with:
           python-version: "3.12"
           architecture: ${{ matrix.python_architecture }}
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.15.0"
+          package-manager-cache: false
 
       - name: Build wheel and binary
         uses: PyO3/maturin-action@423a6347767a8b16e65c2a7a7042e4a921528da8 # v1
@@ -190,12 +211,23 @@ jobs:
           "target/archive-smoke/smells-${{ matrix.target }}/smells" --version
           "target/archive-smoke/smells-${{ matrix.target }}/smells" --help
 
+      - name: Smoke-test the npm packages offline
+        env:
+          NPM_CONFIG_CACHE: ${{ runner.temp }}/npm-cache
+        run: |
+          ./scripts/smoke-test-npm.sh \
+            "${{ matrix.target }}" \
+            "target/${{ matrix.target }}/release/smells" \
+            target/npm-package-smoke \
+            "${{ needs.validate.outputs.version }}"
+
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-${{ matrix.target }}
           path: |
             dist/*.whl
             release/*
+            target/npm-package-smoke/platform/*.tgz
           if-no-files-found: error
           retention-days: 7
 
@@ -214,6 +246,11 @@ jobs:
         with:
           python-version: "3.12"
           architecture: x64
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.15.0"
+          package-manager-cache: false
 
       - name: Build wheel and binary
         uses: PyO3/maturin-action@423a6347767a8b16e65c2a7a7042e4a921528da8 # v1
@@ -255,12 +292,24 @@ jobs:
           target/archive-smoke/smells-x86_64-pc-windows-msvc/smells.exe --version
           target/archive-smoke/smells-x86_64-pc-windows-msvc/smells.exe --help
 
+      - name: Smoke-test the npm packages offline
+        shell: bash
+        env:
+          NPM_CONFIG_CACHE: ${{ runner.temp }}/npm-cache
+        run: |
+          ./scripts/smoke-test-npm.sh \
+            x86_64-pc-windows-msvc \
+            target/x86_64-pc-windows-msvc/release/smells.exe \
+            target/npm-package-smoke \
+            "${{ needs.validate.outputs.version }}"
+
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-x86_64-pc-windows-msvc
           path: |
             dist/*.whl
             release/*
+            target/npm-package-smoke/platform/*.tgz
           if-no-files-found: error
           retention-days: 7
 
@@ -292,6 +341,19 @@ jobs:
       - name: Normalize the downloaded release artifacts
         run: ./scripts/collect-release-artifacts.sh release-artifacts release
 
+      - name: Package the crates.io source archive
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          cargo package --locked
+          cp "target/package/smells-$RELEASE_VERSION.crate" release/
+
+      - name: Package the root npm launcher
+        env:
+          NPM_CONFIG_CACHE: ${{ runner.temp }}/npm-cache
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+        run: ./scripts/package-npm.sh root - release "$RELEASE_VERSION"
+
       - name: Extract the Cargo dependency SBOM from a wheel
         run: |
           wheel=$(find release -maxdepth 1 -name '*.whl' -print | sort | head -n 1)
@@ -315,7 +377,7 @@ jobs:
         working-directory: release
         run: |
           : > sha256.sum
-          for artifact in *.tar.gz *.zip *.whl *.json; do
+          for artifact in *.tar.gz *.zip *.whl *.crate *.tgz *.json; do
             test -e "$artifact" || continue
             sha256sum "$artifact" >> sha256.sum
           done
@@ -345,3 +407,186 @@ jobs:
             sleep 3
           done
           exit 1
+
+  publish-pypi:
+    name: publish to PyPI
+    needs: [validate, publish]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
+          persist-credentials: false
+
+      - name: Revalidate the release actor
+        run: |
+          ./scripts/verify-release-actor.sh \
+            "$GITHUB_REPOSITORY_OWNER" \
+            "$GITHUB_ACTOR" \
+            "$GITHUB_TRIGGERING_ACTOR"
+
+      - name: Download the signed release wheels
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          gh release verify "$RELEASE_TAG"
+          mkdir pypi-dist
+          gh release download "$RELEASE_TAG" --pattern '*.whl' --dir pypi-dist
+
+      - name: Publish the wheels with PyPI Trusted Publishing
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          packages-dir: pypi-dist
+          attestations: true
+          skip-existing: true
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Verify the package from PyPI
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          python scripts/verify-pypi-release.py "$RELEASE_VERSION" pypi-dist
+          python -m venv target/pypi-smoke
+          for attempt in 1 2 3 4 5; do
+            if target/pypi-smoke/bin/python -m pip install \
+                --no-cache-dir --only-binary=:all: "smells==$RELEASE_VERSION"; then
+              target/pypi-smoke/bin/smells --version
+              exit 0
+            fi
+            sleep 3
+          done
+          exit 1
+
+  publish-npm:
+    name: publish to npm
+    needs: [validate, publish]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
+          persist-credentials: false
+
+      - name: Revalidate the release actor
+        run: |
+          ./scripts/verify-release-actor.sh \
+            "$GITHUB_REPOSITORY_OWNER" \
+            "$GITHUB_ACTOR" \
+            "$GITHUB_TRIGGERING_ACTOR"
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.15.0"
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Require an npm CLI with Trusted Publishing support
+        run: |
+          npm_version=$(npm --version)
+          node -e 'const [major, minor, patch] = process.argv[1].split(".").map(Number); if (major < 11 || (major === 11 && minor < 5) || (major === 11 && minor === 5 && patch < 1)) process.exit(1)' "$npm_version"
+          npm --version
+
+      - name: Download the signed release npm packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          gh release verify "$RELEASE_TAG"
+          mkdir npm-dist
+          gh release download "$RELEASE_TAG" --pattern '*.tgz' --dir npm-dist
+
+      - name: Publish native packages, then the root launcher
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+        run: node npm/publish-packages.mjs npm-dist "$RELEASE_VERSION"
+
+      - name: Verify the package from npm
+        env:
+          NPM_CONFIG_CACHE: ${{ runner.temp }}/npm-cache
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          mkdir -p target/npm-registry-smoke
+          printf '%s\n' '{"name":"smells-registry-smoke","private":true}' \
+            > target/npm-registry-smoke/package.json
+          for attempt in 1 2 3 4 5; do
+            if npm install \
+                --prefix target/npm-registry-smoke \
+                --ignore-scripts --no-audit --no-fund \
+                --save-exact "@mindful-time/smells@$RELEASE_VERSION"; then
+              target/npm-registry-smoke/node_modules/.bin/smells --version
+              exit 0
+            fi
+            sleep 3
+          done
+          exit 1
+
+  publish-crates:
+    name: publish to crates.io
+    needs: [validate, publish]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
+          persist-credentials: false
+
+      - name: Revalidate the release actor
+        run: |
+          ./scripts/verify-release-actor.sh \
+            "$GITHUB_REPOSITORY_OWNER" \
+            "$GITHUB_ACTOR" \
+            "$GITHUB_TRIGGERING_ACTOR"
+
+      - name: Publish the verified source package
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          cargo package --locked
+          ./scripts/publish-crate.sh \
+            "$RELEASE_VERSION" \
+            "target/package/smells-$RELEASE_VERSION.crate"
+
+      - name: Verify installation from crates.io
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          for attempt in 1 2 3 4 5; do
+            if cargo install \
+                --locked --root target/crates-smoke \
+                --version "$RELEASE_VERSION" smells; then
+              target/crates-smoke/bin/smells --version
+              exit 0
+            fi
+            sleep 3
+          done
+          exit 1
+
+  registries-required:
+    name: registries required
+    if: always()
+    needs: [publish-pypi, publish-npm, publish-crates]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require every registry publication
+        env:
+          CRATES_RESULT: ${{ needs.publish-crates.result }}
+          NPM_RESULT: ${{ needs.publish-npm.result }}
+          PYPI_RESULT: ${{ needs.publish-pypi.result }}
+        run: |
+          test "$CRATES_RESULT" = success
+          test "$NPM_RESULT" = success
+          test "$PYPI_RESULT" = success

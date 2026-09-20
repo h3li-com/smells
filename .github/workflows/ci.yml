@@ -77,6 +77,11 @@ jobs:
         with:
           python-version: "3.12"
 
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.15.0"
+          package-manager-cache: false
+
       - name: Build the Linux wheel and release binary
         uses: PyO3/maturin-action@423a6347767a8b16e65c2a7a7042e4a921528da8 # v1
         env:
@@ -112,6 +117,20 @@ jobs:
           cmp LICENSE target/release-extracted/smells-x86_64-unknown-linux-gnu/LICENSE
           target/release-extracted/smells-x86_64-unknown-linux-gnu/smells --version
           target/release-extracted/smells-x86_64-unknown-linux-gnu/smells --help
+
+      - name: Verify the npm packages install and run offline
+        env:
+          NPM_CONFIG_CACHE: ${{ runner.temp }}/npm-cache
+        run: |
+          version=$(sed -n '/^\[package\]/,/^\[/ s/^version = "\([^"]*\)"/\1/p' Cargo.toml)
+          ./scripts/smoke-test-npm.sh \
+            x86_64-unknown-linux-gnu \
+            target/x86_64-unknown-linux-gnu/release/smells \
+            target/npm-package-smoke \
+            "$version"
+
+      - name: Verify the crates.io source package
+        run: cargo package --locked
 
   required:
     name: required

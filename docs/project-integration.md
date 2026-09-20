@@ -2,7 +2,7 @@
 
 ## Policy and scope
 
-Each project owns a checked-in policy. Schema v2 selects exactly one of `rust-v1`, `python-v1`, or `typescript-v1` and pins scanner 0.2.1, with explicit version, mode, and every parameter for all 28 rules. `default_groups` controls the persistent selection; the starter policies use `all`. A mixed-language repository uses one policy and one scanner invocation per language pack; this keeps each input corpus and threshold contract explicit. Version-1 specification policies are rejected rather than silently migrated.
+Each project owns a checked-in policy. Schema v2 selects exactly one of `rust-v1`, `python-v1`, or `typescript-v1` and pins scanner 0.3.0, with explicit version, mode, and every parameter for all 28 rules. `default_groups` controls the persistent selection; the starter policies use `all`. A mixed-language repository uses one policy and one scanner invocation per language pack; this keeps each input corpus and threshold contract explicit. Version-1 specification policies are rejected rather than silently migrated.
 
 Modes are required, report and off. Required matches block; report matches remain reproducible indicators; off is a legacy/custom-policy opt-out and is disabled, not passed. Every starter rule is required or report and therefore active. The `all` default selects every rule; a selected provider-backed rule requires a complete bundle tied to the exact resolved scan input, otherwise the scan errors. Use `--only-group source` when the intended contract is explicitly source-only.
 

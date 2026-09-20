@@ -31,6 +31,8 @@ trap 'rm -f -- "$manifest"' EXIT HUP INT TERM
 
 find "$input" -type f \( \
     -name '*.whl' -o \
+    -name '*.crate' -o \
+    -name '*.tgz' -o \
     -name '*.tar.gz' -o \
     -name '*.zip' -o \
     -name '*.sha256' \

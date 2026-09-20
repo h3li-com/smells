@@ -21,7 +21,7 @@ coding environments.
 [Choose rules](#choose-which-policy-groups-run) ·
 [Full-pattern evidence](#source-rules-and-full-pattern-evidence) ·
 [Rule reference](#policies-and-rule-reference) ·
-[Releases](#install-a-release)
+[Install](#install-smells)
 
 ## At a glance
 
@@ -30,7 +30,7 @@ coding environments.
 - Separates blocking rules from review-only signals.
 - Understands monorepos and groups results by the nearest runtime manifest.
 - Emits human-readable tables or complete JSON for hooks and coding agents.
-- Ships versioned standalone binaries and binary Python wheels from one release build.
+- Ships versioned GitHub binaries, PyPI wheels, native npm packages, and a crates.io package from one release build.
 - Fails closed when parsing, required evidence, or analysis budgets are incomplete.
 - Covers all 23 Refactoring.Guru smell categories through 28 rules per language pack.
 
@@ -53,19 +53,46 @@ its TypeScript/TSX source, but not its native Android code.
 
 ## Quick start
 
-### 1. Install a release
+### 1. Install Smells
+
+The fastest cross-language option is the prebuilt PyPI tool package:
+
+```sh
+uv tool install smells==0.3.0
+smells --version
+```
+
+Node projects can pin the native npm package. It does not download anything during
+installation:
+
+```sh
+npm install --save-dev --save-exact @mindful-time/smells@0.3.0
+npx --no-install smells --version
+```
+
+Rust users can build the same executable from its verified crates.io source package:
+
+```sh
+cargo install --locked --version 0.3.0 smells
+```
+
+Unlike the PyPI and npm channels, `cargo install` requires Rust 1.88 and compiles
+locally. See [package distribution](docs/package-distribution.md) for package names,
+platform selection, registry provenance, and owner bootstrap requirements.
+
+### Install a standalone release
 
 Download the archive for your host from the matching
 [GitHub Release](https://github.com/mindful-time/smells/releases). Verify both its
 checksum and GitHub provenance before installing it. For macOS Apple Silicon:
 
 ```sh
-gh release download v0.2.1 \
+gh release download v0.3.0 \
   --repo mindful-time/smells \
   --pattern 'smells-aarch64-apple-darwin.tar.gz*'
 shasum -a 256 -c smells-aarch64-apple-darwin.tar.gz.sha256
-gh release verify v0.2.1 --repo mindful-time/smells
-gh release verify-asset v0.2.1 \
+gh release verify v0.3.0 --repo mindful-time/smells
+gh release verify-asset v0.3.0 \
   smells-aarch64-apple-darwin.tar.gz \
   --repo mindful-time/smells
 tar -xzf smells-aarch64-apple-darwin.tar.gz
@@ -74,11 +101,11 @@ smells --version
 ```
 
 The same release contains macOS Intel, Linux AMD64/ARM64 GNU, and Windows AMD64
-archives. It also contains platform-specific Python wheels carrying the identical
-Rust executable. After downloading the wheel for your platform:
+archives. It also contains the exact wheel, npm, and crates.io package payloads
+published by the release workflow. After downloading a wheel directly:
 
 ```sh
-uv tool install ./smells-0.2.1-py3-none-PLATFORM.whl
+uv tool install ./smells-0.3.0-py3-none-PLATFORM.whl
 ```
 
 The wheel is a delivery mechanism; the scanner does not become a Python program.
@@ -319,6 +346,26 @@ The repository includes an inactive [consumer hook example](hooks/pre-commit.exa
 Pin and validate the scanner version before adding it to another project, and
 merge the command into any existing hook rather than overwriting that hook.
 
+For the Python `pre-commit` framework, `uvx` provides a pinned, cached executable
+without checking scanner source into the consuming repository:
+
+```yaml
+repos:
+  - repo: local
+    hooks:
+      - id: smells
+        name: deterministic smell scan
+        language: system
+        entry: uvx --from smells==0.3.0 smells check --staged --policy quality-policy.json --only-group source --format json
+        pass_filenames: false
+```
+
+A Node project that already pins `@mindful-time/smells` can use the same hook with
+`entry: npx --no-install smells check ...`. A Rust-oriented development image can
+install `smells` once with Cargo and keep the plain `smells check ...` entry. In all
+three cases the policy stays checked into the consuming repository and the hook scans
+the same Git-index snapshot.
+
 A minimal single-language hook is:
 
 ```sh
@@ -535,9 +582,9 @@ Ordinary tests remain offline and deterministic.
 
 ## Project status
 
-`smells` is currently version `0.2.1`. GitHub Release archives are the canonical
-distribution; binary Python wheels are attached to the same release. The crate is
-not published to crates.io and no sdist is produced. Smells is open-source software
-licensed under the [MIT License](LICENSE).
+`smells` is currently version `0.3.0`. The same owner-gated release publishes
+standalone GitHub archives, binary PyPI wheels, native npm packages, and the crates.io
+source package. No Python sdist is produced. Smells is open-source software licensed
+under the [MIT License](LICENSE).
 Repository:
 [mindful-time/smells](https://github.com/mindful-time/smells).

@@ -43,7 +43,10 @@ require_version_first_line() {
 
 require_command cargo
 require_command gitleaks
+require_command node
+require_command npm
 require_command osv-scanner
+require_command python3
 
 require_version 'cargo crap --version' "cargo-crap $CARGO_CRAP_VERSION" cargo crap --version
 require_version 'cargo llvm-cov --version' \

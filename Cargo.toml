@@ -1,11 +1,29 @@
 [package]
 name = "smells"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Deterministic Rust, Python, and TypeScript source-pattern smell scanner"
 license = "MIT"
-publish = false
+homepage = "https://github.com/mindful-time/smells"
+repository = "https://github.com/mindful-time/smells"
+readme = "README.md"
+keywords = ["code-quality", "code-smells", "lint", "cli", "static-analysis"]
+categories = ["command-line-utilities", "development-tools"]
+publish = ["crates-io"]
+include = [
+    "src/**",
+    "rules/**",
+    "schemas/**",
+    "examples/**",
+    "docs/**",
+    "tests/**",
+    "Cargo.toml",
+    "Cargo.lock",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+]
 
 [dependencies]
 libc = "0.2"

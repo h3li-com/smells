@@ -20,6 +20,8 @@ mkdir -p \
 printf 'linux wheel\n' > "$input/release-linux/dist/smells-linux.whl"
 printf 'linux archive\n' > "$input/release-linux/release/smells-linux.tar.gz"
 printf 'linux checksum\n' > "$input/release-linux/release/smells-linux.tar.gz.sha256"
+printf 'linux npm package\n' > "$input/release-linux/release/smells-linux.tgz"
+printf 'Rust crate\n' > "$input/release-linux/release/smells.crate"
 printf 'macOS wheel\n' > "$input/release-macos/dist/smells-macos.whl"
 printf 'macOS archive\n' > "$input/release-macos/release/smells-macos.tar.gz"
 printf 'macOS checksum\n' > "$input/release-macos/release/smells-macos.tar.gz.sha256"
@@ -31,12 +33,14 @@ printf 'ignored\n' > "$input/release-linux/metadata.txt"
 
 expected='smells-linux.tar.gz
 smells-linux.tar.gz.sha256
+smells-linux.tgz
 smells-linux.whl
 smells-macos.tar.gz
 smells-macos.tar.gz.sha256
 smells-macos.whl
 smells-windows.zip
-smells-windows.zip.sha256'
+smells-windows.zip.sha256
+smells.crate'
 actual=$(find "$output" -mindepth 1 -maxdepth 1 -type f -exec basename {} \; | sort)
 test "$actual" = "$expected"
 test "$(cat "$output/smells-linux.whl")" = 'linux wheel'
