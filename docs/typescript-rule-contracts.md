@@ -1,6 +1,6 @@
 # Deterministic TypeScript patterns — typescript-v1
 
-This is the normative contract for `typescript-v1`. It maps the exact 23-item Refactoring.Guru catalog to 28 deterministic rules. Ten authored-source rules are implemented; 18 type-, contract-, compiler-, coverage-, or history-dependent rules are explicit pending work. A pending required rule is an error, never a pass.
+This is the normative contract for `typescript-v1`. It maps the exact 23-item Refactoring.Guru catalog to 28 deterministic rules. Ten rules are measured directly from authored source; 18 type-, contract-, compiler-, coverage-, or history-dependent rules use the complete pinned [provider-evidence contract](provider-evidence.md). An enabled provider rule without valid complete evidence is an error, never a pass.
 
 ## Shared source contract
 
@@ -64,78 +64,78 @@ Match when fields are at least `minimum_fields` (default 2) and non-accessor ope
 
 Match only when field count, method count, and summed method lines are all at most their configured maxima (defaults 1, 1, and 5). Small nominal, schema, or transport classes can legitimately match.
 
-## Pending rules
+## Provider-evidence rules
 
-The contracts below describe required evidence, but their providers are not implemented in `typescript-v1`.
+The rules below are implemented as provider-backed evaluators. Their producers must supply complete facts using the exact measurement maps in the [provider-evidence contract](provider-evidence.md); the scanner applies every configured threshold.
 
 <a id="typescript-primitive-slots"></a>
-### `typescript.primitive_slots@1` — pending
+### `typescript.primitive_slots@1` — provider evidence
 Requires resolved slot types; match `minimum_raw_slots` and `minimum_share_percent` for registered primitive types.
 
 <a id="typescript-alternative-interfaces"></a>
-### `typescript.alternative_interfaces@1` — pending
+### `typescript.alternative_interfaces@1` — provider evidence
 Requires type/interface resolution before comparing behaviorally similar distinct classes.
 
 <a id="typescript-repeated-dispatch"></a>
-### `typescript.repeated_dispatch@1` — pending
+### `typescript.repeated_dispatch@1` — provider evidence
 Requires resolved variant/type dispatch; match `minimum_sites` with at least `minimum_arms` each.
 
 <a id="typescript-temporary-fields"></a>
-### `typescript.temporary_fields@1` — pending
+### `typescript.temporary_fields@1` — provider evidence
 Requires resolved field-use ownership; match `minimum_fields` across `minimum_methods` at no more than `maximum_use_percent`.
 
 <a id="typescript-forwarding-share"></a>
-### `typescript.forwarding_share@1` — pending
+### `typescript.forwarding_share@1` — provider evidence
 Requires resolved delegation; match `minimum_methods` and `minimum_share_percent` strict forwarders.
 
 <a id="typescript-function-crap"></a>
-### `typescript.function_crap@1` — pending
+### `typescript.function_crap@1` — provider evidence
 Requires pinned complexity and complete matching coverage evidence; match CRAP greater than `maximum`.
 
 <a id="typescript-unused-code"></a>
-### `typescript.unused_code@1` — pending
+### `typescript.unused_code@1` — provider evidence
 Requires pinned complete diagnostics; match findings greater than `maximum_findings`.
 
 <a id="typescript-unused-type-parameters"></a>
-### `typescript.unused_type_parameters@1` — pending
+### `typescript.unused_type_parameters@1` — provider evidence
 Requires pinned type diagnostics; match findings greater than `maximum_findings`.
 
 <a id="typescript-nominal-slot-contract"></a>
-### `typescript.nominal_slot_contract@1` — pending
+### `typescript.nominal_slot_contract@1` — provider evidence
 Requires full type resolution plus a project nominal-slot contract; match mismatches greater than `maximum_mismatches`.
 
 <a id="typescript-port-conformance"></a>
-### `typescript.port_conformance@1` — pending
+### `typescript.port_conformance@1` — provider evidence
 Requires declared ports and complete conformance evidence; match failures greater than `maximum_failures`.
 
 <a id="typescript-refused-bequest"></a>
-### `typescript.refused_bequest@1` — pending
+### `typescript.refused_bequest@1` — provider evidence
 Requires a resolved inheritance graph; match at least `minimum_inherited_members` with use at or below the configured `minimum_unused_percent` complement.
 
 <a id="typescript-divergent-change"></a>
-### `typescript.divergent_change@1` — pending
+### `typescript.divergent_change@1` — provider evidence
 Requires a pinned logical-change ledger; match `minimum_changes` and `minimum_responsibilities` for one owner.
 
 <a id="typescript-parallel-inheritance"></a>
-### `typescript.parallel_inheritance@1` — pending
+### `typescript.parallel_inheritance@1` — provider evidence
 Requires resolved inheritance graphs and pinned history; match at least `minimum_parallel_pairs` paired additions.
 
 <a id="typescript-shotgun-surgery"></a>
-### `typescript.shotgun_surgery@1` — pending
+### `typescript.shotgun_surgery@1` — provider evidence
 Requires pinned logical changes and ownership; match owner count greater than `maximum_owners`.
 
 <a id="typescript-foreign-accesses"></a>
-### `typescript.foreign_accesses@1` — pending
+### `typescript.foreign_accesses@1` — provider evidence
 Requires member-owner resolution; match `minimum_foreign_accesses` and a foreign share strictly above `minimum_share_percent_exclusive`.
 
 <a id="typescript-dependency-contract"></a>
-### `typescript.dependency_contract@1` — pending
+### `typescript.dependency_contract@1` — provider evidence
 Requires a closed allowed-edge contract and resolved imports; match forbidden accesses greater than `maximum_forbidden_accesses`.
 
 <a id="typescript-library-capabilities"></a>
-### `typescript.library_capabilities@1` — pending
+### `typescript.library_capabilities@1` — provider evidence
 Requires pinned dependencies and complete named capability tests; match failures greater than `maximum_failures`.
 
 <a id="typescript-navigation-chains"></a>
-### `typescript.navigation_chains@1` — pending
+### `typescript.navigation_chains@1` — provider evidence
 Requires resolved domain owners; match contiguous navigation across at least `minimum_transitions` owner changes.

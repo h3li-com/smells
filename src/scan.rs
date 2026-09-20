@@ -1,5 +1,6 @@
 use crate::{
     input::Input,
+    metrics::{self, Counter},
     policy::{Policy, Registry},
     report::{Location, Report},
 };
@@ -1178,11 +1179,6 @@ fn functions(facts: &mut Facts, input: &Input, report: &mut Report) {
     }
 }
 
-fn with_sources(mut report: Report, input: &Input) -> Report {
-    report.attach_sources(&input.files);
-    report
-}
-
 fn validate_required_rules(registry: &Registry, input: &Input, report: &mut Report) {
     for rule in &registry.rules {
         if rule.implementation == "not_implemented" && input.policy.required(&rule.id) {
@@ -1198,6 +1194,10 @@ fn parse_sources(input: &Input, report: &mut Report) -> BTreeMap<String, syn::Fi
     for (path, source) in &input.files {
         match syn::parse_file(source) {
             Ok(file) => {
+                metrics::add(
+                    Counter::SyntaxTokens,
+                    rustc_lexer::tokenize(source, rustc_lexer::FrontmatterAllowed::No).count(),
+                );
                 parsed.insert(path.clone(), file);
             }
             Err(error) => report
@@ -1310,18 +1310,18 @@ pub fn check(input: &Input, registry: &Registry) -> Report {
     validate_required_rules(registry, input, &mut report);
     let parsed = parse_sources(input, &mut report);
     if parsed.len() != input.files.len() {
-        return with_sources(report, input);
+        return report;
     }
     let referenced = referenced_sources(&parsed, &mut report);
     if !report.errors.is_empty() {
-        return with_sources(report, input);
+        return report;
     }
     let roots = root_sources(&parsed, &referenced);
     if roots.is_empty() {
         report
             .errors
             .push("cyclic source module graph has no root".into());
-        return with_sources(report, input);
+        return report;
     }
     let mut facts = Facts {
         modules: BTreeMap::new(),
@@ -1333,14 +1333,15 @@ pub fn check(input: &Input, registry: &Registry) -> Report {
     facts.modules = collect_modules(roots, &parsed, &mut report);
     validate_module_coverage(&facts.modules, &parsed, &mut report);
     if !report.errors.is_empty() {
-        return with_sources(report, input);
+        return report;
     }
     if let Err(error) = declarations(&mut facts, &input.policy, &mut report) {
         report.errors.push(error);
-        return with_sources(report, input);
+        return report;
     }
     functions(&mut facts, input, &mut report);
+    metrics::add(Counter::Functions, facts.functions.len());
     record_type_metrics(&facts, &input.policy, &mut report);
     crate::patterns::check(&facts, &input.policy, &mut report);
-    with_sources(report, input)
+    report
 }

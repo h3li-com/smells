@@ -7,8 +7,10 @@ description = "Deterministic Rust, Python, and TypeScript source-pattern smell s
 publish = false
 
 [dependencies]
+libc = "0.2"
 proc-macro2 = { version = "1", features = ["span-locations"] }
 quote = "1"
+rayon = "1"
 regex = "1"
 rustc_lexer = { package = "ra-ap-rustc_lexer", version = "=0.174.0" }
 serde = { version = "1", features = ["derive"] }

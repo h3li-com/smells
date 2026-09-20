@@ -1,17 +1,37 @@
 use crate::{
     input::Input,
+    metrics::{self, Counter},
     policy::{Policy, Registry},
     report::{Location, Report},
+    similarity::exact_jaccard_pairs,
 };
+use rayon::prelude::*;
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::Path,
-    sync::OnceLock,
+    fs::{self, File, OpenOptions},
+    io::Write,
+    path::{Path, PathBuf},
+    sync::{
+        OnceLock,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
+#[cfg(unix)]
+use std::{
+    ffi::{CString, OsStr, OsString},
+    os::unix::{
+        ffi::OsStrExt,
+        fs::OpenOptionsExt,
+        io::{AsRawFd, FromRawFd},
+    },
 };
 use tree_sitter::{Language, Node, Parser, Tree};
 
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct FunctionFact {
     symbol: String,
     location: Location,
@@ -22,6 +42,8 @@ struct FunctionFact {
     body_range: (usize, usize),
 }
 
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct ClassFact {
     symbol: String,
     location: Location,
@@ -31,13 +53,60 @@ struct ClassFact {
     operations: usize,
 }
 
-type FingerprintFeature<'a> = (&'a [String], usize);
-type FeaturePostings<'a> = BTreeMap<FingerprintFeature<'a>, Vec<(usize, usize)>>;
-
-#[derive(Default)]
+#[derive(Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct Facts {
     functions: Vec<FunctionFact>,
     classes: Vec<ClassFact>,
+}
+
+#[derive(Clone, Copy)]
+struct RuleNeeds {
+    functions: bool,
+    parameters: bool,
+    lines: bool,
+    comments: bool,
+    tokens: bool,
+    classes: bool,
+}
+
+impl RuleNeeds {
+    fn from_policy(policy: &Policy, language: &str) -> Self {
+        let enabled = |suffix: &str| policy.enabled(&format!("{language}.{suffix}"));
+        let parameters = enabled("function_arguments") || enabled("data_clumps");
+        let lines = enabled("function_lines") || enabled("comment_share");
+        let comments = enabled("comment_share");
+        let tokens = enabled("duplicate_functions");
+        let functions = parameters || lines || comments || tokens;
+        let classes = [
+            "class_fields",
+            "class_methods",
+            "class_method_lines",
+            "data_class",
+            "lazy_class",
+        ]
+        .into_iter()
+        .any(enabled);
+        Self {
+            functions,
+            parameters,
+            lines,
+            comments,
+            tokens,
+            classes,
+        }
+    }
+
+    fn cache_bytes(self) -> [u8; 6] {
+        [
+            self.functions as u8,
+            self.parameters as u8,
+            self.lines as u8,
+            self.comments as u8,
+            self.tokens as u8,
+            self.classes as u8,
+        ]
+    }
 }
 
 fn language(path: &str, registry: &Registry) -> Result<Language, String> {
@@ -99,86 +168,67 @@ fn location(path: &str, node: Node<'_>) -> Location {
     }
 }
 
-fn collect_code_rows(node: Node<'_>, rows: &mut BTreeSet<usize>) {
-    if node.kind().contains("comment") {
-        return;
-    }
-    if node.child_count() == 0 {
-        if matches!(
-            node.kind(),
-            "{" | "}" | "(" | ")" | "[" | "]" | "," | ";" | ":"
-        ) {
-            return;
-        }
-        let start = node.start_position().row;
-        let end = node.end_position();
-        let exclusive_end = end.row + usize::from(end.column > 0);
-        rows.extend(start..exclusive_end.max(start + 1));
-        return;
-    }
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        collect_code_rows(child, rows);
+#[derive(Default)]
+struct FunctionBodyMetrics {
+    body_code_rows: BTreeSet<usize>,
+    callable_code_rows: BTreeSet<usize>,
+    comment_rows: BTreeSet<usize>,
+    tokens: Vec<String>,
+}
+
+fn extend_node_rows(node: Node<'_>, rows: &mut BTreeSet<usize>) {
+    let start = node.start_position().row;
+    let end = node.end_position();
+    let exclusive_end = end.row + usize::from(end.column > 0);
+    rows.extend(start..exclusive_end.max(start + 1));
+}
+
+fn normalized_leaf_kind(kind: &str) -> String {
+    if kind.contains("identifier") || kind == "identifier" {
+        "identifier".into()
+    } else if matches!(
+        kind,
+        "integer"
+            | "float"
+            | "string"
+            | "template_string"
+            | "true"
+            | "false"
+            | "none"
+            | "null"
+            | "undefined"
+    ) {
+        format!("literal:{kind}")
+    } else {
+        kind.into()
     }
 }
 
-fn code_lines(node: Node<'_>, _source: &str) -> usize {
-    let mut rows = BTreeSet::new();
-    collect_code_rows(node, &mut rows);
-    rows.len()
-}
-
-fn collect_comment_rows(node: Node<'_>, rows: &mut BTreeSet<usize>) {
-    if node.kind().contains("comment") {
-        let start = node.start_position().row;
-        let end = node.end_position();
-        let exclusive_end = end.row + usize::from(end.column > 0);
-        rows.extend(start..exclusive_end.max(start + 1));
-        return;
-    }
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        collect_comment_rows(child, rows);
+fn record_comment(node: Node<'_>, needs: RuleNeeds, metrics: &mut FunctionBodyMetrics) {
+    if needs.comments {
+        extend_node_rows(node, &mut metrics.comment_rows);
     }
 }
 
-fn comment_lines(node: Node<'_>) -> usize {
-    let mut comments = BTreeSet::new();
-    collect_comment_rows(node, &mut comments);
-    let mut code = BTreeSet::new();
-    collect_code_rows(node, &mut code);
-    comments.difference(&code).count()
-}
-
-fn collect_tokens(node: Node<'_>, tokens: &mut Vec<String>) {
-    if node.kind().contains("comment") {
+fn record_body_leaf(
+    node: Node<'_>,
+    body_range: (usize, usize),
+    needs: RuleNeeds,
+    metrics: &mut FunctionBodyMetrics,
+) {
+    let kind = node.kind();
+    let substantive = !matches!(kind, "{" | "}" | "(" | ")" | "[" | "]" | "," | ";" | ":");
+    if needs.comments && substantive {
+        extend_node_rows(node, &mut metrics.callable_code_rows);
+    }
+    if node.start_byte() < body_range.0 || node.end_byte() > body_range.1 {
         return;
     }
-    if node.child_count() == 0 {
-        let kind = node.kind();
-        tokens.push(if kind.contains("identifier") || kind == "identifier" {
-            "identifier".into()
-        } else if matches!(
-            kind,
-            "integer"
-                | "float"
-                | "string"
-                | "template_string"
-                | "true"
-                | "false"
-                | "none"
-                | "null"
-                | "undefined"
-        ) {
-            format!("literal:{kind}")
-        } else {
-            kind.into()
-        });
-        return;
+    if needs.lines && substantive {
+        extend_node_rows(node, &mut metrics.body_code_rows);
     }
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        collect_tokens(child, tokens);
+    if needs.tokens {
+        metrics.tokens.push(normalized_leaf_kind(kind));
     }
 }
 
@@ -258,233 +308,11 @@ fn receiver_field(node: Node<'_>, source: &str, language: &str) -> bool {
         })
 }
 
-fn only_statement(body: Node<'_>) -> Option<Node<'_>> {
-    let mut cursor = body.walk();
-    let statements: Vec<_> = body.named_children(&mut cursor).collect();
-    (statements.len() == 1).then_some(statements[0])
-}
-
-fn returned_receiver_field(statement: Node<'_>, source: &str, language: &str) -> bool {
-    statement.kind() == "return_statement"
-        && statement
-            .named_child(0)
-            .is_some_and(|field| receiver_field(field, source, language))
-}
-
-fn assignment_sides<'tree>(
-    statement: Node<'tree>,
-    language: &str,
-) -> Option<(Node<'tree>, Node<'tree>)> {
-    let assignment_kind = if language == "python" {
-        "assignment"
-    } else {
-        "assignment_expression"
-    };
-    let assignment = first_descendant(statement, &[assignment_kind])?;
-    Some((
-        assignment.child_by_field_name("left")?,
-        assignment.child_by_field_name("right")?,
-    ))
-}
-
-fn assignment_accessor(
-    method: Node<'_>,
-    statement: Node<'_>,
-    source: &str,
-    language: &str,
-) -> bool {
-    let Some((left, right)) = assignment_sides(statement, language) else {
-        return false;
-    };
-    let ordinary: Vec<_> = parameters(method, source)
-        .into_iter()
-        .map(|(name, _)| name)
-        .filter(|name| !matches!(name.as_str(), "self" | "cls" | "this"))
-        .collect();
-    receiver_field(left, source, language)
-        && ordinary.len() == 1
-        && right.kind() == "identifier"
-        && compact_text(right, source) == ordinary[0]
-}
-
-fn strict_accessor(method: Node<'_>, source: &str, language: &str) -> bool {
-    let name = node_name(method, source);
-    if matches!(name.as_str(), "__init__" | "constructor") {
-        return true;
-    }
-    let Some(body) = method.child_by_field_name("body") else {
-        return false;
-    };
-    let Some(statement) = only_statement(body) else {
-        return false;
-    };
-    returned_receiver_field(statement, source, language)
-        || assignment_accessor(method, statement, source, language)
-}
-
 fn node_name(node: Node<'_>, source: &str) -> String {
     node.child_by_field_name("name")
         .and_then(|name| name.utf8_text(source.as_bytes()).ok())
         .unwrap_or("<anonymous>")
         .to_string()
-}
-
-fn function_metrics(
-    node: Node<'_>,
-    path: &str,
-    source: &str,
-    prefix: &str,
-    input: &Input,
-    report: &mut Report,
-    facts: &mut Facts,
-) {
-    let symbol = node_name(node, source);
-    let location = location(path, node);
-    let declared_parameters = parameters(node, source);
-    report.maximum(
-        &input.policy,
-        &format!("{prefix}.function_arguments"),
-        &symbol,
-        &location,
-        declared_parameters.len(),
-        "declared parameters",
-    );
-    if let Some(body) = node.child_by_field_name("body") {
-        let lines = code_lines(body, source);
-        report.maximum(
-            &input.policy,
-            &format!("{prefix}.function_lines"),
-            &symbol,
-            &location,
-            lines,
-            "authored body code lines",
-        );
-        let mut tokens = Vec::new();
-        collect_tokens(body, &mut tokens);
-        facts.functions.push(FunctionFact {
-            symbol,
-            location,
-            parameters: declared_parameters,
-            lines,
-            comments: comment_lines(node),
-            tokens,
-            body_range: (body.start_byte(), body.end_byte()),
-        });
-    }
-}
-
-fn direct_methods<'tree>(body: Node<'tree>, language: &str) -> Vec<Node<'tree>> {
-    let mut result = Vec::new();
-    let mut cursor = body.walk();
-    for child in body.named_children(&mut cursor) {
-        match (language, child.kind()) {
-            ("python", "function_definition")
-            | ("typescript", "method_definition")
-            | ("typescript", "abstract_method_signature")
-            | ("typescript", "method_signature") => {
-                result.push(child);
-            }
-            ("python", "decorated_definition") => {
-                let mut decorated = child.walk();
-                if let Some(function) = child
-                    .named_children(&mut decorated)
-                    .find(|node| node.kind() == "function_definition")
-                {
-                    result.push(function);
-                }
-            }
-            _ => {}
-        }
-    }
-    result
-}
-
-fn field_name(node: Node<'_>, source: &str, receiver: bool) -> Option<String> {
-    if !receiver && matches!(node.kind(), "identifier" | "pattern") {
-        return node.utf8_text(source.as_bytes()).ok().map(str::to_string);
-    }
-    if receiver && node.kind() == "attribute" {
-        let owner = node
-            .child_by_field_name("object")?
-            .utf8_text(source.as_bytes())
-            .ok()?;
-        if matches!(owner, "self" | "cls") {
-            return node
-                .child_by_field_name("attribute")?
-                .utf8_text(source.as_bytes())
-                .ok()
-                .map(str::to_string);
-        }
-    }
-    None
-}
-
-fn assignment_target_fields(
-    node: Node<'_>,
-    source: &str,
-    receiver: bool,
-    fields: &mut BTreeSet<String>,
-) {
-    if let Some(name) = field_name(node, source, receiver) {
-        fields.insert(name);
-        return;
-    }
-    if matches!(node.kind(), "attribute" | "subscript" | "member_expression") {
-        return;
-    }
-    let mut cursor = node.walk();
-    for child in node.named_children(&mut cursor) {
-        assignment_target_fields(child, source, receiver, fields);
-    }
-}
-
-fn assignment_fields(node: Node<'_>, source: &str, receiver: bool, fields: &mut BTreeSet<String>) {
-    if matches!(node.kind(), "function_definition" | "class_definition") {
-        return;
-    }
-    if matches!(node.kind(), "assignment" | "augmented_assignment")
-        && let Some(left) = node.child_by_field_name("left")
-    {
-        assignment_target_fields(left, source, receiver, fields);
-    }
-    let mut cursor = node.walk();
-    for child in node.named_children(&mut cursor) {
-        assignment_fields(child, source, receiver, fields);
-    }
-}
-
-fn python_fields(body: Node<'_>, methods: &[Node<'_>], source: &str) -> BTreeSet<String> {
-    let mut fields = BTreeSet::new();
-    let mut cursor = body.walk();
-    for child in body.named_children(&mut cursor) {
-        if !matches!(child.kind(), "function_definition" | "decorated_definition") {
-            assignment_fields(child, source, false, &mut fields);
-        }
-    }
-    for method in methods {
-        let Some(method_body) = method.child_by_field_name("body") else {
-            continue;
-        };
-        let mut cursor = method_body.walk();
-        for child in method_body.named_children(&mut cursor) {
-            assignment_fields(child, source, true, &mut fields);
-        }
-    }
-    fields
-}
-
-fn declared_typescript_fields(body: Node<'_>, source: &str) -> BTreeSet<String> {
-    let mut fields = BTreeSet::new();
-    let mut cursor = body.walk();
-    for child in body.named_children(&mut cursor) {
-        if child.kind() == "public_field_definition"
-            && let Some(name) = child.child_by_field_name("name")
-            && let Ok(name) = name.utf8_text(source.as_bytes())
-        {
-            fields.insert(name.to_string());
-        }
-    }
-    fields
 }
 
 fn parameter_property_name(parameter: Node<'_>, source: &str) -> Option<String> {
@@ -504,25 +332,6 @@ fn parameter_property_name(parameter: Node<'_>, source: &str) -> Option<String> 
         .utf8_text(source.as_bytes())
         .ok()
         .map(str::to_string)
-}
-
-fn typescript_fields(body: Node<'_>, methods: &[Node<'_>], source: &str) -> BTreeSet<String> {
-    let mut fields = declared_typescript_fields(body, source);
-    for method in methods {
-        if node_name(*method, source) != "constructor" {
-            continue;
-        }
-        let Some(parameters) = method.child_by_field_name("parameters") else {
-            continue;
-        };
-        let mut cursor = parameters.walk();
-        fields.extend(
-            parameters
-                .named_children(&mut cursor)
-                .filter_map(|parameter| parameter_property_name(parameter, source)),
-        );
-    }
-    fields
 }
 
 struct ClassSummary<'a> {
@@ -563,56 +372,6 @@ fn record_class_metrics(
     }
 }
 
-fn class_metrics(
-    node: Node<'_>,
-    path: &str,
-    source: &str,
-    registry: &Registry,
-    input: &Input,
-    report: &mut Report,
-    facts: &mut Facts,
-) {
-    let Some(body) = node.child_by_field_name("body") else {
-        return;
-    };
-    let symbol = node_name(node, source);
-    let location = location(path, node);
-    let methods = direct_methods(body, &registry.language);
-    let fields = if registry.language == "python" {
-        python_fields(body, &methods, source)
-    } else {
-        typescript_fields(body, &methods, source)
-    };
-    let method_lines: usize = methods
-        .iter()
-        .filter_map(|method| method.child_by_field_name("body"))
-        .map(|body| code_lines(body, source))
-        .sum();
-    record_class_metrics(
-        &ClassSummary {
-            symbol: &symbol,
-            location: &location,
-            fields: fields.len(),
-            methods: methods.len(),
-            method_lines,
-        },
-        registry,
-        input,
-        report,
-    );
-    facts.classes.push(ClassFact {
-        symbol,
-        location,
-        fields: fields.len(),
-        methods: methods.len(),
-        method_lines,
-        operations: methods
-            .iter()
-            .filter(|method| !strict_accessor(**method, source, &registry.language))
-            .count(),
-    });
-}
-
 fn is_class(node: Node<'_>, language: &str) -> bool {
     match language {
         "python" => node.kind() == "class_definition",
@@ -627,37 +386,611 @@ fn is_class(node: Node<'_>, language: &str) -> bool {
 fn is_function(node: Node<'_>, language: &str) -> bool {
     match language {
         "python" => matches!(node.kind(), "function_definition" | "lambda"),
-        "typescript" => matches!(
-            node.kind(),
+        "typescript" => match node.kind() {
+            "method_definition" => node
+                .parent()
+                .is_some_and(|parent| parent.kind() == "class_body"),
             "arrow_function"
-                | "function_declaration"
-                | "function_expression"
-                | "generator_function"
-                | "generator_function_declaration"
-                | "method_definition"
-        ),
+            | "function_declaration"
+            | "function_expression"
+            | "generator_function"
+            | "generator_function_declaration" => true,
+            _ => false,
+        },
         _ => false,
     }
 }
 
-fn visit(
+struct ActiveClass {
+    node_id: usize,
+    order: usize,
+    function_depth: usize,
+    symbol: String,
+    location: Location,
+    fields: BTreeSet<String>,
+    methods: usize,
+    method_lines: usize,
+    operations: usize,
+}
+
+struct AccessorState {
+    constructor: bool,
+    sole_statement_id: Option<usize>,
+    sole_statement_range: Option<(usize, usize)>,
+    assignment_seen: bool,
+    ordinary_parameter: Option<String>,
+    matched: bool,
+}
+
+struct ActiveFunction {
+    node_id: usize,
+    order: usize,
+    record_fact: bool,
+    symbol: String,
+    location: Location,
+    parameters: Vec<(String, String)>,
+    body_range: Option<(usize, usize)>,
+    metrics: FunctionBodyMetrics,
+    metric_needs: RuleNeeds,
+    direct_class: Option<usize>,
+    accessor: Option<AccessorState>,
+}
+
+struct AssignmentTarget {
+    assignment_id: usize,
+    range: (usize, usize),
+    class_index: usize,
+    receiver: bool,
+}
+
+#[derive(Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct SourceStats {
+    syntax_nodes: usize,
+    functions: usize,
+    normalized_tokens: usize,
+}
+
+#[derive(Default)]
+struct ExtractionState {
+    completed_functions: Vec<(usize, FunctionFact)>,
+    completed_classes: Vec<(usize, ClassFact)>,
+    classes: Vec<ActiveClass>,
+    functions: Vec<ActiveFunction>,
+    assignments: Vec<AssignmentTarget>,
+    next_class_order: usize,
+    next_function_order: usize,
+    stats: SourceStats,
+}
+
+fn python_class_owner(parent: Node<'_>) -> Option<Node<'_>> {
+    if parent.kind() == "block" {
+        return parent.parent();
+    }
+    if parent.kind() != "decorated_definition" {
+        return None;
+    }
+    parent
+        .parent()
+        .filter(|body| body.kind() == "block")
+        .and_then(|body| body.parent())
+}
+
+fn direct_class_owner<'tree>(node: Node<'tree>, language: &str) -> Option<Node<'tree>> {
+    let parent = node.parent()?;
+    match language {
+        "typescript" => (parent.kind() == "class_body")
+            .then(|| parent.parent())
+            .flatten(),
+        "python" => python_class_owner(parent),
+        _ => None,
+    }
+}
+
+fn direct_class_index(node: Node<'_>, language: &str, classes: &[ActiveClass]) -> Option<usize> {
+    let class_index = classes.len().checked_sub(1)?;
+    let owner = direct_class_owner(node, language)?;
+    (owner.id() == classes[class_index].node_id).then_some(class_index)
+}
+
+fn sole_statement(body: Node<'_>) -> Option<Node<'_>> {
+    (body.named_child_count() == 1)
+        .then(|| body.named_child(0))
+        .flatten()
+}
+
+fn active_function(
+    node: Node<'_>,
+    path: &str,
+    source: &str,
+    language: &str,
+    needs: RuleNeeds,
+    classes: &[ActiveClass],
+    order: usize,
+) -> ActiveFunction {
+    let direct_class = direct_class_index(node, language, classes);
+    let record_fact = needs.functions;
+    let needs_parameters = record_fact && needs.parameters || direct_class.is_some();
+    let declared_parameters = if needs_parameters {
+        parameters(node, source)
+    } else {
+        Vec::new()
+    };
+    let body = node.child_by_field_name("body");
+    let body_range = body.map(|body| (body.start_byte(), body.end_byte()));
+    let metric_needs = RuleNeeds {
+        functions: record_fact,
+        parameters: needs_parameters,
+        lines: record_fact && needs.lines || direct_class.is_some(),
+        comments: record_fact && needs.comments,
+        tokens: record_fact && needs.tokens,
+        classes: needs.classes,
+    };
+    let symbol = node_name(node, source);
+    let accessor = direct_class.map(|_| {
+        let statement = body.and_then(sole_statement);
+        let ordinary = declared_parameters
+            .iter()
+            .map(|(name, _)| name)
+            .filter(|name| !matches!(name.as_str(), "self" | "cls" | "this"))
+            .collect::<Vec<_>>();
+        AccessorState {
+            constructor: matches!(symbol.as_str(), "__init__" | "constructor"),
+            sole_statement_id: statement.map(|node| node.id()),
+            sole_statement_range: statement.map(|node| (node.start_byte(), node.end_byte())),
+            assignment_seen: false,
+            ordinary_parameter: (ordinary.len() == 1).then(|| ordinary[0].clone()),
+            matched: false,
+        }
+    });
+    ActiveFunction {
+        node_id: node.id(),
+        order,
+        record_fact,
+        symbol,
+        location: location(path, node),
+        parameters: declared_parameters,
+        body_range,
+        metrics: FunctionBodyMetrics::default(),
+        metric_needs,
+        direct_class,
+        accessor,
+    }
+}
+
+fn returned_receiver_field(node: Node<'_>, source: &str, language: &str, statement: usize) -> bool {
+    node.id() == statement
+        && node.kind() == "return_statement"
+        && node
+            .named_child(0)
+            .is_some_and(|field| receiver_field(field, source, language))
+}
+
+fn assignment_in_statement(node: Node<'_>, language: &str, range: (usize, usize)) -> bool {
+    let assignment_kind = if language == "python" {
+        "assignment"
+    } else {
+        "assignment_expression"
+    };
+    node.kind() == assignment_kind && node.start_byte() >= range.0 && node.end_byte() <= range.1
+}
+
+fn setter_matches(node: Node<'_>, source: &str, language: &str, parameter: &str) -> bool {
+    node.child_by_field_name("left")
+        .is_some_and(|left| receiver_field(left, source, language))
+        && node.child_by_field_name("right").is_some_and(|right| {
+            right.kind() == "identifier" && compact_text(right, source) == parameter
+        })
+}
+
+fn update_accessor(node: Node<'_>, source: &str, language: &str, function: &mut ActiveFunction) {
+    let Some(accessor) = function.accessor.as_mut() else {
+        return;
+    };
+    if accessor.constructor || accessor.matched {
+        return;
+    }
+    if accessor
+        .sole_statement_id
+        .is_some_and(|statement| returned_receiver_field(node, source, language, statement))
+    {
+        accessor.matched = true;
+        return;
+    }
+    let Some(range) = accessor.sole_statement_range else {
+        return;
+    };
+    if accessor.assignment_seen || !assignment_in_statement(node, language, range) {
+        return;
+    }
+    accessor.assignment_seen = true;
+    let Some(parameter) = accessor.ordinary_parameter.as_deref() else {
+        return;
+    };
+    accessor.matched = setter_matches(node, source, language, parameter);
+}
+
+fn python_assignment_target(
+    node: Node<'_>,
+    classes: &[ActiveClass],
+    functions: &[ActiveFunction],
+) -> Option<(usize, bool, (usize, usize))> {
+    if !matches!(node.kind(), "assignment" | "augmented_assignment") {
+        return None;
+    }
+    let class_index = classes.len().checked_sub(1)?;
+    let receiver = if functions.len() == classes[class_index].function_depth {
+        false
+    } else if functions
+        .last()
+        .is_some_and(|function| function.direct_class == Some(class_index))
+    {
+        true
+    } else {
+        return None;
+    };
+    let left = node.child_by_field_name("left")?;
+    Some((class_index, receiver, (left.start_byte(), left.end_byte())))
+}
+
+fn blocked_assignment_identifier(node: Node<'_>, target: &AssignmentTarget) -> bool {
+    let mut parent = node.parent();
+    while let Some(ancestor) = parent {
+        if ancestor.start_byte() < target.range.0 || ancestor.end_byte() > target.range.1 {
+            break;
+        }
+        if matches!(
+            ancestor.kind(),
+            "attribute" | "subscript" | "member_expression"
+        ) {
+            return true;
+        }
+        parent = ancestor.parent();
+    }
+    false
+}
+
+fn update_python_field(
+    node: Node<'_>,
+    source: &str,
+    assignments: &[AssignmentTarget],
+    classes: &mut [ActiveClass],
+) {
+    let Some(target) = assignments.last() else {
+        return;
+    };
+    if node.start_byte() < target.range.0 || node.end_byte() > target.range.1 {
+        return;
+    }
+    let name = if target.receiver && node.kind() == "attribute" {
+        receiver_field(node, source, "python").then(|| {
+            node.child_by_field_name("attribute")
+                .and_then(|field| field.utf8_text(source.as_bytes()).ok())
+                .unwrap_or_default()
+                .to_string()
+        })
+    } else if !target.receiver
+        && matches!(node.kind(), "identifier" | "pattern")
+        && !blocked_assignment_identifier(node, target)
+    {
+        node.utf8_text(source.as_bytes()).ok().map(str::to_string)
+    } else {
+        None
+    };
+    if let Some(name) = name.filter(|name| !name.is_empty()) {
+        classes[target.class_index].fields.insert(name);
+    }
+}
+
+fn update_typescript_field(
+    node: Node<'_>,
+    source: &str,
+    classes: &mut [ActiveClass],
+    functions: &[ActiveFunction],
+) {
+    let Some(class_index) = classes.len().checked_sub(1) else {
+        return;
+    };
+    if node.kind() == "public_field_definition"
+        && node.parent().is_some_and(|body| {
+            body.kind() == "class_body"
+                && body
+                    .parent()
+                    .is_some_and(|class| class.id() == classes[class_index].node_id)
+        })
+        && let Some(name) = node.child_by_field_name("name")
+        && let Ok(name) = name.utf8_text(source.as_bytes())
+    {
+        classes[class_index].fields.insert(name.to_string());
+    }
+    if functions.last().is_some_and(|function| {
+        function.direct_class == Some(class_index) && function.symbol == "constructor"
+    }) && node
+        .parent()
+        .is_some_and(|parent| parent.kind() == "formal_parameters")
+        && let Some(name) = parameter_property_name(node, source)
+    {
+        classes[class_index].fields.insert(name);
+    }
+}
+
+fn update_metrics(node: Node<'_>, functions: &mut [ActiveFunction]) {
+    if node.kind().contains("comment") {
+        for function in functions {
+            record_comment(node, function.metric_needs, &mut function.metrics);
+        }
+    } else if node.child_count() == 0 {
+        for function in functions {
+            if let Some(body_range) = function.body_range {
+                record_body_leaf(
+                    node,
+                    body_range,
+                    function.metric_needs,
+                    &mut function.metrics,
+                );
+            }
+        }
+    }
+}
+
+fn record_node_stats(node: Node<'_>, language: &str, stats: &mut SourceStats) {
+    stats.syntax_nodes += 1;
+    stats.functions += usize::from(is_function(node, language));
+}
+
+fn start_class(
+    node: Node<'_>,
+    path: &str,
+    source: &str,
+    language: &str,
+    needs: RuleNeeds,
+    state: &mut ExtractionState,
+) {
+    if !needs.classes || !is_class(node, language) || node.child_by_field_name("body").is_none() {
+        return;
+    }
+    state.classes.push(ActiveClass {
+        node_id: node.id(),
+        order: state.next_class_order,
+        function_depth: state.functions.len(),
+        symbol: node_name(node, source),
+        location: location(path, node),
+        fields: BTreeSet::new(),
+        methods: 0,
+        method_lines: 0,
+        operations: 0,
+    });
+    state.next_class_order += 1;
+}
+
+fn start_function(
+    node: Node<'_>,
+    path: &str,
+    source: &str,
+    language: &str,
+    needs: RuleNeeds,
+    state: &mut ExtractionState,
+) {
+    if (!needs.functions && !needs.classes) || !is_function(node, language) {
+        return;
+    }
+    state.functions.push(active_function(
+        node,
+        path,
+        source,
+        language,
+        needs,
+        &state.classes,
+        state.next_function_order,
+    ));
+    state.next_function_order += 1;
+}
+
+fn record_typescript_signature(
+    node: Node<'_>,
+    source: &str,
+    language: &str,
+    needs: RuleNeeds,
+    classes: &mut [ActiveClass],
+) {
+    if !needs.classes
+        || language != "typescript"
+        || !matches!(
+            node.kind(),
+            "abstract_method_signature" | "method_signature"
+        )
+    {
+        return;
+    }
+    let Some(class_index) = direct_class_index(node, language, classes) else {
+        return;
+    };
+    let class = &mut classes[class_index];
+    class.methods += 1;
+    class.operations += usize::from(node_name(node, source) != "constructor");
+}
+
+fn update_accessors(
+    node: Node<'_>,
+    source: &str,
+    language: &str,
+    functions: &mut [ActiveFunction],
+) {
+    for function in functions {
+        update_accessor(node, source, language, function);
+    }
+}
+
+fn start_python_assignment(
+    node: Node<'_>,
+    language: &str,
+    needs: RuleNeeds,
+    state: &mut ExtractionState,
+) {
+    if !needs.classes || language != "python" {
+        return;
+    }
+    let Some((class_index, receiver, range)) =
+        python_assignment_target(node, &state.classes, &state.functions)
+    else {
+        return;
+    };
+    state.assignments.push(AssignmentTarget {
+        assignment_id: node.id(),
+        range,
+        class_index,
+        receiver,
+    });
+}
+
+fn update_class_field(
+    node: Node<'_>,
+    source: &str,
+    language: &str,
+    needs: RuleNeeds,
+    state: &mut ExtractionState,
+) {
+    if !needs.classes {
+        return;
+    }
+    if language == "python" {
+        update_python_field(node, source, &state.assignments, &mut state.classes);
+    } else {
+        update_typescript_field(node, source, &mut state.classes, &state.functions);
+    }
+}
+
+fn enter_node(
     node: Node<'_>,
     path: &str,
     source: &str,
     registry: &Registry,
-    input: &Input,
-    report: &mut Report,
-    facts: &mut Facts,
+    needs: RuleNeeds,
+    state: &mut ExtractionState,
 ) {
-    if is_class(node, &registry.language) {
-        class_metrics(node, path, source, registry, input, report, facts);
+    let language = registry.language.as_str();
+    record_node_stats(node, language, &mut state.stats);
+    start_class(node, path, source, language, needs, state);
+    start_function(node, path, source, language, needs, state);
+    record_typescript_signature(node, source, language, needs, &mut state.classes);
+    update_accessors(node, source, language, &mut state.functions);
+    start_python_assignment(node, language, needs, state);
+    update_class_field(node, source, language, needs, state);
+    update_metrics(node, &mut state.functions);
+}
+
+fn exit_node(node: Node<'_>, state: &mut ExtractionState) {
+    if state
+        .assignments
+        .last()
+        .is_some_and(|assignment| assignment.assignment_id == node.id())
+    {
+        state.assignments.pop();
     }
-    if is_function(node, &registry.language) {
-        function_metrics(node, path, source, &registry.language, input, report, facts);
+    if state
+        .functions
+        .last()
+        .is_some_and(|function| function.node_id == node.id())
+    {
+        let function = state.functions.pop().expect("active function");
+        let lines = function.metrics.body_code_rows.len();
+        if let Some(class_index) = function.direct_class {
+            let class = &mut state.classes[class_index];
+            class.methods += 1;
+            class.method_lines += lines;
+            let accessor = function
+                .accessor
+                .as_ref()
+                .is_some_and(|accessor| accessor.constructor || accessor.matched);
+            if !accessor {
+                class.operations += 1;
+            }
+        }
+        if function.record_fact
+            && let Some(body_range) = function.body_range
+        {
+            let comments = function
+                .metrics
+                .comment_rows
+                .difference(&function.metrics.callable_code_rows)
+                .count();
+            state.completed_functions.push((
+                function.order,
+                FunctionFact {
+                    symbol: function.symbol,
+                    location: function.location,
+                    parameters: function.parameters,
+                    lines,
+                    comments,
+                    tokens: function.metrics.tokens,
+                    body_range,
+                },
+            ));
+        }
     }
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        visit(child, path, source, registry, input, report, facts);
+    if state
+        .classes
+        .last()
+        .is_some_and(|class| class.node_id == node.id())
+    {
+        let class = state.classes.pop().expect("active class");
+        state.completed_classes.push((
+            class.order,
+            ClassFact {
+                symbol: class.symbol,
+                location: class.location,
+                fields: class.fields.len(),
+                methods: class.methods,
+                method_lines: class.method_lines,
+                operations: class.operations,
+            },
+        ));
+    }
+}
+
+fn extract_facts(
+    tree: &Tree,
+    path: &str,
+    source: &str,
+    registry: &Registry,
+    needs: RuleNeeds,
+) -> (Facts, SourceStats) {
+    let mut facts = Facts::default();
+    let mut state = ExtractionState::default();
+    let mut cursor = tree.walk();
+    loop {
+        let node = cursor.node();
+        enter_node(node, path, source, registry, needs, &mut state);
+        if cursor.goto_first_child() {
+            continue;
+        }
+        exit_node(node, &mut state);
+        loop {
+            if cursor.goto_next_sibling() {
+                break;
+            }
+            if !cursor.goto_parent() {
+                state.completed_functions.sort_by_key(|(order, _)| *order);
+                state.completed_classes.sort_by_key(|(order, _)| *order);
+                facts.functions = state
+                    .completed_functions
+                    .into_iter()
+                    .map(|(_, function)| function)
+                    .collect();
+                facts.classes = state
+                    .completed_classes
+                    .into_iter()
+                    .map(|(_, class)| class)
+                    .collect();
+                state.stats.normalized_tokens = facts
+                    .functions
+                    .iter()
+                    .map(|function| function.tokens.len())
+                    .sum();
+                return (facts, state.stats);
+            }
+            exit_node(cursor.node(), &mut state);
+        }
     }
 }
 
@@ -831,144 +1164,10 @@ fn clumps(facts: &Facts, policy: &Policy, language: &str, report: &mut Report) {
     }
 }
 
-fn fingerprint(tokens: &[String]) -> BTreeMap<Vec<String>, usize> {
-    let mut result = BTreeMap::new();
-    for window in tokens.windows(4) {
-        *result.entry(window.to_vec()).or_insert(0) += 1;
-    }
-    result
-}
-
-fn feature_frequencies<'a>(
-    facts: &Facts,
-    fingerprints: &'a [BTreeMap<Vec<String>, usize>],
-    minimum: u64,
-) -> BTreeMap<FingerprintFeature<'a>, usize> {
-    let mut frequencies = BTreeMap::new();
-    for (index, counts) in fingerprints.iter().enumerate() {
-        if (facts.functions[index].tokens.len() as u64) < minimum {
-            continue;
-        }
-        for (key, count) in counts {
-            for occurrence in 0..*count {
-                *frequencies.entry((key.as_slice(), occurrence)).or_default() += 1;
-            }
-        }
-    }
-    frequencies
-}
-
-fn ordered_features<'a>(
-    facts: &Facts,
-    fingerprints: &'a [BTreeMap<Vec<String>, usize>],
-    frequencies: &BTreeMap<FingerprintFeature<'a>, usize>,
-    minimum: u64,
-) -> Vec<Vec<FingerprintFeature<'a>>> {
-    fingerprints
-        .iter()
-        .enumerate()
-        .map(|(index, counts)| {
-            if (facts.functions[index].tokens.len() as u64) < minimum {
-                return Vec::new();
-            }
-            let mut features = counts
-                .iter()
-                .flat_map(|(key, count)| {
-                    (0..*count).map(move |occurrence| (key.as_slice(), occurrence))
-                })
-                .collect::<Vec<_>>();
-            features.sort_by(|left, right| {
-                frequencies[left]
-                    .cmp(&frequencies[right])
-                    .then_with(|| left.cmp(right))
-            });
-            features
-        })
-        .collect()
-}
-
-fn eligible_functions(ordered_features: &[Vec<FingerprintFeature<'_>>]) -> Vec<usize> {
-    let mut eligible = (0..ordered_features.len())
-        .filter(|index| !ordered_features[*index].is_empty())
-        .collect::<Vec<_>>();
-    eligible.sort_by_key(|index| (ordered_features[*index].len(), *index));
-    eligible
-}
-
-fn prefix_length(size: usize, similarity: u64) -> usize {
-    let required_overlap = (similarity as u128 * size as u128).div_ceil(10_000) as usize;
-    size - required_overlap + 1
-}
-
 fn overlapping_functions(first: &FunctionFact, second: &FunctionFact) -> bool {
     first.location.path == second.location.path
         && first.body_range.0 < second.body_range.1
         && second.body_range.0 < first.body_range.1
-}
-
-fn candidate_possible(
-    left_size: usize,
-    right_size: usize,
-    left_position: usize,
-    right_position: usize,
-    similarity: u64,
-) -> bool {
-    if left_size as u128 * 10_000 < similarity as u128 * right_size as u128 {
-        return false;
-    }
-    let maximum_overlap = 1 + (left_size - left_position - 1).min(right_size - right_position - 1);
-    let required_overlap = (similarity as u128 * (left_size + right_size) as u128)
-        .div_ceil(10_000 + similarity as u128);
-    maximum_overlap as u128 >= required_overlap
-}
-
-fn duplicate_candidates(
-    facts: &Facts,
-    right: usize,
-    ordered_features: &[Vec<FingerprintFeature<'_>>],
-    postings: &FeaturePostings<'_>,
-    similarity: u64,
-) -> BTreeSet<usize> {
-    let right_size = ordered_features[right].len();
-    let mut candidates = BTreeSet::new();
-    for (right_position, feature) in ordered_features[right]
-        .iter()
-        .take(prefix_length(right_size, similarity))
-        .enumerate()
-    {
-        let Some(entries) = postings.get(feature) else {
-            continue;
-        };
-        for (left, left_position) in entries {
-            if !overlapping_functions(&facts.functions[*left], &facts.functions[right])
-                && candidate_possible(
-                    ordered_features[*left].len(),
-                    right_size,
-                    *left_position,
-                    right_position,
-                    similarity,
-                )
-            {
-                candidates.insert(*left);
-            }
-        }
-    }
-    candidates
-}
-
-fn multiset_similarity(
-    first: &BTreeMap<Vec<String>, usize>,
-    second: &BTreeMap<Vec<String>, usize>,
-) -> Option<(usize, usize)> {
-    let keys: BTreeSet<_> = first.keys().chain(second.keys()).collect();
-    let (mut intersection, mut union) = (0, 0);
-    for key in keys {
-        let first_count = *first.get(key).unwrap_or(&0);
-        let second_count = *second.get(key).unwrap_or(&0);
-        intersection += first_count.min(second_count);
-        union += first_count.max(second_count);
-    }
-    (union > 0).then_some((intersection, union))
 }
 
 fn ordered_functions<'a>(
@@ -1017,45 +1216,6 @@ fn report_duplicate_pair(
     finding.related_locations.push(second.location.clone());
 }
 
-fn compare_duplicate_pair(
-    facts: &Facts,
-    fingerprints: &[BTreeMap<Vec<String>, usize>],
-    left: usize,
-    right: usize,
-    rule: &DuplicateRule<'_>,
-    report: &mut Report,
-) {
-    let Some((intersection, union)) =
-        multiset_similarity(&fingerprints[left], &fingerprints[right])
-    else {
-        return;
-    };
-    if intersection as u128 * 10_000 >= rule.similarity as u128 * union as u128 {
-        report_duplicate_pair(
-            &facts.functions[left],
-            &facts.functions[right],
-            intersection,
-            union,
-            rule,
-            report,
-        );
-    }
-}
-
-fn add_to_postings<'a>(
-    right: usize,
-    features: &[FingerprintFeature<'a>],
-    prefix_length: usize,
-    postings: &mut FeaturePostings<'a>,
-) {
-    for (position, feature) in features.iter().take(prefix_length).enumerate() {
-        postings
-            .entry(*feature)
-            .or_default()
-            .push((right, position));
-    }
-}
-
 fn duplicates(facts: &Facts, policy: &Policy, language: &str, report: &mut Report) {
     let id = format!("{language}.duplicate_functions");
     if !policy.enabled(&id) {
@@ -1069,33 +1229,33 @@ fn duplicates(facts: &Facts, policy: &Policy, language: &str, report: &mut Repor
         minimum,
         similarity,
     };
-    let fingerprints: Vec<_> = facts
+    let token_lists = facts
         .functions
         .iter()
-        .map(|function| fingerprint(&function.tokens))
-        .collect();
-    let frequencies = feature_frequencies(facts, &fingerprints, minimum);
-    let ordered_features = ordered_features(facts, &fingerprints, &frequencies, minimum);
-    let eligible = eligible_functions(&ordered_features);
-    let mut postings = FeaturePostings::new();
-    let mut comparisons = 0;
-    for right in eligible {
-        let right_size = ordered_features[right].len();
-        let candidates =
-            duplicate_candidates(facts, right, &ordered_features, &postings, similarity);
-        for left in candidates {
-            comparisons += 1;
-            if comparisons > policy.limits.maximum_pairs {
-                report.errors.push("maximum_pairs budget exceeded".into());
-                return;
-            }
-            compare_duplicate_pair(facts, &fingerprints, left, right, &rule, report);
+        .map(|function| function.tokens.clone())
+        .collect::<Vec<_>>();
+    let pairs = exact_jaccard_pairs(
+        &token_lists,
+        minimum,
+        similarity,
+        policy.limits.maximum_pairs,
+        |left, right| overlapping_functions(&facts.functions[left], &facts.functions[right]),
+    );
+    let pairs = match pairs {
+        Ok(pairs) => pairs,
+        Err(error) => {
+            report.errors.push(error.into());
+            return;
         }
-        add_to_postings(
-            right,
-            &ordered_features[right],
-            prefix_length(right_size, similarity),
-            &mut postings,
+    };
+    for pair in pairs {
+        report_duplicate_pair(
+            &facts.functions[pair.left],
+            &facts.functions[pair.right],
+            pair.intersection,
+            pair.union,
+            &rule,
+            report,
         );
     }
 }
@@ -1105,6 +1265,41 @@ fn patterns(facts: &Facts, policy: &Policy, language: &str, report: &mut Report)
     comments(facts, policy, language, report);
     clumps(facts, policy, language, report);
     duplicates(facts, policy, language, report);
+}
+
+fn source_metrics(facts: &Facts, registry: &Registry, input: &Input, report: &mut Report) {
+    for function in &facts.functions {
+        report.maximum(
+            &input.policy,
+            &format!("{}.function_arguments", registry.language),
+            &function.symbol,
+            &function.location,
+            function.parameters.len(),
+            "declared parameters",
+        );
+        report.maximum(
+            &input.policy,
+            &format!("{}.function_lines", registry.language),
+            &function.symbol,
+            &function.location,
+            function.lines,
+            "authored body code lines",
+        );
+    }
+    for class in &facts.classes {
+        record_class_metrics(
+            &ClassSummary {
+                symbol: &class.symbol,
+                location: &class.location,
+                fields: class.fields,
+                methods: class.methods,
+                method_lines: class.method_lines,
+            },
+            registry,
+            input,
+            report,
+        );
+    }
 }
 
 fn validate_required_rules(registry: &Registry, input: &Input, report: &mut Report) {
@@ -1117,27 +1312,43 @@ fn validate_required_rules(registry: &Registry, input: &Input, report: &mut Repo
     }
 }
 
-fn configured_parser(path: &str, registry: &Registry, report: &mut Report) -> Option<Parser> {
-    let grammar = language(path, registry)
-        .map_err(|error| report.errors.push(error))
-        .ok()?;
+fn configured_parser(path: &str, registry: &Registry) -> Result<Parser, String> {
+    let grammar = language(path, registry)?;
     let mut parser = Parser::new();
     parser
         .set_language(&grammar)
-        .map_err(|error| {
-            report
-                .errors
-                .push(format!("cannot load grammar for {path}: {error}"));
-        })
-        .ok()?;
-    Some(parser)
+        .map_err(|error| format!("cannot load grammar for {path}: {error}"))?;
+    Ok(parser)
 }
 
-fn parsed_tree(parser: &mut Parser, source: &str, path: &str, report: &mut Report) -> Option<Tree> {
-    parser.parse(source, None).or_else(|| {
-        report.errors.push(format!("parser cancelled for {path}"));
-        None
-    })
+#[derive(Default)]
+struct ParserPool {
+    python: Option<Parser>,
+    typescript: Option<Parser>,
+    tsx: Option<Parser>,
+}
+
+impl ParserPool {
+    fn parser(&mut self, path: &str, registry: &Registry) -> Result<&mut Parser, String> {
+        let slot = match registry.language.as_str() {
+            "python" => &mut self.python,
+            "typescript" if Path::new(path).extension().is_some_and(|ext| ext == "tsx") => {
+                &mut self.tsx
+            }
+            "typescript" => &mut self.typescript,
+            other => return Err(format!("unsupported portable language: {other}")),
+        };
+        if slot.is_none() {
+            *slot = Some(configured_parser(path, registry)?);
+        }
+        Ok(slot.as_mut().expect("parser initialized"))
+    }
+}
+
+fn parsed_tree(parser: &mut Parser, source: &str, path: &str) -> Result<Tree, String> {
+    parser
+        .parse(source, None)
+        .ok_or_else(|| format!("parser cancelled for {path}"))
 }
 
 fn compatible_typescript_tree(
@@ -1146,53 +1357,409 @@ fn compatible_typescript_tree(
     source: &str,
     path: &str,
     registry: &Registry,
-    report: &mut Report,
-) -> Option<Tree> {
+) -> Result<Tree, String> {
     if !tree.root_node().has_error() || registry.language != "typescript" {
-        return Some(tree);
+        return Ok(tree);
     }
     let Some(compatible) = typescript_parser_compatibility_source(source) else {
-        return Some(tree);
+        return Ok(tree);
     };
-    parsed_tree(parser, &compatible, path, report)
+    parsed_tree(parser, &compatible, path)
 }
 
 fn parse_source(
     path: &str,
     source: &str,
     registry: &Registry,
-    report: &mut Report,
-) -> Option<Tree> {
-    let mut parser = configured_parser(path, registry, report)?;
-    let tree = parsed_tree(&mut parser, source, path, report)?;
-    let tree = compatible_typescript_tree(&mut parser, tree, source, path, registry, report)?;
+    parsers: &mut ParserPool,
+) -> Result<Tree, String> {
+    let parser = parsers.parser(path, registry)?;
+    let tree = parsed_tree(parser, source, path)?;
+    let tree = compatible_typescript_tree(parser, tree, source, path, registry)?;
     if tree.root_node().has_error() {
-        report.errors.push(format!("parse error in {path}"));
-        return None;
+        return Err(format!("parse error in {path}"));
     }
-    Some(tree)
+    Ok(tree)
 }
 
-fn collect_source(
+#[derive(Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct SourceAnalysis {
+    facts: Facts,
+    errors: Vec<String>,
+    stats: SourceStats,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CacheEntry {
+    key: String,
+    analysis_sha256: String,
+    analysis: SourceAnalysis,
+}
+
+#[derive(Serialize)]
+struct CacheEntryRef<'a> {
+    key: &'a str,
+    analysis_sha256: String,
+    analysis: &'a SourceAnalysis,
+}
+
+struct CacheRoot {
+    #[cfg(not(unix))]
+    path: PathBuf,
+    #[cfg(unix)]
+    directory: File,
+}
+
+fn cache_root() -> Option<&'static CacheRoot> {
+    static ROOT: OnceLock<Option<CacheRoot>> = OnceLock::new();
+    ROOT.get_or_init(|| {
+        let configured = std::env::var_os("SMELLS_CACHE_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| std::env::temp_dir().join("smells-cache"));
+        initialize_cache_root(&configured)
+    })
+    .as_ref()
+}
+
+fn fact_cache_key(path: &str, source: &str, registry: &Registry, needs: RuleNeeds) -> String {
+    static IMPLEMENTATION: OnceLock<String> = OnceLock::new();
+    let implementation = IMPLEMENTATION.get_or_init(|| {
+        crate::input::digest(&[
+            b"portable-facts-v1",
+            include_bytes!("portable.rs"),
+            include_bytes!("../Cargo.lock"),
+        ])
+    });
+    crate::input::digest(&[
+        implementation.as_bytes(),
+        registry.language.as_bytes(),
+        path.as_bytes(),
+        &needs.cache_bytes(),
+        source.as_bytes(),
+    ])
+}
+
+fn fact_cache_relative_path(key: &str) -> PathBuf {
+    PathBuf::from("portable-facts-v1")
+        .join(&key[..2])
+        .join(format!("{key}.json"))
+}
+
+fn analysis_digest(key: &str, analysis: &SourceAnalysis) -> Option<String> {
+    let bytes = serde_json::to_vec(analysis).ok()?;
+    Some(crate::input::digest(&[
+        b"portable-fact-payload-v1",
+        key.as_bytes(),
+        &bytes,
+    ]))
+}
+
+#[cfg(unix)]
+fn cache_components(relative: &Path) -> Option<Vec<CString>> {
+    relative
+        .components()
+        .map(|component| match component {
+            std::path::Component::Normal(name) => CString::new(name.as_bytes()).ok(),
+            _ => None,
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+fn open_at(parent: &File, name: &OsStr, flags: libc::c_int) -> Option<File> {
+    let name = CString::new(name.as_bytes()).ok()?;
+    // SAFETY: parent is an open directory descriptor, name is NUL-terminated,
+    // and a successful openat returns a uniquely owned descriptor.
+    let descriptor = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), flags, 0o600) };
+    if descriptor < 0 {
+        None
+    } else {
+        // SAFETY: the successful openat call transferred ownership of descriptor.
+        Some(unsafe { File::from_raw_fd(descriptor) })
+    }
+}
+
+#[cfg(unix)]
+fn open_absolute_directory(path: &Path) -> Option<File> {
+    if !path.is_absolute() {
+        return None;
+    }
+    let mut directory = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open("/")
+        .ok()?;
+    for component in path.components() {
+        match component {
+            std::path::Component::RootDir => {}
+            std::path::Component::Normal(name) => {
+                directory = open_at(
+                    &directory,
+                    name,
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )?;
+            }
+            _ => return None,
+        }
+    }
+    Some(directory)
+}
+
+#[cfg(unix)]
+fn absolute_cache_path(configured: &Path) -> Option<PathBuf> {
+    if configured.is_absolute() {
+        Some(configured.to_path_buf())
+    } else {
+        Some(std::env::current_dir().ok()?.join(configured))
+    }
+}
+
+#[cfg(unix)]
+fn prepared_cache_parent(configured: &Path) -> Option<(File, OsString)> {
+    let absolute = absolute_cache_path(configured)?;
+    let parent = absolute.parent()?;
+    fs::create_dir_all(parent).ok()?;
+    let canonical_parent = parent.canonicalize().ok()?;
+    Some((
+        open_absolute_directory(&canonical_parent)?,
+        absolute.file_name()?.to_os_string(),
+    ))
+}
+
+#[cfg(unix)]
+fn create_or_open_cache_root(parent: &File, name: &OsStr) -> Option<File> {
+    let name_c = CString::new(name.as_bytes()).ok()?;
+    // SAFETY: parent and name_c remain valid for the call.
+    let created = unsafe { libc::mkdirat(parent.as_raw_fd(), name_c.as_ptr(), 0o700) };
+    if created != 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::EEXIST) {
+        return None;
+    }
+    open_at(
+        parent,
+        name,
+        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+    )
+}
+
+#[cfg(unix)]
+fn initialize_cache_root(configured: &Path) -> Option<CacheRoot> {
+    let (parent, name) = prepared_cache_parent(configured)?;
+    Some(CacheRoot {
+        directory: create_or_open_cache_root(&parent, &name)?,
+    })
+}
+
+#[cfg(not(unix))]
+fn absolute_cache_path(configured: &Path) -> Option<PathBuf> {
+    if configured.is_absolute() {
+        Some(configured.to_path_buf())
+    } else {
+        Some(std::env::current_dir().ok()?.join(configured))
+    }
+}
+
+#[cfg(not(unix))]
+fn initialize_cache_root(configured: &Path) -> Option<CacheRoot> {
+    let configured = absolute_cache_path(configured)?;
+    fs::create_dir_all(&configured).ok()?;
+    let path = configured.canonicalize().ok()?;
+    fs::symlink_metadata(&path)
+        .ok()?
+        .file_type()
+        .is_dir()
+        .then_some(CacheRoot { path })
+}
+
+#[cfg(unix)]
+fn open_cache_parent(root: &CacheRoot, relative: &Path, create: bool) -> Option<(File, CString)> {
+    let mut components = cache_components(relative)?;
+    let target = components.pop()?;
+    let mut directory = root.directory.try_clone().ok()?;
+    for component in components {
+        if create {
+            // SAFETY: directory and component remain valid for the duration of the call.
+            let created =
+                unsafe { libc::mkdirat(directory.as_raw_fd(), component.as_ptr(), 0o700) };
+            if created != 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::EEXIST)
+            {
+                return None;
+            }
+        }
+        directory = open_at(
+            &directory,
+            OsStr::from_bytes(component.as_bytes()),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )?;
+    }
+    Some((directory, target))
+}
+
+#[cfg(unix)]
+fn open_cached_file(root: &CacheRoot, relative: &Path) -> Option<File> {
+    let (parent, target) = open_cache_parent(root, relative, false)?;
+    open_at(
+        &parent,
+        OsStr::from_bytes(target.as_bytes()),
+        libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+    )
+    .filter(|file| file.metadata().is_ok_and(|metadata| metadata.is_file()))
+}
+
+#[cfg(not(unix))]
+fn open_cached_file(root: &CacheRoot, relative: &Path) -> Option<File> {
+    let path = root.path.join(relative);
+    let metadata = fs::symlink_metadata(&path).ok()?;
+    metadata
+        .file_type()
+        .is_file()
+        .then(|| File::open(path).ok())?
+}
+
+fn cached_analysis(root: &CacheRoot, relative: &Path, key: &str) -> Option<SourceAnalysis> {
+    let entry: CacheEntry = serde_json::from_reader(open_cached_file(root, relative)?).ok()?;
+    if entry.key != key || analysis_digest(key, &entry.analysis)? != entry.analysis_sha256 {
+        return None;
+    }
+    Some(entry.analysis)
+}
+
+#[cfg(unix)]
+fn write_cache_entry(root: &CacheRoot, relative: &Path, bytes: &[u8], nonce: usize) -> Option<()> {
+    let (parent, target) = open_cache_parent(root, relative, true)?;
+    let temporary = CString::new(format!(
+        ".{}.{}.{}.tmp",
+        target.to_string_lossy(),
+        std::process::id(),
+        nonce
+    ))
+    .ok()?;
+    let mut file = open_at(
+        &parent,
+        OsStr::from_bytes(temporary.as_bytes()),
+        libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+    )?;
+    if file.write_all(bytes).is_err() {
+        // SAFETY: parent and temporary remain valid for the duration of the call.
+        unsafe { libc::unlinkat(parent.as_raw_fd(), temporary.as_ptr(), 0) };
+        return None;
+    }
+    drop(file);
+    // SAFETY: both names are relative to the same open directory descriptor.
+    let renamed = unsafe {
+        libc::renameat(
+            parent.as_raw_fd(),
+            temporary.as_ptr(),
+            parent.as_raw_fd(),
+            target.as_ptr(),
+        )
+    };
+    if renamed != 0 {
+        // SAFETY: parent and temporary remain valid for the duration of the call.
+        unsafe { libc::unlinkat(parent.as_raw_fd(), temporary.as_ptr(), 0) };
+        return None;
+    }
+    Some(())
+}
+
+#[cfg(not(unix))]
+fn write_cache_entry(root: &CacheRoot, relative: &Path, bytes: &[u8], nonce: usize) -> Option<()> {
+    let path = root.path.join(relative);
+    let parent = path.parent()?;
+    fs::create_dir_all(parent).ok()?;
+    let temporary = parent.join(format!(
+        ".{}.{}.{}.tmp",
+        path.file_name()?.to_string_lossy(),
+        std::process::id(),
+        nonce
+    ));
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .and_then(|mut file| file.write_all(bytes))
+        .ok()?;
+    fs::rename(&temporary, path).ok()?;
+    Some(())
+}
+
+fn store_analysis(root: &CacheRoot, relative: &Path, key: &str, analysis: &SourceAnalysis) {
+    static NEXT_TEMPORARY: AtomicUsize = AtomicUsize::new(0);
+    let Some(analysis_sha256) = analysis_digest(key, analysis) else {
+        return;
+    };
+    let bytes = match serde_json::to_vec(&CacheEntryRef {
+        key,
+        analysis_sha256,
+        analysis,
+    }) {
+        Ok(bytes) => bytes,
+        Err(_) => return,
+    };
+    let _ = write_cache_entry(
+        root,
+        relative,
+        &bytes,
+        NEXT_TEMPORARY.fetch_add(1, Ordering::Relaxed),
+    );
+}
+
+fn cached_or_analyze_source(
     path: &str,
     source: &str,
     registry: &Registry,
-    input: &Input,
-    report: &mut Report,
-    facts: &mut Facts,
-) {
-    let Some(tree) = parse_source(path, source, registry, report) else {
-        return;
+    needs: RuleNeeds,
+    parsers: &mut ParserPool,
+) -> SourceAnalysis {
+    let key = fact_cache_key(path, source, registry, needs);
+    let cache_relative = fact_cache_relative_path(&key);
+    if let Some(root) = cache_root()
+        && let Some(analysis) = cached_analysis(root, &cache_relative, &key)
+    {
+        metrics::add(Counter::FactCacheHits, 1);
+        record_analysis_stats(&analysis, false);
+        return analysis;
+    }
+    metrics::add(Counter::FactCacheMisses, 1);
+    let analysis = analyze_source(path, source, registry, needs, parsers);
+    if let Some(root) = cache_root() {
+        store_analysis(root, &cache_relative, &key, &analysis);
+    }
+    record_analysis_stats(&analysis, true);
+    analysis
+}
+
+fn record_analysis_stats(analysis: &SourceAnalysis, parsed: bool) {
+    if parsed {
+        metrics::add(Counter::SyntaxNodes, analysis.stats.syntax_nodes);
+    }
+    metrics::add(Counter::Functions, analysis.stats.functions);
+    metrics::add(Counter::NormalizedTokens, analysis.stats.normalized_tokens);
+}
+
+fn analyze_source(
+    path: &str,
+    source: &str,
+    registry: &Registry,
+    needs: RuleNeeds,
+    parsers: &mut ParserPool,
+) -> SourceAnalysis {
+    let tree = match parse_source(path, source, registry, parsers) {
+        Ok(tree) => tree,
+        Err(error) => {
+            return SourceAnalysis {
+                errors: vec![error],
+                ..SourceAnalysis::default()
+            };
+        }
     };
-    visit(
-        tree.root_node(),
-        path,
-        source,
-        registry,
-        input,
-        report,
+    let (facts, stats) = extract_facts(&tree, path, source, registry, needs);
+    SourceAnalysis {
         facts,
-    );
+        errors: Vec::new(),
+        stats,
+    }
 }
 
 pub fn check(input: &Input, registry: &Registry) -> Report {
@@ -1200,11 +1767,83 @@ pub fn check(input: &Input, registry: &Registry) -> Report {
     report.input_sha256 = input.digest.clone();
     report.scanned_files = input.files.keys().cloned().collect();
     validate_required_rules(registry, input, &mut report);
+    let needs = RuleNeeds::from_policy(&input.policy, &registry.language);
+    let sources = input.files.iter().collect::<Vec<_>>();
+    let analyses = sources
+        .par_iter()
+        .map_init(ParserPool::default, |parsers, (path, source)| {
+            cached_or_analyze_source(path, source, registry, needs, parsers)
+        })
+        .collect::<Vec<_>>();
     let mut facts = Facts::default();
-    for (path, source) in &input.files {
-        collect_source(path, source, registry, input, &mut report, &mut facts);
+    for mut analysis in analyses {
+        facts.functions.append(&mut analysis.facts.functions);
+        facts.classes.append(&mut analysis.facts.classes);
+        report.errors.append(&mut analysis.errors);
     }
+    source_metrics(&facts, registry, input, &mut report);
     patterns(&facts, &input.policy, &registry.language, &mut report);
-    report.attach_sources(&input.files);
     report
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cache_rejects_tampering_and_symlink_redirection() {
+        let base =
+            std::env::temp_dir().join(format!("smells-portable-cache-test-{}", std::process::id()));
+        fs::create_dir(&base).unwrap();
+        let root_path = base.join("cache");
+        let root = initialize_cache_root(&root_path).unwrap();
+        let relative = Path::new("entry.json");
+        let path = root_path.join(relative);
+        let key = "a".repeat(64);
+        let analysis = SourceAnalysis::default();
+        store_analysis(&root, relative, &key, &analysis);
+        assert!(cached_analysis(&root, relative, &key).is_some());
+
+        let mut entry: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        entry["analysis_sha256"] = json!("0".repeat(64));
+        fs::write(&path, serde_json::to_vec(&entry).unwrap()).unwrap();
+        assert!(cached_analysis(&root, relative, &key).is_none());
+        store_analysis(&root, relative, &key, &analysis);
+        assert!(cached_analysis(&root, relative, &key).is_some());
+
+        #[cfg(unix)]
+        {
+            let link = root_path.join("entry-link.json");
+            std::os::unix::fs::symlink(&path, &link).unwrap();
+            assert!(cached_analysis(&root, Path::new("entry-link.json"), &key).is_none());
+
+            let actual = root_path.join("actual");
+            fs::create_dir(&actual).unwrap();
+            fs::copy(&path, actual.join(relative)).unwrap();
+            std::os::unix::fs::symlink(&actual, root_path.join("linked-directory")).unwrap();
+            let linked_entry = Path::new("linked-directory/entry.json");
+            assert!(cached_analysis(&root, linked_entry, &key).is_none());
+            store_analysis(&root, linked_entry, &key, &analysis);
+            assert!(cached_analysis(&root, linked_entry, &key).is_none());
+
+            let moved = base.join("moved-cache");
+            let attacker = base.join("attacker-cache");
+            fs::create_dir(&attacker).unwrap();
+            fs::rename(&root_path, &moved).unwrap();
+            std::os::unix::fs::symlink(&attacker, &root_path).unwrap();
+            fs::write(attacker.join(relative), b"not cache evidence").unwrap();
+            assert!(cached_analysis(&root, relative, &key).is_some());
+            store_analysis(&root, relative, &key, &analysis);
+            assert!(cached_analysis(&root, relative, &key).is_some());
+            assert_eq!(
+                fs::read(attacker.join(relative)).unwrap(),
+                b"not cache evidence"
+            );
+            assert!(initialize_cache_root(&root_path).is_none());
+            fs::remove_file(&root_path).unwrap();
+        }
+
+        fs::remove_dir_all(base).unwrap();
+    }
 }

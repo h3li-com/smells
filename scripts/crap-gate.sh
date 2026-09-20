@@ -9,6 +9,10 @@ required_target=5
 hard_limit=10
 coverage_report=target/quality/lcov.info
 crap_report=target/quality/crap-report.json
+coverage_cache=$(mktemp -d "${TMPDIR:-/tmp}/smells-coverage-cache.XXXXXX")
+trap 'rm -r "$coverage_cache"' EXIT HUP INT TERM
+SMELLS_CACHE_DIR=$coverage_cache
+export SMELLS_CACHE_DIR
 
 # rustup installations are discovered by cargo-llvm-cov. Homebrew Rust does not
 # ship llvm-tools-preview, so use Homebrew's matching LLVM binaries when present.

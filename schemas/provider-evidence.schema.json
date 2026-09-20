@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "smells deterministic provider evidence v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "scanner_version", "rule_pack", "input_sha256", "providers"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "scanner_version": {"type": "string", "minLength": 1},
+    "rule_pack": {"enum": ["rust-v1", "python-v1", "typescript-v1"]},
+    "input_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "providers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["rule_id", "provider", "complete", "observations"],
+        "properties": {
+          "rule_id": {"type": "string", "minLength": 1},
+          "provider": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "version", "configuration_sha256"],
+            "properties": {
+              "name": {"type": "string", "minLength": 1},
+              "version": {"type": "string", "minLength": 1},
+              "configuration_sha256": {"type": "string", "pattern": "^[0-9A-Fa-f]{64}$"}
+            }
+          },
+          "complete": {"const": true},
+          "observations": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["symbol", "location", "related_symbols", "related_locations", "measurements", "evidence"],
+              "properties": {
+                "symbol": {"type": "string", "minLength": 1},
+                "location": {"$ref": "#/$defs/location"},
+                "related_symbols": {"type": "array", "items": {"type": "string"}},
+                "related_locations": {"type": "array", "items": {"$ref": "#/$defs/location"}},
+                "measurements": {
+                  "type": "object",
+                  "minProperties": 1,
+                  "additionalProperties": {"type": "integer", "minimum": 0}
+                },
+                "evidence": {}
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "location": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "line", "column"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "line": {"type": "integer", "minimum": 1},
+        "column": {"type": "integer", "minimum": 1}
+      }
+    }
+  }
+}

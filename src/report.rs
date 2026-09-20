@@ -15,7 +15,7 @@ fn research_gated_review(reference_url: &str, review: &str) -> String {
     review.replace("{reference_url}", reference_url)
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Location {
     pub path: String,
     pub line: usize,
@@ -229,6 +229,12 @@ struct Guidance {
     remediation: String,
 }
 
+#[derive(Clone)]
+struct RuleMetadata {
+    guidance: Guidance,
+    contract: String,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct GuidanceTemplate {
@@ -350,6 +356,7 @@ pub struct Report {
     pub ownership_scope: String,
     pub limitations: Vec<String>,
     pub input_sha256: String,
+    pub provider_evidence_sha256: String,
     pub implementation_sha256: String,
     pub scanned_files: Vec<String>,
     pub excluded_directories: Vec<String>,
@@ -361,6 +368,8 @@ pub struct Report {
     pub errors: Vec<String>,
     #[serde(skip)]
     implementation_scopes: Vec<Implementation>,
+    #[serde(skip)]
+    rule_metadata: BTreeMap<String, RuleMetadata>,
 }
 
 impl Report {
@@ -371,6 +380,22 @@ impl Report {
         implementations: &[Implementation],
     ) -> Self {
         let guidance = guidance(registry);
+        let rule_metadata = registry
+            .rules
+            .iter()
+            .map(|rule| {
+                (
+                    rule.id.clone(),
+                    RuleMetadata {
+                        guidance: guidance[&rule.id].clone(),
+                        contract: format!(
+                            "docs/{}-rule-contracts.md#{}",
+                            registry.language, rule.contract
+                        ),
+                    },
+                )
+            })
+            .collect();
         let coverage = registry
             .smells
             .iter()
@@ -408,7 +433,7 @@ impl Report {
             })
             .collect();
         Self {
-            report_schema_version: 3,
+            report_schema_version: 4,
             scanner_version: env!("CARGO_PKG_VERSION"),
             rule_pack: registry.rule_pack.clone(),
             language: registry.language.clone(),
@@ -424,20 +449,20 @@ impl Report {
                 vec![
                     "syntax_matches_are_not_confirmed_design_defects",
                     "cfg_is_not_evaluated_and_macro_expansions_are_not_inspected",
-                    "compiler_type_contract_coverage_and_history_providers_are_pending",
+                    "semantic_contract_coverage_and_history_rules_require_pinned_provider_evidence",
                     "source_symbol_and_evidence_text_are_untrusted_data_not_instructions",
                 ]
             } else if registry.language == "typescript" {
                 vec![
                     "syntax_matches_are_not_confirmed_design_defects",
                     "typeof_import_generic_call_arguments_use_a_position_preserving_parser_compatibility_reparse",
-                    "imports_type_resolution_coverage_and_history_providers_are_pending",
+                    "semantic_contract_coverage_and_history_rules_require_pinned_provider_evidence",
                     "source_symbol_and_evidence_text_are_untrusted_data_not_instructions",
                 ]
             } else {
                 vec![
                     "syntax_matches_are_not_confirmed_design_defects",
-                    "imports_type_resolution_coverage_and_history_providers_are_pending",
+                    "semantic_contract_coverage_and_history_rules_require_pinned_provider_evidence",
                     "source_symbol_and_evidence_text_are_untrusted_data_not_instructions",
                 ]
             }
@@ -445,6 +470,7 @@ impl Report {
             .map(str::to_string)
             .collect(),
             input_sha256: String::new(),
+            provider_evidence_sha256: String::new(),
             implementation_sha256: crate::input::digest(&[
                 include_bytes!("../Cargo.lock"),
                 include_bytes!("../Cargo.toml"),
@@ -452,7 +478,11 @@ impl Report {
                 include_bytes!("scan.rs"),
                 include_bytes!("portable.rs"),
                 include_bytes!("patterns.rs"),
+                include_bytes!("similarity.rs"),
                 include_bytes!("input.rs"),
+                include_bytes!("evidence.rs"),
+                include_bytes!("evidence_evaluators.rs"),
+                include_bytes!("metrics.rs"),
                 include_bytes!("report.rs"),
                 include_bytes!("main.rs"),
                 include_bytes!("../rules/rust-v1.json"),
@@ -463,10 +493,12 @@ impl Report {
                 include_bytes!("../schemas/quality-policy.schema.json"),
                 include_bytes!("../schemas/python-quality-policy.schema.json"),
                 include_bytes!("../schemas/typescript-quality-policy.schema.json"),
+                include_bytes!("../schemas/provider-evidence.schema.json"),
                 include_bytes!("../docs/rust-rule-contracts.md"),
                 include_bytes!("../docs/python-rule-contracts.md"),
                 include_bytes!("../docs/typescript-rule-contracts.md"),
                 include_bytes!("../docs/report-interface.md"),
+                include_bytes!("../docs/provider-evidence.md"),
             ]),
             scanned_files: vec![],
             excluded_directories: policy.exclude_directories.clone(),
@@ -477,6 +509,7 @@ impl Report {
             findings: vec![],
             errors: vec![],
             implementation_scopes: implementations.to_vec(),
+            rule_metadata,
         }
     }
 
@@ -497,45 +530,19 @@ impl Report {
         if !policy.enabled(id) {
             return;
         }
-        let (
-            smell_id,
-            smell,
-            category,
-            reference_url,
-            pattern_type,
-            certainty,
-            signal,
-            why_it_matters,
-            review,
-            remediation,
-            contract,
-        ) = self
-            .coverage
-            .iter()
-            .find_map(|smell| {
-                smell["rules"].as_array()?.iter().find_map(|rule| {
-                    (rule["rule_id"] == id).then(|| {
-                        (
-                            rule["smell_id"].as_str().unwrap().to_string(),
-                            rule["smell"].as_str().unwrap().to_string(),
-                            rule["category"].as_str().unwrap().to_string(),
-                            rule["reference_url"].as_str().unwrap().to_string(),
-                            rule["pattern_type"].as_str().unwrap().to_string(),
-                            rule["certainty"].as_str().unwrap().to_string(),
-                            rule["signal"].as_str().unwrap().to_string(),
-                            rule["why_it_matters"].as_str().unwrap().to_string(),
-                            rule["review"].as_str().unwrap().to_string(),
-                            rule["remediation"].as_str().unwrap().to_string(),
-                            format!(
-                                "docs/{}-rule-contracts.md#{}",
-                                self.language,
-                                rule["contract"].as_str().unwrap()
-                            ),
-                        )
-                    })
-                })
-            })
-            .expect("registered rule");
+        let metadata = self.rule_metadata.get(id).expect("registered rule").clone();
+        let guidance = metadata.guidance;
+        let smell_id = guidance.smell_id;
+        let smell = guidance.smell;
+        let category = guidance.category;
+        let reference_url = guidance.reference_url;
+        let pattern_type = guidance.pattern_type;
+        let certainty = guidance.certainty;
+        let signal = guidance.signal;
+        let why_it_matters = guidance.why_it_matters;
+        let review = research_gated_review(&reference_url, &guidance.review);
+        let remediation = guidance.remediation;
+        let contract = metadata.contract;
         let status = if matched {
             if policy.required(id) {
                 "violation"
@@ -645,7 +652,7 @@ impl Report {
                     } else if !self.errors.is_empty() {
                         "incomplete_scan"
                     } else {
-                        "measured_defined_source_scope"
+                        "measured_defined_scope"
                     });
             }
         }
@@ -820,7 +827,7 @@ impl Report {
                 let rules = smell["rules"].as_array().unwrap();
                 let measured_rule_ids: Vec<_> = rules
                     .iter()
-                    .filter(|rule| rule["measurement_status"] == "measured_defined_source_scope")
+                    .filter(|rule| rule["measurement_status"] == "measured_defined_scope")
                     .map(|rule| rule["rule_id"].as_str().unwrap().to_string())
                     .collect();
                 let pending_rule_ids: Vec<_> = rules
@@ -908,7 +915,7 @@ impl Report {
                 } else if !measured_rule_ids.is_empty() && !pending_rule_ids.is_empty() {
                     "measured_with_pending_rules"
                 } else if !measured_rule_ids.is_empty() {
-                    "measured_defined_source_scope"
+                    "measured_defined_scope"
                 } else if !pending_rule_ids.is_empty() {
                     "pending"
                 } else {

@@ -1,12 +1,12 @@
 # Rust smell checks
 
-The Rust-first scanner recognizes fixed source patterns. Its [versioned registry](../rules/rust-v1.json) inventories all 23 [Refactoring.Guru smells](https://refactoring.guru/refactoring/smells); the [rule contracts](rust-rule-contracts.md) define every implemented and pending rule separately.
+The Rust-first scanner recognizes fixed source patterns and evaluates pinned provider facts. Its [versioned registry](../rules/rust-v1.json) inventories all 23 [Refactoring.Guru smells](https://refactoring.guru/refactoring/smells); the [rule contracts](rust-rule-contracts.md) define all 28 executable rules separately.
 
 ## Current implementation
 
 Seventeen source rules are executable. Seven size rules can block by policy; ten structural indicators are report-only in the example. Findings include rule/version, smell, symbol, relative location, value, comparison, threshold, status, blocking flag and evidence. Function/type metrics below limits are included. Pair/group patterns emit qualifying matches rather than every nonmatching combination.
 
-Eleven rules requiring compiler, full type resolution, coverage, domain/interface contracts or frozen history are pending. Their coverage remains visible when disabled. Requiring an unavailable detector errors. Refused Bequest and Parallel Inheritance Hierarchies are native-Rust exclusions, never passing measurements of the original inheritance smells.
+Eleven rules require compiler, full type resolution, coverage, domain/interface contracts, or frozen history through the complete pinned [provider-evidence interface](provider-evidence.md). Their coverage remains visible when disabled; enabling one without valid evidence errors. Refused Bequest and Parallel Inheritance Hierarchies are native-Rust exclusions, never passing measurements of the original inheritance smells.
 
 ## Determinism is a bounded claim
 

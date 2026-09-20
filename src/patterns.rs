@@ -1,7 +1,9 @@
 use crate::{
+    metrics::{self, Counter},
     policy::Policy,
     report::Report,
     scan::{Facts, Function, syntax},
+    similarity::exact_jaccard_pairs,
 };
 use proc_macro2::{TokenStream, TokenTree};
 use quote::ToTokens;
@@ -622,18 +624,14 @@ fn normalized(stream: TokenStream, result: &mut Vec<String>) {
     }
 }
 
-fn fingerprint(function: &Function) -> (usize, BTreeMap<Vec<String>, usize>) {
+fn normalized_tokens(function: &Function) -> Vec<String> {
     let mut tokens = vec![];
     if let Some(body) = &function.body {
         for stmt in &body.stmts {
             normalized(stmt.to_token_stream(), &mut tokens);
         }
     }
-    let mut counts = BTreeMap::new();
-    for window in tokens.windows(4) {
-        *counts.entry(window.to_vec()).or_insert(0) += 1;
-    }
-    (tokens.len(), counts)
+    tokens
 }
 
 fn interface(function: &Function) -> String {
@@ -661,8 +659,6 @@ fn interface(function: &Function) -> String {
     )
 }
 
-type Fingerprint = (usize, BTreeMap<Vec<String>, usize>);
-
 fn duplicate_functions(facts: &Facts) -> Vec<&Function> {
     let mut declarations = BTreeSet::new();
     facts
@@ -688,19 +684,17 @@ fn overlapping_bodies(first: &Function, second: &Function) -> bool {
         )
 }
 
-fn multiset_similarity(
-    first: &BTreeMap<Vec<String>, usize>,
-    second: &BTreeMap<Vec<String>, usize>,
-) -> Option<(usize, usize)> {
-    let keys: BTreeSet<_> = first.keys().chain(second.keys()).collect();
-    let (mut intersection, mut union) = (0, 0);
-    for key in keys {
-        let first_count = *first.get(key).unwrap_or(&0);
-        let second_count = *second.get(key).unwrap_or(&0);
-        intersection += first_count.min(second_count);
-        union += first_count.max(second_count);
-    }
-    (union > 0).then_some((intersection, union))
+fn duplicate_thresholds(policy: &Policy) -> Option<(u64, u64)> {
+    ["rust.duplicate_functions", "rust.alternative_interfaces"]
+        .into_iter()
+        .filter(|id| policy.enabled(id))
+        .map(|id| {
+            (
+                parameter(policy, id, "minimum_tokens"),
+                parameter(policy, id, "minimum_similarity_basis_points"),
+            )
+        })
+        .reduce(|left, right| (left.0.min(right.0), left.1.min(right.1)))
 }
 
 fn ordered_pair<'a>(
@@ -761,18 +755,13 @@ fn report_duplicate(
 fn compare_duplicates(
     first: &Function,
     second: &Function,
-    first_fingerprint: &Fingerprint,
-    second_fingerprint: &Fingerprint,
+    tokens: [usize; 2],
+    intersection: usize,
+    union: usize,
     policy: &Policy,
     report: &mut Report,
 ) {
-    let Some((intersection, union)) =
-        multiset_similarity(&first_fingerprint.1, &second_fingerprint.1)
-    else {
-        return;
-    };
-    let (first, second, token_counts) =
-        ordered_pair(first, second, first_fingerprint.0, second_fingerprint.0);
+    let (first, second, token_counts) = ordered_pair(first, second, tokens[0], tokens[1]);
     let evidence = DuplicateEvidence {
         token_counts,
         intersection,
@@ -788,33 +777,42 @@ fn compare_duplicates(
 }
 
 fn duplicates(facts: &Facts, policy: &Policy, report: &mut Report) {
-    let duplicate = "rust.duplicate_functions";
-    let alternative = "rust.alternative_interfaces";
-    if !policy.enabled(duplicate) && !policy.enabled(alternative) {
+    let Some((minimum, similarity)) = duplicate_thresholds(policy) else {
         return;
-    }
+    };
     let functions = duplicate_functions(facts);
-    let fingerprints: Vec<_> = functions.iter().map(|f| fingerprint(f)).collect();
-    let mut comparisons = 0;
-    for a in 0..functions.len() {
-        for b in a + 1..functions.len() {
-            if overlapping_bodies(functions[a], functions[b]) {
-                continue;
-            }
-            comparisons += 1;
-            if comparisons > policy.limits.maximum_pairs {
-                report.errors.push("maximum_pairs budget exceeded".into());
-                return;
-            }
-            compare_duplicates(
-                functions[a],
-                functions[b],
-                &fingerprints[a],
-                &fingerprints[b],
-                policy,
-                report,
-            );
+    let token_lists = functions
+        .iter()
+        .map(|function| normalized_tokens(function))
+        .collect::<Vec<_>>();
+    metrics::add(
+        Counter::NormalizedTokens,
+        token_lists.iter().map(Vec::len).sum(),
+    );
+    let pairs = exact_jaccard_pairs(
+        &token_lists,
+        minimum,
+        similarity,
+        policy.limits.maximum_pairs,
+        |left, right| overlapping_bodies(functions[left], functions[right]),
+    );
+    let pairs = match pairs {
+        Ok(pairs) => pairs,
+        Err(error) => {
+            report.errors.push(error.into());
+            return;
         }
+    };
+    for pair in pairs {
+        compare_duplicates(
+            functions[pair.left],
+            functions[pair.right],
+            [token_lists[pair.left].len(), token_lists[pair.right].len()],
+            pair.intersection,
+            pair.union,
+            policy,
+            report,
+        );
     }
 }
 

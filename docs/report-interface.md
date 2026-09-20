@@ -2,7 +2,7 @@
 
 The JSON report is the interface between the deterministic scanner and a review agent. The scanner owns measurement and threshold evaluation. The agent owns semantic investigation and any proposed code change.
 
-`report_schema_version` is currently `3`. Version 3 makes `implementation_results` the primary monorepo result. Each implementation contains its own canonical smell results, while the top-level `smell_results` remains the repository rollup and the rule-level `coverage` and `findings` remain the evidence. Consumers must reject unsupported versions rather than guessing field semantics.
+`report_schema_version` is currently `4`. Version 4 adds `provider_evidence_sha256`; an empty value means no provider bundle was supplied. `input_sha256` continues to identify the captured policy, manifests, and source, while a nonempty provider digest identifies the exact supplemental evidence bytes evaluated against that input. Version 3 introduced `implementation_results` as the primary monorepo result. Each implementation contains its own canonical smell results, while the top-level `smell_results` remains the repository rollup and the rule-level `coverage` and `findings` remain the evidence. Consumers must reject unsupported versions rather than guessing field semantics.
 
 ## Repository implementation model
 
@@ -54,12 +54,12 @@ The closed `state` values are:
 - `blocking_match`: at least one required rule matched.
 - `review_match`: no required rule matched, but at least one report-only rule matched.
 - `checked_no_match_in_measured_scope`: at least one implemented enabled rule completed and none matched. This never claims that the semantic smell is absent.
-- `pending`: no detector ran because the registered rules are not implemented.
+- `pending`: reserved for a future rule pack that registers an unavailable detector; all v1 rules now have source or provider evaluators.
 - `disabled`: every registered implemented detector is disabled by policy.
 - `not_applicable`: the canonical smell does not apply to the selected language model.
 - `error`: measurement was incomplete. Do not infer absence or continue as if the check passed.
 
-`coverage_status` independently states whether the smell was `measured_defined_source_scope`, `measured_with_pending_rules`, `pending`, `disabled`, `not_applicable`, or `incomplete`. This separation matters: for example, a `review_match` can still have pending semantic/provider rules. The deterministic match remains valid evidence, but it is not complete semantic coverage.
+`coverage_status` independently states whether the smell was `measured_defined_scope`, `measured_with_pending_rules`, `pending`, `disabled`, `not_applicable`, or `incomplete`. In the v1 packs, an enabled provider-backed rule without complete pinned evidence is `incomplete`, never pending or passed. The deterministic source match remains valid evidence, but it is not complete semantic coverage unless every enabled provider rule also completed.
 
 Every smell result repeats the canonical URL and `reference_check`. For a matched smell, the consuming agent must open that exact URL before reviewing any referenced finding. The detailed finding retains rule-specific guidance and the same non-negotiable research gate.
 
@@ -79,7 +79,7 @@ Every smell result repeats the canonical URL and `reference_check`. For a matche
   "applicability": "applicable",
   "state": "blocking_match",
   "interpretation": "One or more required deterministic rules matched this smell pattern.",
-  "coverage_status": "measured_defined_source_scope",
+  "coverage_status": "measured_defined_scope",
   "evaluated_findings": 3,
   "matched_findings": 3,
   "blocking_findings": 2,

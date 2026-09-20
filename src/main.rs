@@ -1,13 +1,22 @@
+mod evidence;
+mod evidence_evaluators;
 mod input;
+mod metrics;
 mod patterns;
 mod policy;
 mod portable;
 mod report;
 mod scan;
+mod similarity;
 
-use std::{env, fs, path::PathBuf, process::ExitCode};
+use std::{
+    env, fs,
+    io::{self, Write},
+    path::PathBuf,
+    process::ExitCode,
+};
 
-const USAGE: &str = "smells check (--path DIR | --staged) --policy FILE [--format table|json]\nsmells contracts validate --policy FILE\nsmells rules [--rule-pack rust-v1|python-v1|typescript-v1]";
+const USAGE: &str = "smells check (--path DIR | --staged) --policy FILE [--evidence FILE] [--format table|json]\nsmells contracts validate --policy FILE\nsmells rules [--rule-pack rust-v1|python-v1|typescript-v1]";
 
 enum Command {
     Help,
@@ -19,6 +28,7 @@ enum Command {
 struct CheckOptions {
     source: Option<PathBuf>,
     policy_path: PathBuf,
+    evidence_path: Option<PathBuf>,
     format: Option<String>,
     staged: bool,
 }
@@ -27,6 +37,7 @@ struct CheckOptions {
 struct PendingOptions {
     source: Option<PathBuf>,
     policy_path: Option<PathBuf>,
+    evidence_path: Option<PathBuf>,
     format: Option<String>,
     staged: bool,
 }
@@ -46,16 +57,33 @@ fn set_option(
     contracts: bool,
     source: &mut Option<PathBuf>,
     policy_path: &mut Option<PathBuf>,
+    evidence_path: &mut Option<PathBuf>,
     format: &mut Option<String>,
 ) -> Result<(), String> {
     match flag {
-        "--policy" if policy_path.is_none() => *policy_path = Some(PathBuf::from(value)),
-        "--path" if source.is_none() && !contracts => *source = Some(PathBuf::from(value)),
-        "--format" if format.is_none() && !contracts && matches!(value, "table" | "json") => {
-            *format = Some(value.to_string());
-        }
-        _ => return Err(format!("unknown, repeated or invalid option: {flag}")),
+        "--policy" => set_once(policy_path, PathBuf::from(value), true, flag),
+        "--evidence" => set_once(evidence_path, PathBuf::from(value), !contracts, flag),
+        "--path" => set_once(source, PathBuf::from(value), !contracts, flag),
+        "--format" => set_format(format, value, contracts, flag),
+        _ => Err(format!("unknown, repeated or invalid option: {flag}")),
     }
+}
+
+fn set_format(
+    slot: &mut Option<String>,
+    value: &str,
+    contracts: bool,
+    flag: &str,
+) -> Result<(), String> {
+    let allowed = !contracts && matches!(value, "table" | "json");
+    set_once(slot, value.to_string(), allowed, flag)
+}
+
+fn set_once<T>(slot: &mut Option<T>, value: T, allowed: bool, flag: &str) -> Result<(), String> {
+    if !allowed || slot.is_some() {
+        return Err(format!("unknown, repeated or invalid option: {flag}"));
+    }
+    *slot = Some(value);
     Ok(())
 }
 
@@ -78,6 +106,7 @@ fn operation_command(args: &[String], contracts: bool) -> Result<Command, String
             contracts,
             &mut options.source,
             &mut options.policy_path,
+            &mut options.evidence_path,
             &mut options.format,
         )?;
         index += 2;
@@ -96,6 +125,7 @@ fn finish_operation(options: PendingOptions, contracts: bool) -> Result<Command,
     Ok(Command::Check(CheckOptions {
         source: options.source,
         policy_path,
+        evidence_path: options.evidence_path,
         format: options.format,
         staged: options.staged,
     }))
@@ -125,17 +155,30 @@ fn validate_contracts(policy_path: &PathBuf) -> Result<u8, String> {
         .filter(|rule| rule.implementation == "implemented")
         .count();
     println!(
-        "{{\"status\":\"valid_contracts\",\"smells\":{},\"rules\":{},\"implemented_source_rules\":{implemented}}}",
+        "{{\"status\":\"valid_contracts\",\"smells\":{},\"rules\":{},\"implemented_rules\":{implemented}}}",
         registry.smells.len(),
         registry.rules.len()
     );
     Ok(0)
 }
 
-fn capture(options: &CheckOptions) -> Result<input::CapturedInput, String> {
+fn capture(options: &CheckOptions) -> Result<(input::CapturedInput, Option<Vec<u8>>), String> {
     let captured = match &options.source {
-        Some(source) => input::working_tree(source, &options.policy_path)?,
-        None if options.staged => input::staged(&options.policy_path)?,
+        Some(source) => {
+            let captured = input::working_tree(source, &options.policy_path)?;
+            let evidence = options
+                .evidence_path
+                .as_ref()
+                .map(|path| {
+                    fs::read(path)
+                        .map_err(|error| format!("cannot read provider evidence: {error}"))
+                })
+                .transpose()?;
+            (captured, evidence)
+        }
+        None if options.staged => {
+            input::staged(&options.policy_path, options.evidence_path.as_deref())?
+        }
         None => return Err("select exactly one of --staged and --path".into()),
     };
     Ok(captured)
@@ -149,24 +192,69 @@ fn scan(captured: &input::CapturedInput) -> Result<report::Report, String> {
     })
 }
 
+fn load_evidence(
+    bytes: Option<&[u8]>,
+    captured: &input::CapturedInput,
+) -> Result<(Option<evidence::EvidenceBundle>, String), String> {
+    let Some(bytes) = bytes else {
+        return Ok((None, String::new()));
+    };
+    let bundle = evidence::parse(bytes)?;
+    evidence::validate(&bundle, &captured.input, &captured.registry)?;
+    Ok((Some(bundle), evidence::digest(bytes)))
+}
+
 fn check(options: CheckOptions) -> Result<u8, String> {
-    let captured = capture(&options)?;
+    metrics::reset();
+    let (captured, evidence_bytes) = capture(&options)?;
+    metrics::add(metrics::Counter::Files, captured.input.files.len());
+    let (evidence, evidence_sha256) = load_evidence(evidence_bytes.as_deref(), &captured)?;
     let mut report = scan(&captured)?;
+    report.provider_evidence_sha256 = evidence_sha256;
+    evidence::apply(
+        evidence.as_ref(),
+        &captured.input,
+        &captured.registry,
+        &mut report,
+    );
+    report.attach_sources(&captured.input.files);
     report.finish();
-    print_report(&report, options.format.as_deref())?;
+    let json_bytes = print_report(&report, options.format.as_deref())?;
+    metrics::write(json_bytes)?;
     Ok(report.exit())
 }
 
-fn print_report(report: &report::Report, format: Option<&str>) -> Result<(), String> {
+struct CountingWriter<W> {
+    inner: W,
+    bytes: usize,
+}
+
+impl<W: Write> Write for CountingWriter<W> {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        let written = self.inner.write(buffer)?;
+        self.bytes += written;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+fn print_report(report: &report::Report, format: Option<&str>) -> Result<usize, String> {
     if format == Some("json") {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(report).map_err(|error| error.to_string())?
-        );
+        let stdout = io::stdout();
+        let mut output = CountingWriter {
+            inner: stdout.lock(),
+            bytes: 0,
+        };
+        serde_json::to_writer_pretty(&mut output, report).map_err(|error| error.to_string())?;
+        writeln!(output).map_err(|error| error.to_string())?;
+        Ok(output.bytes)
     } else {
         report.print_table();
+        Ok(0)
     }
-    Ok(())
 }
 
 fn run() -> Result<u8, String> {

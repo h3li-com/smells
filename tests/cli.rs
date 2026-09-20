@@ -173,7 +173,7 @@ fn registry_covers_all_23_smells_and_exposes_readiness() {
             .iter()
             .filter(|r| r["implementation"] == "implemented")
             .count(),
-        17
+        28
     );
     assert_eq!(
         catalog["smells"]
@@ -184,6 +184,10 @@ fn registry_covers_all_23_smells_and_exposes_readiness() {
             .count(),
         2
     );
+    assert!(catalog["smells"].as_array().unwrap().iter().all(|smell| {
+        smell["applicability"] == "not_applicable_native_rust"
+            || !smell["rules"].as_array().unwrap().is_empty()
+    }));
 }
 
 #[test]
@@ -271,7 +275,7 @@ fn path_attributes_follow_containing_file_and_inline_module_directories() {
 }
 
 #[test]
-fn catalog_fixture_exercises_every_implemented_rule() {
+fn catalog_fixture_exercises_every_authored_source_rule() {
     let workspace = Workspace::new(include_str!("fixtures/catalog/lib.rs"));
     let output = workspace.check();
     assert_eq!(output.status.code(), Some(0));
@@ -376,7 +380,7 @@ fn report_aggregates_rule_evidence_by_canonical_smell_pattern() {
     let output = workspace.check();
     assert_eq!(output.status.code(), Some(1));
     let data = report(&output);
-    assert_eq!(data["report_schema_version"], 3);
+    assert_eq!(data["report_schema_version"], 4);
     let results = data["smell_results"].as_array().unwrap();
     assert_eq!(results.len(), 23);
     assert_eq!(results[0]["smell_id"], "long-method");
@@ -386,10 +390,7 @@ fn report_aggregates_rule_evidence_by_canonical_smell_pattern() {
     assert_eq!(large_class["smell"], "Large Class");
     assert_eq!(large_class["category"], "bloaters");
     assert_eq!(large_class["state"], "blocking_match");
-    assert_eq!(
-        large_class["coverage_status"],
-        "measured_defined_source_scope"
-    );
+    assert_eq!(large_class["coverage_status"], "measured_defined_scope");
     assert_eq!(large_class["matched_findings"], 3);
     assert_eq!(large_class["blocking_findings"], 2);
     assert_eq!(large_class["review_signals"], 1);
@@ -447,7 +448,7 @@ fn cargo_manifest_marks_the_repository_rust_implementation() {
 }
 
 #[test]
-fn smell_results_distinguish_checked_pending_and_inapplicable_patterns() {
+fn smell_results_distinguish_checked_disabled_and_inapplicable_patterns() {
     let workspace = Workspace::new("fn concise() {}");
     let output = workspace.check();
     assert_eq!(output.status.code(), Some(0));
@@ -455,27 +456,22 @@ fn smell_results_distinguish_checked_pending_and_inapplicable_patterns() {
 
     let parameters = smell_result(&data, "long-parameter-list");
     assert_eq!(parameters["state"], "checked_no_match_in_measured_scope");
-    assert_eq!(
-        parameters["coverage_status"],
-        "measured_defined_source_scope"
-    );
+    assert_eq!(parameters["coverage_status"], "measured_defined_scope");
     assert_eq!(parameters["matched_findings"], 0);
 
     let long_method = smell_result(&data, "long-method");
     assert_eq!(long_method["state"], "checked_no_match_in_measured_scope");
+    assert_eq!(long_method["coverage_status"], "measured_defined_scope");
+    assert_eq!(long_method["pending_rule_ids"], json!([]));
     assert_eq!(
-        long_method["coverage_status"],
-        "measured_with_pending_rules"
-    );
-    assert_eq!(
-        long_method["pending_rule_ids"],
+        long_method["disabled_rule_ids"],
         json!(["rust.function_crap"])
     );
 
     let dead_code = smell_result(&data, "dead-code");
-    assert_eq!(dead_code["state"], "pending");
-    assert_eq!(dead_code["coverage_status"], "pending");
-    assert_eq!(dead_code["pending_rule_ids"], json!(["rust.unused_code"]));
+    assert_eq!(dead_code["state"], "disabled");
+    assert_eq!(dead_code["coverage_status"], "disabled");
+    assert_eq!(dead_code["disabled_rule_ids"], json!(["rust.unused_code"]));
 
     let refused_bequest = smell_result(&data, "refused-bequest");
     assert_eq!(refused_bequest["state"], "not_applicable");
@@ -804,17 +800,23 @@ fn unstaged_policy_and_escaping_staged_paths_error() {
 }
 
 #[test]
-fn required_missing_detectors_error_instead_of_passing() {
+fn required_provider_detectors_error_without_complete_evidence() {
     let catalog: Value = serde_json::from_str(include_str!("../rules/rust-v1.json")).unwrap();
-    let pending: Vec<_> = catalog["rules"]
+    let provider_rules: Vec<_> = catalog["rules"]
         .as_array()
         .unwrap()
         .iter()
-        .filter(|rule| rule["implementation"] == "not_implemented")
+        .filter(|rule| {
+            !rule["inputs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|input| input == "authored_source")
+        })
         .map(|rule| rule["id"].as_str().unwrap())
         .collect();
-    assert_eq!(pending.len(), 11);
-    for rule in pending {
+    assert_eq!(provider_rules.len(), 11);
+    for rule in provider_rules {
         let workspace = Workspace::new("fn f(){}");
         workspace.modify(&format!("/rules/{rule}/mode"), json!("required"));
         let output = workspace.check();
@@ -1048,6 +1050,60 @@ fn duplicate_similarity_compares_the_fraction_without_rounding() {
 }
 
 #[test]
+fn rust_duplicate_budget_counts_only_exactly_pruned_candidates() {
+    let mut source = String::new();
+    for index in 0..450 {
+        source.push_str(&format!("fn tiny_{index}()->i32{{{index}}}"));
+    }
+    let body = "let first=value+1;let second=first*2;let third=second-3;let fourth=third/4;fourth";
+    source.push_str(&format!(
+        "fn duplicate_a(value:i32)->i32{{{body}}}fn duplicate_b(item:i32)->i32{{{body}}}"
+    ));
+    let workspace = Workspace::new(&source);
+    workspace.modify("/limits/maximum_pairs", json!(1));
+    workspace.modify(
+        "/rules/rust.duplicate_functions/parameters/minimum_similarity_basis_points",
+        json!(10_000),
+    );
+    let output = workspace.check();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let data = report(&output);
+    assert!(data["errors"].as_array().unwrap().is_empty());
+    let duplicate = finding(&data, "rust.duplicate_functions", "::duplicate_a");
+    assert_eq!(
+        duplicate["related_symbols"],
+        json!(["src/lib.rs::duplicate_b"])
+    );
+}
+
+#[test]
+fn rust_duplicate_budget_still_fails_closed_for_too_many_exact_candidates() {
+    let body = "let first=value+1;let second=first*2;let third=second-3;let fourth=third/4;fourth";
+    let workspace = Workspace::new(&format!(
+        "fn first(value:i32)->i32{{{body}}}fn second(value:i32)->i32{{{body}}}fn third(value:i32)->i32{{{body}}}"
+    ));
+    workspace.modify("/limits/maximum_pairs", json!(1));
+    workspace.modify(
+        "/rules/rust.duplicate_functions/parameters/minimum_similarity_basis_points",
+        json!(10_000),
+    );
+    let output = workspace.check();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        report(&output)["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error == "maximum_pairs budget exceeded")
+    );
+}
+
+#[test]
 fn overlapping_nested_bodies_are_not_reported_as_duplicate_occurrences() {
     let repeated = "x+=1;".repeat(40);
     let workspace = Workspace::new(&format!(
@@ -1255,4 +1311,48 @@ fn modern_raw_c_strings_do_not_turn_literal_contents_into_comments() {
         finding(&data, "rust.comment_share", "::f")["evaluation"]["observed"],
         json!({"code_lines":3,"comment_lines":0})
     );
+}
+
+#[test]
+fn opt_in_scan_metrics_explain_the_exact_join_without_changing_the_report() {
+    let workspace = Workspace::new(
+        "fn first(value:i32)->i32{let next=value+1;next*2}\nfn second(item:i32)->i32{let next=item+1;next*2}",
+    );
+    workspace.modify(
+        "/rules/rust.duplicate_functions/parameters/minimum_tokens",
+        json!(4),
+    );
+    let metrics_path = workspace.path.join("scan-metrics.json");
+    let output = Command::new(env!("CARGO_BIN_EXE_smells"))
+        .args([
+            "check",
+            "--path",
+            ".",
+            "--policy",
+            "quality-policy.json",
+            "--format",
+            "json",
+        ])
+        .env("SMELLS_METRICS_FILE", &metrics_path)
+        .current_dir(&workspace.path)
+        .output()
+        .unwrap();
+    assert!(
+        matches!(output.status.code(), Some(0 | 1)),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _: Value = serde_json::from_slice(&output.stdout).expect("unchanged report JSON");
+    let metrics: Value =
+        serde_json::from_slice(&fs::read(metrics_path).expect("metrics file")).unwrap();
+    assert_eq!(metrics["schema_version"], 2);
+    assert_eq!(metrics["files"], 1);
+    assert_eq!(metrics["functions"], 2);
+    assert_eq!(metrics["json_bytes"], output.stdout.len());
+    assert_eq!(metrics["syntax_nodes"], 0);
+    assert!(metrics["syntax_tokens"].as_u64().unwrap() > 0);
+    assert!(metrics["normalized_tokens"].as_u64().unwrap() > 0);
+    assert!(metrics["eligible_fingerprints"].as_u64().unwrap() > 0);
+    assert!(metrics["exact_comparisons_charged"].as_u64().unwrap() > 0);
+    assert!(metrics["peak_resident_bytes"].as_u64().unwrap() > 0);
 }

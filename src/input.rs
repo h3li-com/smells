@@ -452,13 +452,36 @@ fn staged_input(
     })
 }
 
-pub fn staged(policy_path: &Path) -> Result<CapturedInput, String> {
+fn staged_evidence(
+    root: &Path,
+    entries: &IndexEntries,
+    evidence_path: Option<&Path>,
+) -> Result<Option<Vec<u8>>, String> {
+    let Some(path) = evidence_path else {
+        return Ok(None);
+    };
+    let name = validate_staged_policy_path(path)?;
+    let (mode, oid) = entries.get(name).ok_or("provider evidence is not staged")?;
+    if !matches!(mode.as_str(), "100644" | "100755") {
+        return Err("staged provider evidence is not a regular file".into());
+    }
+    Ok(Some(git(root, &["cat-file", "blob", oid])?))
+}
+
+pub fn staged(
+    policy_path: &Path,
+    evidence_path: Option<&Path>,
+) -> Result<(CapturedInput, Option<Vec<u8>>), String> {
     let policy_name = validate_staged_policy_path(policy_path)?;
     let root = repository_root()?;
     let initial = git(&root, &["ls-files", "--stage", "-z"])?;
     let entries = parse_index(&initial)?;
     let (policy_text, registry, policy) = staged_policy(&root, &entries, policy_name)?;
     let (files, manifests) = staged_corpus(&root, &entries, &registry, &policy)?;
+    let evidence = staged_evidence(&root, &entries, evidence_path)?;
     validate_stable_index(&root, &initial)?;
-    staged_input(files, manifests, &policy_text, policy, registry)
+    Ok((
+        staged_input(files, manifests, &policy_text, policy, registry)?,
+        evidence,
+    ))
 }
