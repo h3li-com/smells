@@ -86,7 +86,7 @@ There is deliberately no source distribution, so an unsupported platform fails
 instead of compiling Rust unexpectedly. See the [release process](docs/release-process.md)
 for the artifact contract and supported targets.
 
-Contributors can still build from source with Rust 1.85:
+Contributors can still build from source with Rust 1.88:
 
 ```sh
 git clone https://github.com/mindful-time/smells.git

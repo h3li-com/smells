@@ -131,10 +131,10 @@ fn expression(body: &Block) -> Option<&Expr> {
 }
 
 fn identifier(expr: &Expr) -> Option<String> {
-    if let Expr::Path(path) = expr {
-        if path.qself.is_none() {
-            return path.path.get_ident().map(ToString::to_string);
-        }
+    if let Expr::Path(path) = expr
+        && path.qself.is_none()
+    {
+        return path.path.get_ident().map(ToString::to_string);
     }
     None
 }
@@ -165,10 +165,10 @@ fn arguments(function: &Function) -> Option<Vec<String>> {
             }
         })
         .map(|arg| {
-            if let Pat::Ident(name) = arg.pat.as_ref() {
-                if name.subpat.is_none() {
-                    return Some(name.ident.to_string());
-                }
+            if let Pat::Ident(name) = arg.pat.as_ref()
+                && name.subpat.is_none()
+            {
+                return Some(name.ident.to_string());
             }
             None
         })
