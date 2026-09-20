@@ -14,7 +14,7 @@ Use one release build matrix to produce two views of the same Rust CLI:
    every archive.
 2. **Optional Python channel:** platform-specific `py3-none-*` wheels containing the
    compiled executable, published with PyPI Trusted Publishing. This enables
-   `uv tool install smells==0.2.0`; it does not turn Smells into a Python program.
+   `uv tool install smells==0.2.1`; it does not turn Smells into a Python program.
 
 The standalone archives should come first. They work for Rust, Python, and TypeScript
 repositories without requiring Python. Add wheels when `uv tool install` is a useful
@@ -196,7 +196,7 @@ Recommended Smells flow:
 2. Require the ordinary CI checks on that PR: formatting, linting, locked build,
    tests, OSV/dependency audit, Smells self-scan, CRAP gate, and packaging dry-run.
 3. After the version PR reaches protected `main`, manually dispatch the release for
-   tag `v0.2.0` or `0.2.0`; choose one convention and enforce it.
+   tag `v0.2.1` or `0.2.1`; choose one convention and enforce it.
 4. Have the workflow reject a tag whose version does not equal the package metadata or
    whose commit is not the current protected release commit.
 5. Build, smoke-test, checksum, generate the SBOM, and attest all artifacts before the
@@ -212,7 +212,7 @@ those controls throughout its release workflows
 
 ## Minimal Smells artifact contract
 
-For `v0.2.0`, the first release can be:
+For `v0.2.1`, the first MIT-licensed release can be:
 
 ```text
 smells-aarch64-apple-darwin.tar.gz
@@ -232,5 +232,5 @@ smells.cyclonedx.json
 Every archive should contain `smells`/`smells.exe`, `LICENSE`, and a short install
 README. Every platform job should extract its archive and execute at least
 `smells --version` and `smells --help`. If wheels are enabled, add the corresponding
-five `smells-0.2.0-py3-none-<platform>.whl` files and smoke-test them with a local,
+five `smells-0.2.1-py3-none-<platform>.whl` files and smoke-test them with a local,
 index-disabled install before publishing.

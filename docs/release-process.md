@@ -27,6 +27,10 @@ commit. Architecture-matched GitHub-hosted runners install every wheel without
 using an index and execute `smells --version` and `smells --help`; ARM64 is tested
 on Linux ARM64 and Apple Silicon rather than merely cross-compiled.
 
+Pull-request CI performs the same license-metadata, license-content, wheel, and
+archive checks on the representative Linux AMD64 target. The owner-approved release
+matrix is the authoritative cross-platform check and repeats them on all five targets.
+
 ## Prepare a version
 
 Version changes are normal pull requests. A version PR must update:
@@ -44,7 +48,7 @@ drift independently. The PR must pass the required `CI / required` check.
 After the version PR is merged into `main`:
 
 1. The repository owner, `mindful-time`, opens **Actions → Release → Run workflow**.
-2. Select `main` and enter the exact stable tag, such as `v0.2.0`.
+2. Select `main` and enter the exact stable tag, such as `v0.2.1`.
 3. The workflow rejects every other dispatch or rerun actor, input other than
    `vMAJOR.MINOR.PATCH`, a tag that already exists, a non-`main` dispatch, or a
    version that differs from `Cargo.toml`. The actor check runs during validation
@@ -76,8 +80,8 @@ Download the archive, its matching `.sha256`, and verify it before extraction:
 
 ```sh
 sha256sum --check smells-x86_64-unknown-linux-gnu.tar.gz.sha256
-gh release verify v0.2.0 --repo mindful-time/smells
-gh release verify-asset v0.2.0 \
+gh release verify v0.2.1 --repo mindful-time/smells
+gh release verify-asset v0.2.1 \
   smells-x86_64-unknown-linux-gnu.tar.gz \
   --repo mindful-time/smells
 ```

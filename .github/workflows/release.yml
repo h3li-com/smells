@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag matching Cargo.toml, for example v0.2.0
+        description: Release tag matching Cargo.toml, for example v0.2.1
         required: true
         type: string
 
@@ -100,6 +100,8 @@ jobs:
             --no-index --find-links dist "smells==$RELEASE_VERSION"
           target/wheel-smoke/bin/smells --version
           target/wheel-smoke/bin/smells --help
+          target/wheel-smoke/bin/python -c \
+            'from importlib.metadata import distribution; from pathlib import Path; package = distribution("smells"); license_path = next(path for path in package.files or () if path.name == "LICENSE" and path.parent.name == "licenses"); assert package.metadata["License-Expression"] == "MIT"; assert package.locate_file(license_path).read_bytes() == Path("LICENSE").read_bytes()'
 
       - name: Create standalone archive
         run: |
@@ -113,6 +115,7 @@ jobs:
           mkdir -p target/archive-smoke
           tar -xzf "release/smells-${{ matrix.target }}.tar.gz" \
             -C target/archive-smoke
+          cmp LICENSE "target/archive-smoke/smells-${{ matrix.target }}/LICENSE"
           "target/archive-smoke/smells-${{ matrix.target }}/smells" --version
           "target/archive-smoke/smells-${{ matrix.target }}/smells" --help
 
@@ -168,6 +171,8 @@ jobs:
             --no-index --find-links dist "smells==$RELEASE_VERSION"
           target/wheel-smoke/bin/smells --version
           target/wheel-smoke/bin/smells --help
+          target/wheel-smoke/bin/python -c \
+            'from importlib.metadata import distribution; from pathlib import Path; package = distribution("smells"); license_path = next(path for path in package.files or () if path.name == "LICENSE" and path.parent.name == "licenses"); assert package.metadata["License-Expression"] == "MIT"; assert package.locate_file(license_path).read_bytes() == Path("LICENSE").read_bytes()'
 
       - name: Create standalone archive
         run: |
@@ -181,6 +186,7 @@ jobs:
           mkdir -p target/archive-smoke
           tar -xzf "release/smells-${{ matrix.target }}.tar.gz" \
             -C target/archive-smoke
+          cmp LICENSE "target/archive-smoke/smells-${{ matrix.target }}/LICENSE"
           "target/archive-smoke/smells-${{ matrix.target }}/smells" --version
           "target/archive-smoke/smells-${{ matrix.target }}/smells" --help
 
@@ -227,6 +233,8 @@ jobs:
             --no-index --find-links dist "smells==$env:RELEASE_VERSION"
           target/wheel-smoke/Scripts/smells.exe --version
           target/wheel-smoke/Scripts/smells.exe --help
+          target/wheel-smoke/Scripts/python.exe -c `
+            'from importlib.metadata import distribution; from pathlib import Path; package = distribution("smells"); license_path = next(path for path in package.files or () if path.name == "LICENSE" and path.parent.name == "licenses"); assert package.metadata["License-Expression"] == "MIT"; assert package.locate_file(license_path).read_bytes() == Path("LICENSE").read_bytes()'
 
       - name: Create standalone archive
         shell: bash
@@ -243,6 +251,7 @@ jobs:
           7z x -bd \
             -otarget/archive-smoke \
             release/smells-x86_64-pc-windows-msvc.zip >/dev/null
+          cmp LICENSE target/archive-smoke/smells-x86_64-pc-windows-msvc/LICENSE
           target/archive-smoke/smells-x86_64-pc-windows-msvc/smells.exe --version
           target/archive-smoke/smells-x86_64-pc-windows-msvc/smells.exe --help
 

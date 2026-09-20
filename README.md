@@ -60,12 +60,12 @@ Download the archive for your host from the matching
 checksum and GitHub provenance before installing it. For macOS Apple Silicon:
 
 ```sh
-gh release download v0.2.0 \
+gh release download v0.2.1 \
   --repo mindful-time/smells \
   --pattern 'smells-aarch64-apple-darwin.tar.gz*'
 shasum -a 256 -c smells-aarch64-apple-darwin.tar.gz.sha256
-gh release verify v0.2.0 --repo mindful-time/smells
-gh release verify-asset v0.2.0 \
+gh release verify v0.2.1 --repo mindful-time/smells
+gh release verify-asset v0.2.1 \
   smells-aarch64-apple-darwin.tar.gz \
   --repo mindful-time/smells
 tar -xzf smells-aarch64-apple-darwin.tar.gz
@@ -78,7 +78,7 @@ archives. It also contains platform-specific Python wheels carrying the identica
 Rust executable. After downloading the wheel for your platform:
 
 ```sh
-uv tool install ./smells-0.2.0-py3-none-PLATFORM.whl
+uv tool install ./smells-0.2.1-py3-none-PLATFORM.whl
 ```
 
 The wheel is a delivery mechanism; the scanner does not become a Python program.
@@ -535,9 +535,9 @@ Ordinary tests remain offline and deterministic.
 
 ## Project status
 
-`smells` is currently version `0.2.0`. GitHub Release archives are the canonical
+`smells` is currently version `0.2.1`. GitHub Release archives are the canonical
 distribution; binary Python wheels are attached to the same release. The crate is
-not published to crates.io, no sdist is produced, and no open-source license file is
-currently included, so do not assume permission to copy, modify, or redistribute it.
+not published to crates.io and no sdist is produced. Smells is open-source software
+licensed under the [MIT License](LICENSE).
 Repository:
 [mindful-time/smells](https://github.com/mindful-time/smells).

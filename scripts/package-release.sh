@@ -35,7 +35,8 @@ trap 'rm -rf -- "$temporary"' EXIT HUP INT TERM
 staging="$temporary/$archive_name"
 mkdir -p "$staging/examples" "$staging/schemas"
 cp "$binary" "$staging/"
-cp "$repository_root/CHANGELOG.md" "$repository_root/README.md" "$staging/"
+cp "$repository_root/CHANGELOG.md" "$repository_root/LICENSE" \
+    "$repository_root/README.md" "$staging/"
 cp "$repository_root"/examples/*.json "$staging/examples/"
 cp "$repository_root"/schemas/*.json "$staging/schemas/"
 

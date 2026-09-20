@@ -2,6 +2,11 @@
 
 All notable changes to Smells are recorded here. Release tags use `vMAJOR.MINOR.PATCH`.
 
+## 0.2.1 - 2026-09-20
+
+- License the project under the OSI-approved MIT License.
+- Embed `LICENSE` in standalone archives and binary Python wheels.
+
 ## 0.2.0 - 2026-09-20
 
 - Activate all 28 policy rules by default for Rust, Python, and TypeScript.
