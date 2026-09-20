@@ -1,7 +1,7 @@
 SHELL := /bin/sh
 
 .PHONY: build check-tools crap-gate fmt gitleaks install-hooks osv-scan \
-	pre-commit pre-commit-push pre-push self-smell-check test
+	pre-commit pre-commit-push pre-push release-check self-smell-check test
 
 # Both Git hooks deliberately run the same fail-closed gate. This makes a manual
 # invocation identical to the checks performed immediately before commit/push.
@@ -9,7 +9,7 @@ pre-commit: pre-commit-push
 
 pre-push: pre-commit-push
 
-pre-commit-push: check-tools fmt build test self-smell-check crap-gate gitleaks osv-scan
+pre-commit-push: check-tools fmt build test release-check self-smell-check crap-gate gitleaks osv-scan
 
 check-tools:
 	@./scripts/check-quality-tools.sh
@@ -23,6 +23,13 @@ build:
 
 test:
 	cargo test --locked
+
+release-check:
+	@sh -n scripts/quality-tool-versions.sh scripts/install-ci-quality-tools.sh \
+		scripts/verify-release-tag.sh scripts/package-release.sh \
+		scripts/configure-main-protection.sh
+	@version=$$(sed -n '/^\[package\]/,/^\[/ s/^version = "\([^"]*\)"/\1/p' Cargo.toml); \
+		./scripts/verify-release-tag.sh "v$$version" >/dev/null
 
 self-smell-check: build
 	@./scripts/self-smell-check.sh

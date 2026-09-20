@@ -16,10 +16,11 @@ use std::{
     process::ExitCode,
 };
 
-const USAGE: &str = "smells check (--path DIR | --staged) --policy FILE [--evidence FILE] [--format table|json] [policy group selectors]\nsmells policy show --policy FILE [--format table|json] [policy group selectors]\nsmells contracts validate --policy FILE\nsmells rules [--rule-pack rust-v1|python-v1|typescript-v1]\n\npolicy group selectors: --group NAME | --only-group NAME | --all-groups | --no-default-groups | --no-group NAME";
+const USAGE: &str = "smells --version\nsmells check (--path DIR | --staged) --policy FILE [--evidence FILE] [--format table|json] [policy group selectors]\nsmells policy show --policy FILE [--format table|json] [policy group selectors]\nsmells contracts validate --policy FILE\nsmells rules [--rule-pack rust-v1|python-v1|typescript-v1]\n\npolicy group selectors: --group NAME | --only-group NAME | --all-groups | --no-default-groups | --no-group NAME";
 
 enum Command {
     Help,
+    Version,
     Rules(String),
     Validate(PathBuf),
     Show(ShowOptions),
@@ -264,6 +265,9 @@ fn command(args: &[String]) -> Result<Command, String> {
     if args.is_empty() || args == ["--help"] {
         return Ok(Command::Help);
     }
+    if args == ["--version"] {
+        return Ok(Command::Version);
+    }
     if args[0] == "rules" {
         return rules_command(args);
     }
@@ -467,6 +471,10 @@ fn run() -> Result<u8, String> {
     match command(&args)? {
         Command::Help => {
             println!("{USAGE}");
+            Ok(0)
+        }
+        Command::Version => {
+            println!("smells {}", env!("CARGO_PKG_VERSION"));
             Ok(0)
         }
         Command::Rules(rule_pack) => {

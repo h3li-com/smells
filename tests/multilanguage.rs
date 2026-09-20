@@ -291,7 +291,7 @@ fn portable_policy(language: &str) -> Value {
     json!({
         "schema_version": 2,
         "rule_pack": format!("{language}-v1"),
-        "scanner_version": "0.1.0",
+        "scanner_version": "0.2.0",
         "scope": "authored_source",
         "exclude_directories": [".git", "target", "node_modules", ".venv", "__pycache__"],
         "limits": {
@@ -1774,7 +1774,7 @@ fn complete_provider_evidence_is_pinned_and_evaluated_by_the_scanner() {
         .to_string();
     let evidence = json!({
         "schema_version": 1,
-        "scanner_version": "0.1.0",
+        "scanner_version": "0.2.0",
         "rule_pack": "python-v1",
         "input_sha256": input_sha256,
         "providers": [{
@@ -1847,7 +1847,7 @@ fn staged_provider_evidence_cannot_be_replaced_by_unstaged_bytes() {
         .to_string();
     let evidence = json!({
         "schema_version": 1,
-        "scanner_version": "0.1.0",
+        "scanner_version": "0.2.0",
         "rule_pack": "typescript-v1",
         "input_sha256": input_sha256,
         "providers": [{

@@ -20,7 +20,8 @@ coding environments.
 [Monorepos](#monorepo-behavior) ·
 [Choose rules](#choose-which-policy-groups-run) ·
 [Full-pattern evidence](#source-rules-and-full-pattern-evidence) ·
-[Rule reference](#policies-and-rule-reference)
+[Rule reference](#policies-and-rule-reference) ·
+[Releases](#install-a-release)
 
 ## At a glance
 
@@ -29,6 +30,7 @@ coding environments.
 - Separates blocking rules from review-only signals.
 - Understands monorepos and groups results by the nearest runtime manifest.
 - Emits human-readable tables or complete JSON for hooks and coding agents.
+- Ships versioned standalone binaries and binary Python wheels from one release build.
 - Fails closed when parsing, required evidence, or analysis budgets are incomplete.
 - Covers all 23 Refactoring.Guru smell categories through 28 rules per language pack.
 
@@ -51,18 +53,46 @@ its TypeScript/TSX source, but not its native Android code.
 
 ## Quick start
 
-### 1. Build and install
+### 1. Install a release
 
-You need Rust 1.85 or newer.
+Download the archive for your host from the matching
+[GitHub Release](https://github.com/mindful-time/smells/releases). Verify both its
+checksum and GitHub provenance before installing it. For macOS Apple Silicon:
+
+```sh
+gh release download v0.2.0 \
+  --repo mindful-time/smells \
+  --pattern 'smells-aarch64-apple-darwin.tar.gz*'
+shasum -a 256 -c smells-aarch64-apple-darwin.tar.gz.sha256
+gh release verify v0.2.0 --repo mindful-time/smells
+gh release verify-asset v0.2.0 \
+  smells-aarch64-apple-darwin.tar.gz \
+  --repo mindful-time/smells
+tar -xzf smells-aarch64-apple-darwin.tar.gz
+install -m 0755 smells-aarch64-apple-darwin/smells ~/.local/bin/smells
+smells --version
+```
+
+The same release contains macOS Intel, Linux AMD64/ARM64 GNU, and Windows AMD64
+archives. It also contains platform-specific Python wheels carrying the identical
+Rust executable. After downloading the wheel for your platform:
+
+```sh
+uv tool install ./smells-0.2.0-py3-none-PLATFORM.whl
+```
+
+The wheel is a delivery mechanism; the scanner does not become a Python program.
+There is deliberately no source distribution, so an unsupported platform fails
+instead of compiling Rust unexpectedly. See the [release process](docs/release-process.md)
+for the artifact contract and supported targets.
+
+Contributors can still build from source with Rust 1.85:
 
 ```sh
 git clone https://github.com/mindful-time/smells.git
 cd smells
 cargo install --path . --locked
 ```
-
-This installs the `smells` executable in Cargo's binary directory, normally
-`~/.cargo/bin`.
 
 ### 2. Choose a starter policy
 
@@ -452,6 +482,12 @@ The shared gate runs formatting, build, Clippy, tests, the scanner against
 itself, CRAP analysis, Gitleaks, and OSV. CRAP has a target of `5` and a hard
 blocking limit of `10`; scores above the target remain visible to coding agents.
 
+Pull requests run that same gate in GitHub Actions and additionally build, install,
+and execute a binary wheel and standalone archive. Pull requests must originate
+from a fork. Release publication is manually dispatched from `main`; read
+[repository governance](docs/repository-governance.md) and the
+[release process](docs/release-process.md) before changing either workflow.
+
 The optional live E2E test verifies the hook-to-finding-to-Refactoring.Guru
 research path and therefore requires network access:
 
@@ -463,7 +499,9 @@ Ordinary tests remain offline and deterministic.
 
 ## Project status
 
-`smells` is currently version `0.1.0` and is installed from source rather than
-published to crates.io. No open-source license file is currently included, so
-do not assume permission to copy, modify, or redistribute it. Repository:
+`smells` is currently version `0.2.0`. GitHub Release archives are the canonical
+distribution; binary Python wheels are attached to the same release. The crate is
+not published to crates.io, no sdist is produced, and no open-source license file is
+currently included, so do not assume permission to copy, modify, or redistribute it.
+Repository:
 [mindful-time/smells](https://github.com/mindful-time/smells).

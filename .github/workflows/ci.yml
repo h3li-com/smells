@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: quality
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Require pull requests to originate from a fork
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REPOSITORY: ${{ github.event.pull_request.base.repo.full_name }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+        run: |
+          test "$HEAD_REPOSITORY" != "$BASE_REPOSITORY"
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install the pinned toolchain and quality tools
+        run: |
+          rustup show active-toolchain
+          ./scripts/install-ci-quality-tools.sh
+
+      - name: Run the complete fail-closed gate
+        run: make pre-commit-push
+
+  package:
+    name: package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Build the Linux wheel and release binary
+        uses: PyO3/maturin-action@423a6347767a8b16e65c2a7a7042e4a921528da8 # v1
+        with:
+          command: build
+          target: x86_64-unknown-linux-gnu
+          manylinux: "2_17"
+          maturin-version: v1.14.1
+          args: --release --locked --out dist --compatibility pypi
+
+      - name: Verify the wheel installs without an index
+        run: |
+          python -m venv target/package-smoke
+          target/package-smoke/bin/python -m pip install \
+            --no-index --find-links dist smells
+          target/package-smoke/bin/smells --version
+          target/package-smoke/bin/smells --help
+
+      - name: Verify the standalone archive
+        run: |
+          ./scripts/package-release.sh \
+            x86_64-unknown-linux-gnu \
+            target/x86_64-unknown-linux-gnu/release/smells \
+            target/release-smoke
+          mkdir -p target/release-extracted
+          tar -xzf target/release-smoke/smells-x86_64-unknown-linux-gnu.tar.gz \
+            -C target/release-extracted
+          target/release-extracted/smells-x86_64-unknown-linux-gnu/smells --version
+          target/release-extracted/smells-x86_64-unknown-linux-gnu/smells --help
+
+  required:
+    name: required
+    if: always()
+    needs: [quality, package]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require every CI job
+        env:
+          QUALITY_RESULT: ${{ needs.quality.result }}
+          PACKAGE_RESULT: ${{ needs.package.result }}
+        run: |
+          test "$QUALITY_RESULT" = success
+          test "$PACKAGE_RESULT" = success

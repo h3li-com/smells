@@ -1,6 +1,10 @@
 #!/bin/sh
 set -eu
 
+script_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# shellcheck source=quality-tool-versions.sh
+. "$script_directory/quality-tool-versions.sh"
+
 require_command() {
     if ! command -v "$1" >/dev/null 2>&1; then
         printf 'quality gate: required command is unavailable: %s\n' "$1" >&2
@@ -41,7 +45,9 @@ require_command cargo
 require_command gitleaks
 require_command osv-scanner
 
-require_version 'cargo crap --version' 'cargo-crap 0.5.0' cargo crap --version
-require_version 'cargo llvm-cov --version' 'cargo-llvm-cov 0.8.7' cargo llvm-cov --version
-require_version 'gitleaks version' '8.30.1' gitleaks version
-require_version_first_line 'osv-scanner --version' 'osv-scanner version: 2.3.8' osv-scanner --version
+require_version 'cargo crap --version' "cargo-crap $CARGO_CRAP_VERSION" cargo crap --version
+require_version 'cargo llvm-cov --version' \
+    "cargo-llvm-cov $CARGO_LLVM_COV_VERSION" cargo llvm-cov --version
+require_version 'gitleaks version' "$GITLEAKS_VERSION" gitleaks version
+require_version_first_line 'osv-scanner --version' \
+    "osv-scanner version: $OSV_SCANNER_VERSION" osv-scanner --version

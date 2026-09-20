@@ -78,6 +78,20 @@ impl Workspace {
 }
 
 #[test]
+fn version_is_machine_checkable_for_release_smoke_tests() {
+    let output = Command::new(env!("CARGO_BIN_EXE_smells"))
+        .arg("--version")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        format!("smells {}\n", env!("CARGO_PKG_VERSION"))
+    );
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
 fn starter_policies_activate_every_rule_and_default_to_all_groups() {
     for policy in [
         "examples/quality-policy.json",

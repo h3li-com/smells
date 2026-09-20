@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "rule_pack": "rust-v1",
-  "scanner_version": "0.1.0",
+  "scanner_version": "0.2.0",
   "scope": "authored_all_cfg",
   "default_groups": ["all"],
   "exclude_directories": [
