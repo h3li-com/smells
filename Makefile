@@ -27,7 +27,9 @@ test:
 release-check:
 	@sh -n scripts/quality-tool-versions.sh scripts/install-ci-quality-tools.sh \
 		scripts/verify-release-tag.sh scripts/package-release.sh \
-		scripts/configure-main-protection.sh scripts/verify-release-actor.sh
+		scripts/configure-main-protection.sh scripts/verify-release-actor.sh \
+		scripts/collect-release-artifacts.sh tests/release-artifacts.sh
+	@sh tests/release-artifacts.sh
 	@version=$$(sed -n '/^\[package\]/,/^\[/ s/^version = "\([^"]*\)"/\1/p' Cargo.toml); \
 		./scripts/verify-release-tag.sh "v$$version" >/dev/null
 	@./scripts/verify-release-actor.sh mindful-time mindful-time mindful-time >/dev/null

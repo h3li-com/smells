@@ -51,6 +51,8 @@ After the version PR is merged into `main`:
    and again immediately before publication so a partial job rerun cannot bypass it.
 4. The complete local quality gate runs again before any platform build.
 5. All five archives and wheels are built and executed on matching architectures.
+   The publication job flattens the nested workflow artifacts into a clean staging
+   directory and rejects duplicate filenames before it reads or publishes them.
    The publication job produces individual archive checksums, `sha256.sum`, a
    Cargo-dependency `smells.cyclonedx.json`, and an artifact inventory in
    `smells-artifacts.spdx.json`.
