@@ -1,6 +1,7 @@
 # Package distribution
 
-Smells has one Rust implementation and four installation views of that same CLI.
+Smells has one Rust implementation, four package formats, and five publication
+endpoints for that same CLI.
 The package channel never changes which Rust, Python, or TypeScript rules execute.
 The registry channels below are release candidates until `v0.3.0` appears on the
 [GitHub Releases page](https://github.com/mindful-time/smells/releases).
@@ -10,6 +11,7 @@ The registry channels below are release candidates until `v0.3.0` appears on the
 | GitHub | release archives | download the matching archive | prebuilt native executable |
 | PyPI | `smells` | `uv tool install smells==0.3.0` | prebuilt native wheel; no sdist |
 | npm | `@mindful-time/smells` | `npm install --save-dev --save-exact @mindful-time/smells@0.3.0` | exact-version optional native package |
+| GitHub Packages | `@mindful-time/smells` | configure the `@mindful-time` scope for `npm.pkg.github.com`, then install the same exact version | authenticated npm mirror linked to this repository |
 | crates.io | `smells` | `cargo install --locked --version 0.3.0 smells` | builds from source with Rust 1.88 |
 
 The PyPI design follows uv's binary-wheel model: Python packaging transports the
@@ -74,6 +76,17 @@ Subsequent releases use npm's short-lived OIDC identity and automatic provenance
 The workflow requires npm 11.5.1 or newer, as documented by
 [npm Trusted Publishing](https://docs.npmjs.com/trusted-publishers/).
 
+### GitHub Packages
+
+The same six npm tarballs are mirrored to `npm.pkg.github.com` after the immutable
+GitHub Release succeeds. The workflow grants only `packages: write` and authenticates
+with its short-lived `GITHUB_TOKEN`; no additional repository secret is stored. The
+package manifests link every package to `mindful-time/smells`, so the mirror inherits
+the public repository's permissions and appears on the repository Packages page.
+GitHub's npm registry requires authenticated installs even for public packages; the
+ordinary unauthenticated installation path remains npmjs.com. See
+[GitHub's npm package documentation](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-npm-registry).
+
 ### crates.io
 
 Create a crates.io account and a least-privilege API token, then store only that token
@@ -96,8 +109,8 @@ publication job creates one immutable GitHub Release containing:
 - aggregate checksums and CycloneDX/SPDX SBOMs.
 
 Only after the signed GitHub Release succeeds do independent jobs publish to PyPI,
-npm, and crates.io. Each job rechecks the release actor and installs the exact version
-back from its public registry. The crates.io job also requires its newly built archive
-to be byte-identical to the attested `.crate` asset and uses that asset's digest for
-registry verification. Independent jobs make a single failed registry retryable
-without attempting to republish a registry that already succeeded.
+npmjs.com, GitHub Packages, and crates.io. Each job rechecks the release actor and
+installs the exact version back from its registry. The crates.io job also requires its
+newly built archive to be byte-identical to the attested `.crate` asset and uses that
+asset's digest for registry verification. Independent jobs make a single failed
+registry retryable without attempting to republish a registry that already succeeded.

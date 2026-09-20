@@ -6,9 +6,26 @@ import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const [directory, version] = process.argv.slice(2);
-if (!directory || !/^\d+\.\d+\.\d+$/.test(version ?? "")) {
-  console.error("usage: publish-packages.mjs DIRECTORY VERSION");
+const [directory, version, registry, publicationMode, ...extraArguments] =
+  process.argv.slice(2);
+const registries = new Set([
+  "https://registry.npmjs.org",
+  "https://npm.pkg.github.com",
+]);
+if (
+  !directory ||
+  !/^\d+\.\d+\.\d+$/.test(version ?? "") ||
+  !registries.has(registry) ||
+  ![undefined, "--provenance"].includes(publicationMode) ||
+  extraArguments.length > 0
+) {
+  console.error(
+    "usage: publish-packages.mjs DIRECTORY VERSION REGISTRY [--provenance]",
+  );
+  process.exit(2);
+}
+if (publicationMode === "--provenance" && registry !== "https://registry.npmjs.org") {
+  console.error("npm provenance is only enabled for registry.npmjs.org");
   process.exit(2);
 }
 
@@ -43,7 +60,14 @@ function localIntegrity(filename) {
 function registryIntegrity(name) {
   const result = spawnSync(
     "npm",
-    ["view", `${name}@${version}`, "dist.integrity", "--json"],
+    [
+      "view",
+      `${name}@${version}`,
+      "dist.integrity",
+      "--json",
+      "--registry",
+      registry,
+    ],
     { encoding: "utf8" },
   );
   if (result.status === 0) {
@@ -78,11 +102,19 @@ for (const [name, filename] of packages) {
     continue;
   }
 
-  const published = spawnSync(
-    "npm",
-    ["publish", path.join(directory, filename), "--access", "public", "--provenance"],
-    { stdio: "inherit" },
-  );
+  const publishArguments = [
+    "publish",
+    path.join(directory, filename),
+    "--registry",
+    registry,
+  ];
+  if (registry === "https://registry.npmjs.org") {
+    publishArguments.push("--access", "public");
+  }
+  if (publicationMode === "--provenance") {
+    publishArguments.push("--provenance");
+  }
+  const published = spawnSync("npm", publishArguments, { stdio: "inherit" });
   if (published.status !== 0) {
     const recovered = registryIntegrity(name);
     if (recovered === expected) {

@@ -6,7 +6,8 @@ All notable changes to Smells are recorded here. Release tags use `vMAJOR.MINOR.
 
 - Prepare the prebuilt scanner wheels as the `smells` PyPI tool package.
 - Add `@mindful-time/smells` plus five exact-version native npm packages without
-  install scripts or runtime downloads.
+  install scripts or runtime downloads, published identically to npmjs.com and
+  GitHub Packages.
 - Prepare the verified Rust source package as `smells` on crates.io.
 - Verify every registry by installing the released version after publication.
 

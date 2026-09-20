@@ -514,7 +514,11 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           RELEASE_VERSION: ${{ needs.validate.outputs.version }}
-        run: node npm/publish-packages.mjs npm-dist "$RELEASE_VERSION"
+        run: |
+          node npm/publish-packages.mjs \
+            npm-dist "$RELEASE_VERSION" \
+            https://registry.npmjs.org \
+            --provenance
 
       - name: Verify the package from npm
         env:
@@ -530,6 +534,74 @@ jobs:
                 --ignore-scripts --no-audit --no-fund \
                 --save-exact "@mindful-time/smells@$RELEASE_VERSION"; then
               target/npm-registry-smoke/node_modules/.bin/smells --version
+              exit 0
+            fi
+            sleep 3
+          done
+          exit 1
+
+  publish-github-packages:
+    name: publish npm mirror to GitHub Packages
+    needs: [validate, publish]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
+          persist-credentials: false
+
+      - name: Revalidate the release actor
+        run: |
+          ./scripts/verify-release-actor.sh \
+            "$GITHUB_REPOSITORY_OWNER" \
+            "$GITHUB_ACTOR" \
+            "$GITHUB_TRIGGERING_ACTOR"
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.15.0"
+          registry-url: https://npm.pkg.github.com
+          scope: "@mindful-time"
+          package-manager-cache: false
+
+      - name: Download the signed release npm packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          gh release verify "$RELEASE_TAG"
+          mkdir github-npm-dist
+          gh release download "$RELEASE_TAG" \
+            --pattern '*.tgz' \
+            --dir github-npm-dist
+
+      - name: Publish the GitHub Packages npm mirror
+        env:
+          NODE_AUTH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          node npm/publish-packages.mjs \
+            github-npm-dist "$RELEASE_VERSION" \
+            https://npm.pkg.github.com
+
+      - name: Verify installation from GitHub Packages
+        env:
+          NODE_AUTH_TOKEN: ${{ github.token }}
+          NPM_CONFIG_CACHE: ${{ runner.temp }}/npm-cache
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          mkdir -p target/github-packages-smoke
+          printf '%s\n' '{"name":"smells-github-packages-smoke","private":true}' \
+            > target/github-packages-smoke/package.json
+          for attempt in 1 2 3 4 5; do
+            if npm install \
+                --prefix target/github-packages-smoke \
+                --ignore-scripts --no-audit --no-fund \
+                --save-exact "@mindful-time/smells@$RELEASE_VERSION"; then
+              target/github-packages-smoke/node_modules/.bin/smells --version
               exit 0
             fi
             sleep 3
@@ -603,15 +675,17 @@ jobs:
   registries-required:
     name: registries required
     if: always()
-    needs: [publish-pypi, publish-npm, publish-crates]
+    needs: [publish-pypi, publish-npm, publish-github-packages, publish-crates]
     runs-on: ubuntu-24.04
     steps:
       - name: Require every registry publication
         env:
           CRATES_RESULT: ${{ needs.publish-crates.result }}
+          GITHUB_PACKAGES_RESULT: ${{ needs.publish-github-packages.result }}
           NPM_RESULT: ${{ needs.publish-npm.result }}
           PYPI_RESULT: ${{ needs.publish-pypi.result }}
         run: |
           test "$CRATES_RESULT" = success
+          test "$GITHUB_PACKAGES_RESULT" = success
           test "$NPM_RESULT" = success
           test "$PYPI_RESULT" = success

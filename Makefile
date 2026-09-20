@@ -31,10 +31,13 @@ release-check:
 		scripts/publish-crate.sh \
 		scripts/configure-main-protection.sh scripts/verify-release-actor.sh \
 		scripts/collect-release-artifacts.sh tests/release-artifacts.sh \
-		tests/npm-packages.sh tests/crate-package.sh
+		tests/npm-packages.sh tests/npm-publisher.sh tests/crate-package.sh \
+		tests/release-workflow.sh
 	@sh tests/release-artifacts.sh
 	@sh tests/npm-packages.sh
+	@sh tests/npm-publisher.sh
 	@sh tests/crate-package.sh
+	@sh tests/release-workflow.sh
 	@node --check npm/smells.js
 	@node --check npm/build-package.mjs
 	@node --check npm/publish-packages.mjs
