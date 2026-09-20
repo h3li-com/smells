@@ -377,12 +377,16 @@ fn validate_budgets_and_exceptions(policy: &Policy) -> Result<(), String> {
 }
 
 fn validate_exclusions(policy: &Policy) -> Result<(), String> {
-    let exclusions: BTreeSet<_> = policy.exclude_directories.iter().collect();
+    let exclusions: BTreeSet<_> = policy
+        .exclude_directories
+        .iter()
+        .map(String::as_str)
+        .collect();
     if exclusions.len() != policy.exclude_directories.len()
         || exclusions.iter().any(|s| {
-            s.is_empty() || s.contains('/') || s.contains('\\') || matches!(s.as_str(), "." | "..")
+            s.is_empty() || s.contains('/') || s.contains('\\') || matches!(*s, "." | "..")
         })
-        || !exclusions.contains(&".git".to_string())
+        || !exclusions.contains(".git")
     {
         return Err("exclude_directories must be unique directory names and include .git".into());
     }
