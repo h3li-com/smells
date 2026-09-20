@@ -593,7 +593,8 @@ Ordinary tests remain offline and deterministic.
 `smells` source is currently version `0.3.0`. Its owner-gated release workflow is
 configured to publish standalone GitHub archives, binary PyPI wheels, native npm
 packages to npmjs.com and GitHub Packages, and the crates.io source package. Those
-registry packages do not exist until the `v0.3.0` workflow succeeds. No Python sdist
-is produced. Smells is open-source software licensed under the [MIT License](LICENSE).
+registry packages are not complete until the `v0.3.0` workflow and its documented
+one-time interactive npm bootstrap succeed. No Python sdist is produced. Smells is
+open-source software licensed under the [MIT License](LICENSE).
 Repository:
 [mindful-time/smells](https://github.com/mindful-time/smells).

@@ -2,13 +2,15 @@
 
 All notable changes to Smells are recorded here. Release tags use `vMAJOR.MINOR.PATCH`.
 
-## 0.3.0 - Unreleased
+## 0.3.0 - 2026-09-20
 
 - Prepare the prebuilt scanner wheels as the `smells` PyPI tool package.
 - Add `@mindful-time/smells` plus five exact-version native npm packages without
   install scripts or runtime downloads, published identically to npmjs.com and
   GitHub Packages.
 - Prepare the verified Rust source package as `smells` on crates.io.
+- Bootstrap the first npm release interactively from the immutable GitHub Release;
+  subsequent npm releases use tokenless Trusted Publishing.
 - Verify every registry by installing the released version after publication.
 
 ## 0.2.1 - 2026-09-20

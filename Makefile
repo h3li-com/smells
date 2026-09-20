@@ -28,14 +28,16 @@ release-check:
 	@sh -n scripts/quality-tool-versions.sh scripts/install-ci-quality-tools.sh \
 		scripts/verify-release-tag.sh scripts/package-release.sh \
 		scripts/package-npm.sh scripts/smoke-test-npm.sh \
-		scripts/publish-crate.sh \
+		scripts/publish-crate.sh scripts/bootstrap-npm-release.sh \
 		scripts/configure-main-protection.sh scripts/verify-release-actor.sh \
 		scripts/collect-release-artifacts.sh tests/release-artifacts.sh \
-		tests/npm-packages.sh tests/npm-publisher.sh tests/crate-package.sh \
+		tests/npm-packages.sh tests/npm-publisher.sh tests/npm-bootstrap.sh \
+		tests/crate-package.sh \
 		tests/release-workflow.sh
 	@sh tests/release-artifacts.sh
 	@sh tests/npm-packages.sh
 	@sh tests/npm-publisher.sh
+	@sh tests/npm-bootstrap.sh
 	@sh tests/crate-package.sh
 	@sh tests/release-workflow.sh
 	@node --check npm/smells.js

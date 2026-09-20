@@ -62,17 +62,33 @@ short-lived token, so no PyPI secret belongs in GitHub. See
 ### npm
 
 The unscoped npm package `smells` belongs to another project, so Smells uses the
-`@mindful-time` scope. The first release requires that scope plus one temporary,
-granular `NPM_TOKEN` GitHub Actions secret authorized to create the six public
-packages above. After the first successful publication:
+`@mindful-time` scope. npm cannot attach a Trusted Publisher until a package already
+exists, so `v0.3.0` uses a one-time, interactive bootstrap with the owner's security
+key instead of a bypass-2FA automation token:
 
-1. Configure each package's GitHub Actions Trusted Publisher as owner
+1. Dispatch the owner-gated `v0.3.0` release. Its npmjs.com job is expected to fail
+   after the immutable GitHub Release exists because the six packages have no Trusted
+   Publisher yet.
+2. Run `./scripts/bootstrap-npm-release.sh v0.3.0`. The helper refuses token
+   environment variables and creates an isolated temporary npm configuration. It
+   starts `npm login --auth-type=web`, requires the authenticated identity to be
+   `mindfultime`, downloads every asset from the immutable release, verifies
+   `sha256.sum`, publishes the five native packages before the root launcher, and
+   verifies each registry SHA-512 digest. Its exit trap logs out and removes the
+   temporary configuration, including after an interrupted or failed publication.
+3. Configure each package's GitHub Actions Trusted Publisher as owner
    `mindful-time`, repository `smells`, workflow `release.yml`, with no environment,
    and allow `npm publish`.
-2. Require two-factor authentication and disallow traditional token publishing.
-3. Delete the `NPM_TOKEN` repository secret.
+4. Require two-factor authentication and disallow traditional token publishing for
+   every package.
+5. Rerun the failed release jobs. The deterministic publisher sees the exact
+   `v0.3.0` registry digests, skips republishing, and allows the final release gate to
+   pass.
 
-Subsequent releases use npm's short-lived OIDC identity and automatic provenance.
+No npm publishing secret belongs in GitHub. The manual `v0.3.0` bootstrap cannot
+produce npm's CI-bound provenance, but its tarballs must be byte-identical to the
+checksummed immutable GitHub Release. Subsequent releases use npm's short-lived OIDC
+identity and automatic registry provenance.
 The workflow requires npm 11.5.1 or newer, as documented by
 [npm Trusted Publishing](https://docs.npmjs.com/trusted-publishers/).
 

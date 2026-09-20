@@ -12,4 +12,10 @@ grep -F 'GITHUB_PACKAGES_RESULT: ${{ needs.publish-github-packages.result }}' \
     "$workflow" >/dev/null
 grep -F 'test "$GITHUB_PACKAGES_RESULT" = success' "$workflow" >/dev/null
 
+if grep -F 'secrets.NPM_TOKEN' "$workflow" >/dev/null; then
+    printf 'release workflow still accepts a long-lived npm publishing token\n' >&2
+    exit 1
+fi
+grep -F 'id-token: write' "$workflow" >/dev/null
+
 printf 'release workflow tests passed\n'

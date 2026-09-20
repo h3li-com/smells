@@ -76,6 +76,15 @@ After the version PR is merged into `main`:
    the exact published version before it passes. The final registry gate requires all
    four publication jobs.
 
+For the first npmjs.com release only, npm cannot configure OIDC until each package
+exists. The initial npm job therefore fails closed after the immutable GitHub Release
+is available. The owner runs `scripts/bootstrap-npm-release.sh v0.3.0`, completes the
+isolated web login and interactive security-key challenges, configures all six
+Trusted Publishers, and reruns the failed jobs. The helper requires the exact npm
+owner identity, verifies all release checksums and every npm registry digest, refuses
+token environment variables, and revokes its temporary CLI session on exit. See
+[package distribution](package-distribution.md) for the exact bootstrap sequence.
+
 The `release` GitHub environment is the publication boundary. Configure that
 environment to require the repository owner when the account plan supports required
 reviewers. Configure registry ownership before dispatching `v0.3.0`; the exact PyPI,
