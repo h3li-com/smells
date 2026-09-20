@@ -10,6 +10,8 @@ script_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repository_root=$(CDPATH= cd -- "$script_directory/.." && pwd)
 packager="$script_directory/package-npm.sh"
 
+mkdir -p "$work"
+work=$(CDPATH= cd -- "$work" && pwd)
 platform_output="$work/platform"
 root_output="$work/root"
 consumer="$work/consumer"

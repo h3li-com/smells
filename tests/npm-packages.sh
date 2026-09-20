@@ -8,7 +8,9 @@ smoke_test="$repository_root/scripts/smoke-test-npm.sh"
 version=0.3.0
 
 temporary=$(mktemp -d "${TMPDIR:-/tmp}/smells-npm-packages.XXXXXX")
-trap 'rm -rf -- "$temporary"' EXIT HUP INT TERM
+mkdir -p "$repository_root/target"
+absolute_work=$(mktemp -d "$repository_root/target/smells-npm-packages-relative.XXXXXX")
+trap 'rm -rf -- "$temporary" "$absolute_work"' EXIT HUP INT TERM
 NPM_CONFIG_CACHE="$temporary/npm-cache"
 NPM_CONFIG_LOGLEVEL=error
 export NPM_CONFIG_CACHE
@@ -44,10 +46,14 @@ printf '%s\n' \
     'exit 7' > "$fake_binary"
 chmod +x "$fake_binary"
 
-"$smoke_test" "$target" "$fake_binary" "$temporary/smoke" "$version"
+relative_work=${absolute_work#"$repository_root/"}
+(
+    cd "$repository_root"
+    "$smoke_test" "$target" "$fake_binary" "$relative_work" "$version"
+)
 
 forwarded="$temporary/forwarded.txt"
-if "$temporary/smoke/consumer/node_modules/.bin/smells" alpha 'two words' \
+if "$absolute_work/consumer/node_modules/.bin/smells" alpha 'two words' \
     > "$forwarded" 2>&1; then
     printf 'npm launcher did not forward the native exit status\n' >&2
     exit 1
