@@ -2,6 +2,8 @@
 
 Smells has one Rust implementation and four installation views of that same CLI.
 The package channel never changes which Rust, Python, or TypeScript rules execute.
+The registry channels below are release candidates until `v0.3.0` appears on the
+[GitHub Releases page](https://github.com/mindful-time/smells/releases).
 
 | Channel | Package | User command | Delivery behavior |
 | --- | --- | --- | --- |
@@ -95,5 +97,7 @@ publication job creates one immutable GitHub Release containing:
 
 Only after the signed GitHub Release succeeds do independent jobs publish to PyPI,
 npm, and crates.io. Each job rechecks the release actor and installs the exact version
-back from its public registry. Independent jobs make a single failed registry
-retryable without attempting to republish a registry that already succeeded.
+back from its public registry. The crates.io job also requires its newly built archive
+to be byte-identical to the attested `.crate` asset and uses that asset's digest for
+registry verification. Independent jobs make a single failed registry retryable
+without attempting to republish a registry that already succeeded.

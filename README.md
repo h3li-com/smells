@@ -30,7 +30,8 @@ coding environments.
 - Separates blocking rules from review-only signals.
 - Understands monorepos and groups results by the nearest runtime manifest.
 - Emits human-readable tables or complete JSON for hooks and coding agents.
-- Ships versioned GitHub binaries, PyPI wheels, native npm packages, and a crates.io package from one release build.
+- The `v0.3.0` release pipeline produces versioned GitHub binaries, PyPI wheels,
+  native npm packages, and a crates.io package from one release build.
 - Fails closed when parsing, required evidence, or analysis budgets are incomplete.
 - Covers all 23 Refactoring.Guru smell categories through 28 rules per language pack.
 
@@ -55,7 +56,12 @@ its TypeScript/TSX source, but not its native Android code.
 
 ### 1. Install Smells
 
-The fastest cross-language option is the prebuilt PyPI tool package:
+The registry packages below are introduced by `v0.3.0`. Until that tag appears on
+the [GitHub Releases page](https://github.com/mindful-time/smells/releases), they
+are release candidates and are not yet available from PyPI, npm, or crates.io.
+
+After `v0.3.0` is published, the fastest cross-language option is the prebuilt PyPI
+tool package:
 
 ```sh
 uv tool install smells==0.3.0
@@ -582,9 +588,10 @@ Ordinary tests remain offline and deterministic.
 
 ## Project status
 
-`smells` is currently version `0.3.0`. The same owner-gated release publishes
-standalone GitHub archives, binary PyPI wheels, native npm packages, and the crates.io
-source package. No Python sdist is produced. Smells is open-source software licensed
-under the [MIT License](LICENSE).
+`smells` source is currently version `0.3.0`. Its owner-gated release workflow is
+configured to publish standalone GitHub archives, binary PyPI wheels, native npm
+packages, and the crates.io source package. Those registry packages do not exist
+until the `v0.3.0` workflow succeeds. No Python sdist is produced. Smells is
+open-source software licensed under the [MIT License](LICENSE).
 Repository:
 [mindful-time/smells](https://github.com/mindful-time/smells).

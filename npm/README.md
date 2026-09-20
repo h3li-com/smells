@@ -6,7 +6,7 @@ the deterministic scanner itself remains the Rust binary from
 [`mindful-time/smells`](https://github.com/mindful-time/smells).
 
 ```sh
-npm install --save-dev --save-exact @mindful-time/smells
+npm install --save-dev --save-exact @mindful-time/smells@__SMELLS_VERSION__
 npx --no-install smells --version
 ```
 

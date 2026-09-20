@@ -67,9 +67,11 @@ After the version PR is merged into `main`:
    GitHub Release at the exact tested commit. GitHub then produces a cryptographically
    signed release attestation binding the tag, commit, and asset digests.
 7. Independent jobs publish the already-tested wheels to PyPI, the six npm packages
-   to npm, and the source package to crates.io. Each job revalidates the owner actor,
-   then installs the exact public version before it passes. The final registry gate
-   requires all three jobs.
+   to npm, and the source package to crates.io. Before `cargo publish`, the crates.io
+   job downloads the attested `.crate` from the GitHub Release, verifies it against
+   `sha256.sum`, rebuilds locally, and requires the two archives to be byte-identical.
+   Each job revalidates the owner actor, then installs the exact public version before
+   it passes. The final registry gate requires all three jobs.
 
 The `release` GitHub environment is the publication boundary. Configure that
 environment to require the repository owner when the account plan supports required

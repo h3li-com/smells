@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const [directory, version] = process.argv.slice(2);
 if (!directory || !/^\d+\.\d+\.\d+$/.test(version ?? "")) {
@@ -11,12 +12,15 @@ if (!directory || !/^\d+\.\d+\.\d+$/.test(version ?? "")) {
   process.exit(2);
 }
 
+const packageRoot = path.dirname(fileURLToPath(import.meta.url));
+const platforms = JSON.parse(
+  readFileSync(path.join(packageRoot, "platforms.json"), "utf8"),
+);
 const packages = [
-  ["@mindful-time/smells-darwin-arm64", `mindful-time-smells-darwin-arm64-${version}.tgz`],
-  ["@mindful-time/smells-darwin-x64", `mindful-time-smells-darwin-x64-${version}.tgz`],
-  ["@mindful-time/smells-linux-arm64-gnu", `mindful-time-smells-linux-arm64-gnu-${version}.tgz`],
-  ["@mindful-time/smells-linux-x64-gnu", `mindful-time-smells-linux-x64-gnu-${version}.tgz`],
-  ["@mindful-time/smells-win32-x64-msvc", `mindful-time-smells-win32-x64-msvc-${version}.tgz`],
+  ...Object.values(platforms).map(({ name }) => [
+    name,
+    `${name.slice(1).replace("/", "-")}-${version}.tgz`,
+  ]),
   ["@mindful-time/smells", `mindful-time-smells-${version}.tgz`],
 ];
 
@@ -43,7 +47,12 @@ function registryIntegrity(name) {
     { encoding: "utf8" },
   );
   if (result.status === 0) {
-    return JSON.parse(result.stdout);
+    const integrity = JSON.parse(result.stdout);
+    if (typeof integrity !== "string" || !integrity.startsWith("sha512-")) {
+      console.error(`npm returned invalid integrity metadata for ${name}@${version}`);
+      process.exit(2);
+    }
+    return integrity;
   }
   const missing = `${result.stdout}\n${result.stderr}`;
   if (missing.includes("E404") || missing.includes("404 Not Found")) {

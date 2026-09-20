@@ -31,15 +31,15 @@ release-check:
 		scripts/publish-crate.sh \
 		scripts/configure-main-protection.sh scripts/verify-release-actor.sh \
 		scripts/collect-release-artifacts.sh tests/release-artifacts.sh \
-		tests/npm-packages.sh
+		tests/npm-packages.sh tests/crate-package.sh
 	@sh tests/release-artifacts.sh
 	@sh tests/npm-packages.sh
+	@sh tests/crate-package.sh
 	@node --check npm/smells.js
 	@node --check npm/build-package.mjs
 	@node --check npm/publish-packages.mjs
 	@PYTHONPYCACHEPREFIX="$${TMPDIR:-/tmp}/smells-pycache" \
 		python3 -m py_compile scripts/verify-pypi-release.py
-	@cargo package --locked --allow-dirty --list >/dev/null
 	@version=$$(sed -n '/^\[package\]/,/^\[/ s/^version = "\([^"]*\)"/\1/p' Cargo.toml); \
 		./scripts/verify-release-tag.sh "v$$version" >/dev/null
 	@./scripts/verify-release-actor.sh mindful-time mindful-time mindful-time >/dev/null

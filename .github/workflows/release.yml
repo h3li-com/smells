@@ -341,6 +341,11 @@ jobs:
       - name: Normalize the downloaded release artifacts
         run: ./scripts/collect-release-artifacts.sh release-artifacts release
 
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.15.0"
+          package-manager-cache: false
+
       - name: Package the crates.io source archive
         env:
           RELEASE_VERSION: ${{ needs.validate.outputs.version }}
@@ -550,6 +555,25 @@ jobs:
             "$GITHUB_ACTOR" \
             "$GITHUB_TRIGGERING_ACTOR"
 
+      - name: Download and verify the signed release crate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          gh release verify "$RELEASE_TAG"
+          mkdir crate-release
+          gh release download "$RELEASE_TAG" \
+            --pattern "smells-$RELEASE_VERSION.crate" \
+            --pattern sha256.sum \
+            --dir crate-release
+          gh release verify-asset \
+            "$RELEASE_TAG" "crate-release/smells-$RELEASE_VERSION.crate"
+          gh release verify-asset "$RELEASE_TAG" crate-release/sha256.sum
+          grep "  smells-$RELEASE_VERSION.crate$" crate-release/sha256.sum \
+            > crate-release/crate.sha256
+          (cd crate-release && sha256sum -c crate.sha256)
+
       - name: Publish the verified source package
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
@@ -558,6 +582,7 @@ jobs:
           cargo package --locked
           ./scripts/publish-crate.sh \
             "$RELEASE_VERSION" \
+            "crate-release/smells-$RELEASE_VERSION.crate" \
             "target/package/smells-$RELEASE_VERSION.crate"
 
       - name: Verify installation from crates.io

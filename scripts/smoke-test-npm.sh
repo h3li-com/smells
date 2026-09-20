@@ -44,6 +44,13 @@ platform_license=$(find "$consumer/node_modules/@mindful-time" \
     ! -path '*/@mindful-time/smells/LICENSE' -print)
 test -n "$platform_license"
 cmp "$repository_root/LICENSE" "$platform_license"
+grep -F "@mindful-time/smells@$version" \
+    "$consumer/node_modules/@mindful-time/smells/README.md" >/dev/null
+if grep -F '__SMELLS_VERSION__' \
+    "$consumer/node_modules/@mindful-time/smells/README.md" >/dev/null; then
+    printf 'npm README contains an unresolved version placeholder\n' >&2
+    exit 1
+fi
 
 node -e '
 const root = require(process.argv[1]);

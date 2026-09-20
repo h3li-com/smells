@@ -1,0 +1,39 @@
+{
+  "aarch64-apple-darwin": {
+    "name": "@mindful-time/smells-darwin-arm64",
+    "host": "darwin-arm64",
+    "os": ["darwin"],
+    "cpu": ["arm64"],
+    "executable": "smells"
+  },
+  "x86_64-apple-darwin": {
+    "name": "@mindful-time/smells-darwin-x64",
+    "host": "darwin-x64",
+    "os": ["darwin"],
+    "cpu": ["x64"],
+    "executable": "smells"
+  },
+  "aarch64-unknown-linux-gnu": {
+    "name": "@mindful-time/smells-linux-arm64-gnu",
+    "host": "linux-arm64",
+    "os": ["linux"],
+    "cpu": ["arm64"],
+    "libc": ["glibc"],
+    "executable": "smells"
+  },
+  "x86_64-unknown-linux-gnu": {
+    "name": "@mindful-time/smells-linux-x64-gnu",
+    "host": "linux-x64",
+    "os": ["linux"],
+    "cpu": ["x64"],
+    "libc": ["glibc"],
+    "executable": "smells"
+  },
+  "x86_64-pc-windows-msvc": {
+    "name": "@mindful-time/smells-win32-x64-msvc",
+    "host": "win32-x64",
+    "os": ["win32"],
+    "cpu": ["x64"],
+    "executable": "smells.exe"
+  }
+}

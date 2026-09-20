@@ -1,15 +1,22 @@
 #!/bin/sh
 set -eu
 
-version=${1:?usage: publish-crate.sh VERSION CRATE_FILE}
-crate_file=${2:?usage: publish-crate.sh VERSION CRATE_FILE}
+version=${1:?usage: publish-crate.sh VERSION RELEASE_CRATE LOCAL_CRATE}
+release_crate=${2:?usage: publish-crate.sh VERSION RELEASE_CRATE LOCAL_CRATE}
+local_crate=${3:?usage: publish-crate.sh VERSION RELEASE_CRATE LOCAL_CRATE}
 user_agent="mindful-time-smells-release/$version (https://github.com/mindful-time/smells)"
 api="https://crates.io/api/v1/crates/smells/$version"
 temporary_root=${RUNNER_TEMP:-${TMPDIR:-/tmp}}
 response=$(mktemp "$temporary_root/smells-crates-response.XXXXXX")
 trap 'rm -f -- "$response"' EXIT HUP INT TERM
 
-expected=$(sha256sum "$crate_file" | cut -d ' ' -f 1)
+if ! cmp -s "$release_crate" "$local_crate"; then
+    printf 'local Cargo package differs from the signed release crate for smells %s\n' \
+        "$version" >&2
+    exit 2
+fi
+
+expected=$(sha256sum "$release_crate" | cut -d ' ' -f 1)
 
 registry_checksum() {
     status=$(curl -sS -H "User-Agent: $user_agent" -o "$response" -w '%{http_code}' "$api")

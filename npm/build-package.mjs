@@ -7,6 +7,7 @@ import {
   cpSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -14,47 +15,19 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const platforms = Object.freeze({
-  "aarch64-apple-darwin": {
-    name: "@mindful-time/smells-darwin-arm64",
-    os: ["darwin"],
-    cpu: ["arm64"],
-    executable: "smells",
-  },
-  "x86_64-apple-darwin": {
-    name: "@mindful-time/smells-darwin-x64",
-    os: ["darwin"],
-    cpu: ["x64"],
-    executable: "smells",
-  },
-  "aarch64-unknown-linux-gnu": {
-    name: "@mindful-time/smells-linux-arm64-gnu",
-    os: ["linux"],
-    cpu: ["arm64"],
-    libc: ["glibc"],
-    executable: "smells",
-  },
-  "x86_64-unknown-linux-gnu": {
-    name: "@mindful-time/smells-linux-x64-gnu",
-    os: ["linux"],
-    cpu: ["x64"],
-    libc: ["glibc"],
-    executable: "smells",
-  },
-  "x86_64-pc-windows-msvc": {
-    name: "@mindful-time/smells-win32-x64-msvc",
-    os: ["win32"],
-    cpu: ["x64"],
-    executable: "smells.exe",
-  },
-});
-
 const packageRoot = path.dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = path.dirname(packageRoot);
+const platforms = Object.freeze(
+  JSON.parse(readFileSync(path.join(packageRoot, "platforms.json"), "utf8")),
+);
 const [kind, binary, output, version] = process.argv.slice(2);
 
 if (!kind || !binary || !output || !/^\d+\.\d+\.\d+$/.test(version ?? "")) {
   console.error("usage: build-package.mjs TARGET|root BINARY|- OUTPUT VERSION");
+  process.exit(2);
+}
+if (kind !== "root" && !platforms[kind]) {
+  console.error(`unsupported npm package target: ${kind}`);
   process.exit(2);
 }
 
@@ -79,7 +52,11 @@ const temporary = mkdtempSync(path.join(tmpdir(), "smells-npm-package."));
 
 try {
   copyFileSync(path.join(repositoryRoot, "LICENSE"), path.join(temporary, "LICENSE"));
-  copyFileSync(path.join(packageRoot, "README.md"), path.join(temporary, "README.md"));
+  const readme = readFileSync(path.join(packageRoot, "README.md"), "utf8");
+  writeFileSync(
+    path.join(temporary, "README.md"),
+    readme.replaceAll("__SMELLS_VERSION__", version),
+  );
 
   let manifest;
   if (kind === "root") {
@@ -91,20 +68,20 @@ try {
       name: "@mindful-time/smells",
       type: "commonjs",
       bin: { smells: "bin/smells.js" },
-      files: ["bin/smells.js", "LICENSE", "README.md"],
+      files: ["bin/smells.js", "bin/platforms.json", "LICENSE", "README.md"],
       engines: { node: ">=18" },
       optionalDependencies,
     };
     mkdirSync(path.join(temporary, "bin"));
     const launcher = path.join(temporary, "bin", "smells.js");
     copyFileSync(path.join(packageRoot, "smells.js"), launcher);
+    copyFileSync(
+      path.join(packageRoot, "platforms.json"),
+      path.join(temporary, "bin", "platforms.json"),
+    );
     chmodSync(launcher, 0o755);
   } else {
     const platform = platforms[kind];
-    if (!platform) {
-      console.error(`unsupported npm package target: ${kind}`);
-      process.exit(2);
-    }
     manifest = {
       ...common,
       name: platform.name,

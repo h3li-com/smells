@@ -4,13 +4,15 @@
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 
-const packages = Object.freeze({
-  "darwin-arm64": ["@mindful-time/smells-darwin-arm64", "smells"],
-  "darwin-x64": ["@mindful-time/smells-darwin-x64", "smells"],
-  "linux-arm64": ["@mindful-time/smells-linux-arm64-gnu", "smells"],
-  "linux-x64": ["@mindful-time/smells-linux-x64-gnu", "smells"],
-  "win32-x64": ["@mindful-time/smells-win32-x64-msvc", "smells.exe"],
-});
+const platforms = require("./platforms.json");
+const packages = Object.freeze(
+  Object.fromEntries(
+    Object.values(platforms).map(({ host, name, executable }) => [
+      host,
+      [name, executable],
+    ]),
+  ),
+);
 
 const key = `${process.platform}-${process.arch}`;
 const selected = packages[key];
