@@ -43,10 +43,12 @@ drift independently. The PR must pass the required `CI / required` check.
 
 After the version PR is merged into `main`:
 
-1. Open **Actions → Release → Run workflow**.
+1. The repository owner, `mindful-time`, opens **Actions → Release → Run workflow**.
 2. Select `main` and enter the exact stable tag, such as `v0.2.0`.
-3. The workflow rejects input other than `vMAJOR.MINOR.PATCH`, a tag that already exists, a non-`main`
-   dispatch, or a version that differs from `Cargo.toml`.
+3. The workflow rejects every other dispatch or rerun actor, input other than
+   `vMAJOR.MINOR.PATCH`, a tag that already exists, a non-`main` dispatch, or a
+   version that differs from `Cargo.toml`. The actor check runs during validation
+   and again immediately before publication so a partial job rerun cannot bypass it.
 4. The complete local quality gate runs again before any platform build.
 5. All five archives and wheels are built and executed on matching architectures.
    The publication job produces individual archive checksums, `sha256.sum`, a

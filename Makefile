@@ -27,9 +27,15 @@ test:
 release-check:
 	@sh -n scripts/quality-tool-versions.sh scripts/install-ci-quality-tools.sh \
 		scripts/verify-release-tag.sh scripts/package-release.sh \
-		scripts/configure-main-protection.sh
+		scripts/configure-main-protection.sh scripts/verify-release-actor.sh
 	@version=$$(sed -n '/^\[package\]/,/^\[/ s/^version = "\([^"]*\)"/\1/p' Cargo.toml); \
 		./scripts/verify-release-tag.sh "v$$version" >/dev/null
+	@./scripts/verify-release-actor.sh mindful-time mindful-time mindful-time >/dev/null
+	@if ./scripts/verify-release-actor.sh \
+		mindful-time mindful-time another-user >/dev/null 2>&1; then \
+		echo 'release actor guard accepted a non-owner' >&2; \
+		exit 1; \
+	fi
 
 self-smell-check: build
 	@./scripts/self-smell-check.sh

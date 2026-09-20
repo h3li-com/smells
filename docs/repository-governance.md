@@ -18,16 +18,11 @@
 `.github/CODEOWNERS` records ownership. Enforcement comes from branch protection,
 not from the CODEOWNERS file or local Git hooks.
 
-## Current GitHub plan limitation
+## Enforced GitHub settings
 
-On 2026-09-20, GitHub returned HTTP 403 for both repository rulesets and classic
-branch protection because `mindful-time/smells` is private on a plan that does not
-include protected branches for private repositories. The repository currently has
-exactly one collaborator with write access: `mindful-time`.
-
-Do not make the repository public merely to work around this. Either upgrade the
-account to GitHub Pro or deliberately choose public visibility. Once protection is
-available and the `required` check has run at least once, apply the checked-in rule:
+The repository is public so GitHub can enforce this policy without requiring a
+paid private-repository plan. It still has exactly one collaborator with write
+access: `mindful-time`. Apply or audit the checked-in branch-protection rule with:
 
 ```sh
 ./scripts/configure-main-protection.sh mindful-time/smells
@@ -38,3 +33,8 @@ rejected. Also confirm that a same-repository pull request fails the fork-origin
 check. GitHub branch protection has no native fork-origin setting; the required CI
 check supplies that policy. The script enables administrator enforcement and does
 not configure an owner bypass.
+
+The release workflow independently rejects dispatches and reruns from every actor
+other than `mindful-time`, even if another writer is added later. It repeats the
+check immediately before publication. Immutable releases lock each published
+release's tag and assets.

@@ -484,7 +484,8 @@ blocking limit of `10`; scores above the target remain visible to coding agents.
 
 Pull requests run that same gate in GitHub Actions and additionally build, install,
 and execute a binary wheel and standalone archive. Pull requests must originate
-from a fork. Release publication is manually dispatched from `main`; read
+from a fork. Only repository owner `mindful-time` can dispatch release publication
+from `main`; read
 [repository governance](docs/repository-governance.md) and the
 [release process](docs/release-process.md) before changing either workflow.
 
