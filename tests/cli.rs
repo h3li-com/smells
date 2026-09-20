@@ -642,6 +642,99 @@ fn report_aggregates_rule_evidence_by_canonical_smell_pattern() {
 }
 
 #[test]
+fn table_output_is_actionable_while_json_report_is_saved() {
+    let workspace = Workspace::new(
+        "pub struct Account {\n    pub name: String,\n    pub email: String,\n}\n\npub struct Invoice {\n    pub number: u64,\n    pub total: u64,\n}\n",
+    );
+    let output = workspace.command(&[
+        "check",
+        "--path",
+        ".",
+        "--policy",
+        "quality-policy.json",
+        "--only-group",
+        "source",
+        "--format",
+        "table",
+        "--report",
+        "smells-report.json",
+    ]);
+
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    for expected in [
+        "Scan summary | verdict:",
+        "Data Class | data-class | review_match",
+        "Actionable finding",
+        "Issue: Data Class: rust.data_class indicator",
+        "Observed versus threshold:",
+        "Source excerpt:",
+        "src/lib.rs:1:12",
+        "pub struct Account {",
+        "Why it matters:",
+        "Remediation:",
+        "Reference URL: https://refactoring.guru/smells/data-class",
+        "Research requirement: NON-NEGOTIABLE RESEARCH:",
+    ] {
+        assert!(
+            stdout.contains(expected),
+            "missing {expected:?} in:\n{stdout}"
+        );
+    }
+
+    let saved: Value =
+        serde_json::from_slice(&fs::read(workspace.path.join("smells-report.json")).unwrap())
+            .unwrap();
+    assert_eq!(saved["summary"]["matched_smell_patterns"], 1);
+    assert_eq!(saved["summary"]["review_smell_patterns"], 1);
+    assert_eq!(saved["summary"]["blocking_smell_patterns"], 0);
+    assert_eq!(saved["summary"]["matched_smell_ids"], json!(["data-class"]));
+    assert_eq!(
+        stdout
+            .matches("Reference URL: https://refactoring.guru/smells/data-class")
+            .count(),
+        2,
+        "every finding must carry its own reference and guidance"
+    );
+}
+
+#[test]
+fn self_smell_script_keeps_actionable_output_visible() {
+    let output_directory = std::env::temp_dir().join(format!(
+        "smells-self-check-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir(&output_directory).unwrap();
+    let report_path = output_directory.join("smells-report.json");
+    let output = Command::new("sh")
+        .arg("scripts/self-smell-check.sh")
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .env("SMELLS_BIN", env!("CARGO_BIN_EXE_smells"))
+        .env("SMELLS_REPORT", &report_path)
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    for expected in [
+        "Scan summary | verdict:",
+        "Matched evidence for .:",
+        "Actionable findings for .:",
+        "Observed versus threshold:",
+        "Source excerpt:",
+        "Remediation:",
+        "Reference URL: https://refactoring.guru/smells/",
+        "Research requirement: NON-NEGOTIABLE RESEARCH:",
+        "self smell scan passed; complete deterministic JSON report:",
+    ] {
+        assert!(stdout.contains(expected), "missing {expected:?}");
+    }
+    let saved: Value = serde_json::from_slice(&fs::read(&report_path).unwrap()).unwrap();
+    assert!(saved["summary"]["matched_findings"].as_u64().unwrap() > 0);
+}
+
+#[test]
 fn cargo_manifest_marks_the_repository_rust_implementation() {
     let workspace = Workspace::new("fn concise() {}");
     workspace.source("Cargo.toml", "[package]\nname='fixture'\nversion='0.1.0'\n");

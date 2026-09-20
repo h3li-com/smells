@@ -16,7 +16,7 @@ use std::{
     process::ExitCode,
 };
 
-const USAGE: &str = "smells --version\nsmells check (--path DIR | --staged) --policy FILE [--evidence FILE] [--format table|json] [policy group selectors]\nsmells policy show --policy FILE [--format table|json] [policy group selectors]\nsmells contracts validate --policy FILE\nsmells rules [--rule-pack rust-v1|python-v1|typescript-v1]\n\npolicy group selectors: --group NAME | --only-group NAME | --all-groups | --no-default-groups | --no-group NAME";
+const USAGE: &str = "smells --version\nsmells check (--path DIR | --staged) --policy FILE [--evidence FILE] [--format table|json] [--report FILE] [policy group selectors]\nsmells policy show --policy FILE [--format table|json] [policy group selectors]\nsmells contracts validate --policy FILE\nsmells rules [--rule-pack rust-v1|python-v1|typescript-v1]\n\npolicy group selectors: --group NAME | --only-group NAME | --all-groups | --no-default-groups | --no-group NAME";
 
 enum Command {
     Help,
@@ -31,6 +31,7 @@ struct CheckOptions {
     source: Option<PathBuf>,
     policy_path: PathBuf,
     evidence_path: Option<PathBuf>,
+    report_path: Option<PathBuf>,
     format: Option<String>,
     staged: bool,
     selection: policy::SelectionOptions,
@@ -47,6 +48,7 @@ struct PendingOptions {
     source: Option<PathBuf>,
     policy_path: Option<PathBuf>,
     evidence_path: Option<PathBuf>,
+    report_path: Option<PathBuf>,
     format: Option<String>,
     staged: bool,
     selection: policy::SelectionOptions,
@@ -65,16 +67,24 @@ fn set_option(
     flag: &str,
     value: &str,
     contracts: bool,
-    source: &mut Option<PathBuf>,
-    policy_path: &mut Option<PathBuf>,
-    evidence_path: &mut Option<PathBuf>,
-    format: &mut Option<String>,
+    options: &mut PendingOptions,
 ) -> Result<(), String> {
     match flag {
-        "--policy" => set_once(policy_path, PathBuf::from(value), true, flag),
-        "--evidence" => set_once(evidence_path, PathBuf::from(value), !contracts, flag),
-        "--path" => set_once(source, PathBuf::from(value), !contracts, flag),
-        "--format" => set_format(format, value, contracts, flag),
+        "--policy" => set_once(&mut options.policy_path, PathBuf::from(value), true, flag),
+        "--evidence" => set_once(
+            &mut options.evidence_path,
+            PathBuf::from(value),
+            !contracts,
+            flag,
+        ),
+        "--report" => set_once(
+            &mut options.report_path,
+            PathBuf::from(value),
+            !contracts,
+            flag,
+        ),
+        "--path" => set_once(&mut options.source, PathBuf::from(value), !contracts, flag),
+        "--format" => set_format(&mut options.format, value, contracts, flag),
         _ => Err(format!("unknown, repeated or invalid option: {flag}")),
     }
 }
@@ -127,15 +137,7 @@ fn consume_operation_option(
     let value = args
         .get(*index + 1)
         .ok_or_else(|| format!("missing value for {flag}"))?;
-    set_option(
-        flag,
-        value,
-        contracts,
-        &mut options.source,
-        &mut options.policy_path,
-        &mut options.evidence_path,
-        &mut options.format,
-    )?;
+    set_option(flag, value, contracts, options)?;
     *index += 2;
     Ok(())
 }
@@ -152,6 +154,7 @@ fn finish_operation(options: PendingOptions, contracts: bool) -> Result<Command,
         source: options.source,
         policy_path,
         evidence_path: options.evidence_path,
+        report_path: options.report_path,
         format: options.format,
         staged: options.staged,
         selection: options.selection,
@@ -428,7 +431,13 @@ fn check(options: CheckOptions) -> Result<u8, String> {
     );
     report.attach_sources(&captured.input.files);
     report.finish();
-    let json_bytes = print_report(&report, options.format.as_deref())?;
+    let saved_json_bytes = options
+        .report_path
+        .as_deref()
+        .map(|path| write_json_report(&report, path))
+        .transpose()?;
+    let stdout_json_bytes = print_report(&report, options.format.as_deref())?;
+    let json_bytes = saved_json_bytes.unwrap_or(stdout_json_bytes);
     metrics::write(json_bytes)?;
     Ok(report.exit())
 }
@@ -464,6 +473,23 @@ fn print_report(report: &report::Report, format: Option<&str>) -> Result<usize, 
         report.print_table();
         Ok(0)
     }
+}
+
+fn write_json_report(report: &report::Report, path: &std::path::Path) -> Result<usize, String> {
+    let file = fs::File::create(path)
+        .map_err(|error| format!("cannot create report {}: {error}", path.display()))?;
+    let mut output = CountingWriter {
+        inner: io::BufWriter::new(file),
+        bytes: 0,
+    };
+    serde_json::to_writer_pretty(&mut output, report)
+        .map_err(|error| format!("cannot write report {}: {error}", path.display()))?;
+    writeln!(output)
+        .map_err(|error| format!("cannot finish report {}: {error}", path.display()))?;
+    output
+        .flush()
+        .map_err(|error| format!("cannot flush report {}: {error}", path.display()))?;
+    Ok(output.bytes)
 }
 
 fn run() -> Result<u8, String> {

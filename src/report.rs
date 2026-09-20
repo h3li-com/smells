@@ -1218,10 +1218,26 @@ fn print_matched_findings(
     println!(
         "Finding | Smell | Repository symbols | Metric | Value | Matches when | Threshold | Status | Repository evidence locations"
     );
-    for (index, finding) in report.findings.iter().enumerate().filter(|(_, finding)| {
-        finding.evaluation.matched && Report::finding_in_source_files(finding, &scope.source_files)
-    }) {
-        print_finding(index, finding, scope);
+    let matched_findings: Vec<_> = report
+        .findings
+        .iter()
+        .enumerate()
+        .filter(|(_, finding)| {
+            finding.evaluation.matched
+                && Report::finding_in_source_files(finding, &scope.source_files)
+        })
+        .collect();
+    for (index, finding) in &matched_findings {
+        print_finding(*index, finding, scope);
+    }
+    if !matched_findings.is_empty() {
+        println!(
+            "Actionable findings for {}:",
+            implementation.implementation_id
+        );
+    }
+    for (index, finding) in &matched_findings {
+        print_actionable_finding(*index, finding);
     }
 }
 
@@ -1272,6 +1288,64 @@ fn push_table_evidence<'a>(
     }
 }
 
+fn print_actionable_finding(index: usize, finding: &Finding) {
+    println!(
+        "Actionable finding {index} | {} | {} | pattern_type={} | certainty={} | status={}",
+        finding.smell, finding.rule_id, finding.pattern_type, finding.certainty, finding.status
+    );
+    println!("  Issue: {}", finding.diagnostic.headline);
+    println!(
+        "  Primary location: {}:{}:{} | symbol: {}",
+        finding.location.path, finding.location.line, finding.location.column, finding.symbol
+    );
+    println!(
+        "  Observed versus threshold: {} = {}; matches when {} {}",
+        finding.evaluation.metric,
+        finding.evaluation.observed,
+        finding.evaluation.match_condition,
+        finding.evaluation.threshold
+    );
+    println!("  Evidence: {}", finding.diagnostic.explanation);
+    println!("  Signal: {}", finding.diagnostic.signal);
+    print_source_excerpt("Source excerpt", finding.source_excerpt.as_ref());
+    for (related_index, excerpt) in finding.related_source_excerpts.iter().enumerate() {
+        print_source_excerpt(
+            &format!("Related source excerpt {}", related_index + 1),
+            Some(excerpt),
+        );
+    }
+    if finding.omitted_related_excerpts > 0 {
+        println!(
+            "  Related source excerpts omitted: {} (all locations remain in the evidence row and JSON report)",
+            finding.omitted_related_excerpts
+        );
+    }
+    println!("  Why it matters: {}", finding.diagnostic.why_it_matters);
+    println!("  Remediation: {}", finding.diagnostic.remediation);
+    println!("  Contract: {}", finding.diagnostic.contract);
+    println!("  Reference URL: {}", finding.diagnostic.reference_url);
+    println!("  Research requirement: {}", finding.diagnostic.review);
+}
+
+fn print_source_excerpt(label: &str, excerpt: Option<&SourceExcerpt>) {
+    let Some(excerpt) = excerpt else {
+        println!("  {label}: unavailable");
+        return;
+    };
+    println!(
+        "  {label}: {}:{}:{}",
+        excerpt.path, excerpt.focus_line, excerpt.focus_column
+    );
+    for line in &excerpt.lines {
+        let marker = if line.line == excerpt.focus_line {
+            ">"
+        } else {
+            " "
+        };
+        println!("    {marker} {:>6} | {}", line.line, line.text);
+    }
+}
+
 impl Report {
     pub fn print_table(&self) {
         println!(
@@ -1280,6 +1354,19 @@ impl Report {
             self.source_mode,
             self.scanned_files.len(),
             self.language,
+        );
+        println!(
+            "Scan summary | verdict: {} | implementations: {} | matched patterns: {}/{} | blocking patterns: {} | review patterns: {} | matched findings: {} | blocking findings: {} | review signals: {} | errors: {}",
+            self.summary.verdict,
+            self.summary.implementations,
+            self.summary.matched_smell_patterns,
+            self.summary.total_smell_patterns,
+            self.summary.blocking_smell_patterns,
+            self.summary.review_smell_patterns,
+            self.summary.matched_findings,
+            self.summary.blocking_findings,
+            self.summary.review_signals,
+            self.summary.error_count,
         );
         for (implementation, scope) in self
             .implementation_results

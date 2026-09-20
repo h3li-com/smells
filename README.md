@@ -147,6 +147,24 @@ smells check \
 JSON reports can be large because they retain both matched and nonmatching
 measurements so the verdict can be audited.
 
+To keep that complete JSON report while also showing actionable output in the
+terminal or CI log, use `--report` with the table format:
+
+```sh
+smells check \
+  --path . \
+  --policy quality-policy.json \
+  --only-group source \
+  --format table \
+  --report target/quality/smells-report.json
+```
+
+This performs one scan. The log includes the verdict, implementation, smell
+pattern, evidence locations, observed value, threshold, source lines, reason,
+remediation, Refactoring.Guru URL, and non-negotiable research instruction for
+every match. `--report` writes the complete machine-readable JSON from that
+same scan.
+
 ## Understand the result
 
 ### Exit codes
@@ -165,6 +183,7 @@ precedence over matches.
 An abbreviated table report looks like this:
 
 ```text
+Scan summary | verdict: blocked_by_required_patterns | implementations: 1 | matched patterns: 2/23 | blocking patterns: 1 | review patterns: 1 | matched findings: 11 | blocking findings: 3 | review signals: 8 | errors: 0
 Implementation: backend | root: backend | ... | 120 python files
 Smell pattern  | Pattern ID     | Result         | Matches | Blocking | Review | Coverage
 Long Method    | long-method    | blocking_match | 3       | 3        | 0      | measured_defined_scope
@@ -174,6 +193,19 @@ Dead Code      | dead-code      | excluded       | 0       | 0        | 0      |
 Matched evidence for backend:
 Finding | Smell       | Repository symbols          | Metric                   | Value | Matches when | Threshold | Status    | Repository evidence locations
 42      | Long Method | app/jobs.py::process_batch | authored body code lines | 146   | >            | 100       | violation | app/jobs.py:42:1
+
+Actionable finding 42 | Long Method | python.function_lines | pattern_type=metric | certainty=exact_source_metric | status=violation
+  Issue: Long Method: python.function_lines violation
+  Primary location: app/jobs.py:42:1 | symbol: app/jobs.py::process_batch
+  Observed versus threshold: authored body code lines = 146; matches when > 100
+  Evidence: Observed authored body code lines = 146; this satisfies the configured match condition > 100.
+  Signal: A callable's authored body contains more code lines than the configured maximum.
+  Source excerpt: app/jobs.py:42:1
+    >     42 | def process_batch(...):
+  Why it matters: A large callable can conceal multiple responsibilities and make focused testing harder.
+  Remediation: Extract coherent steps into named callables or a focused class/module while preserving behavior with tests.
+  Reference URL: https://refactoring.guru/smells/long-method
+  Research requirement: NON-NEGOTIABLE RESEARCH: Perform an external research/tool call to the reference URL ...
 ```
 
 Read it in this order:
@@ -182,7 +214,10 @@ Read it in this order:
 2. **Blocking** rows caused exit code `1` and should be handled first.
 3. **Review** rows are deterministic signals that still require design judgement.
 4. **Matched evidence** shows the exact symbol, measurement, threshold, and location.
-5. **Excluded** means the resolved group selection did not run that detector; it
+5. **Actionable findings** are self-contained for every match: they add pattern
+   type, source lines, why the signal matters, remediation guidance, its exact
+   reference URL, and the mandatory research instruction.
+6. **Excluded** means the resolved group selection did not run that detector; it
    does not mean no smell exists. **Disabled** is reserved for an explicit legacy
    `off` mode.
 

@@ -114,6 +114,13 @@ Every smell result repeats the canonical URL and `reference_check`. For a matche
 
 The repository summary repeats compact implementation and smell-level routing data: implementation and unowned-source counts, total/matched/blocking/review/error pattern counts, and canonical `matched_smell_ids`. Existing finding counts remain available for volume and policy decisions.
 
+For hooks and CI, `--format table --report PATH` emits the actionable summary,
+matched evidence, source excerpts, guidance, and mandatory research URL to the
+log while saving this complete JSON interface to `PATH`. Both outputs come from
+the same in-memory report and therefore cannot disagree because of a second
+scan. This repository's CI also uploads `target/quality/smells-report.json` as
+the `self-smell-report` artifact, even when a later quality-gate command fails.
+
 ## Hook decision order
 
 1. Read `summary.verdict`. If it is `incomplete_due_to_errors`, do not infer that unmatched rules passed; resolve the input, parser, ownership, budget, or provider error first.
