@@ -10,6 +10,7 @@ trap 'rm -rf -- "$temporary"' EXIT HUP INT TERM
 packages="$temporary/packages"
 fake_bin="$temporary/bin"
 mkdir -p "$packages" "$fake_bin"
+packages=$(CDPATH= cd -- "$packages" && pwd -P)
 
 for name in \
     mindful-time-smells-darwin-arm64 \
@@ -98,8 +99,11 @@ PUBLISH_CALL_LOG="$publish_log"
 PUBLISH_STATE="$publish_state"
 export PUBLISH_CALL_LOG PUBLISH_STATE
 
-PATH="$publish_bin:$PATH" node "$publisher" \
-    "$packages" 0.3.0 https://registry.npmjs.org --provenance
+(
+    cd "$temporary"
+    PATH="$publish_bin:$PATH" node "$publisher" \
+        packages 0.3.0 https://registry.npmjs.org --provenance
+)
 
 expected_publish_order='mindful-time-smells-darwin-arm64-0.3.0.tgz
 mindful-time-smells-darwin-x64-0.3.0.tgz
@@ -112,6 +116,12 @@ actual_publish_order=$(sed -n 's#^publish .*\(/mindful-time-.*\.tgz\).*#\1#p' \
 test "$actual_publish_order" = "$expected_publish_order"
 test "$(grep -c '^view ' "$publish_log")" = 12
 test "$(grep -c '^publish ' "$publish_log")" = 6
+if [ "$(awk -v prefix="$packages/" \
+    '$1 == "publish" && $2 == "publish" && index($3, prefix) == 1 { count += 1 } END { print count + 0 }' \
+    "$publish_log")" -ne 6 ]; then
+    printf 'npm publisher did not resolve every local tarball to an absolute path\n' >&2
+    exit 1
+fi
 if grep '^publish ' "$publish_log" \
     | grep -v -- '--registry https://registry.npmjs.org --access public --provenance$' \
     >/dev/null; then

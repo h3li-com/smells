@@ -104,7 +104,7 @@ for (const [name, filename] of packages) {
 
   const publishArguments = [
     "publish",
-    path.join(directory, filename),
+    path.resolve(directory, filename),
     "--registry",
     registry,
   ];
