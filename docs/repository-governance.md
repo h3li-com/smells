@@ -8,6 +8,9 @@
 - Outside contributors work from forks and open pull requests.
 - Required CI rejects a pull request when its head branch is in this repository
   instead of a fork, including a same-repository pull request opened by the owner.
+  Historical PR #1 has an exact owner-and-branch-bound bootstrap exception because
+  it introduced this rule before branch protection was enabled. A merged pull
+  request cannot be reopened, and no later pull request can match its number.
 - Direct pushes, force pushes, and branch deletion are blocked for everyone,
   including the owner.
 - The branch must be current with `main`, have resolved conversations, use linear

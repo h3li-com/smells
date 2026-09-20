@@ -22,9 +22,24 @@ jobs:
       - name: Require pull requests to originate from a fork
         if: github.event_name == 'pull_request'
         env:
+          ACTOR: ${{ github.actor }}
           BASE_REPOSITORY: ${{ github.event.pull_request.base.repo.full_name }}
+          HEAD_REF: ${{ github.head_ref }}
           HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          PR_NUMBER: ${{ github.event.number }}
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
         run: |
+          if [ "$BASE_REPOSITORY" = mindful-time/smells ] \
+              && [ "$HEAD_REPOSITORY" = "$BASE_REPOSITORY" ] \
+              && [ "$PR_NUMBER" = 1 ] \
+              && [ "$HEAD_REF" = bootstrap/rust-1.88-ci-fix ] \
+              && [ "$REPOSITORY_OWNER" = mindful-time ] \
+              && [ "$ACTOR" = "$REPOSITORY_OWNER" ] \
+              && [ "$TRIGGERING_ACTOR" = "$REPOSITORY_OWNER" ]; then
+            echo 'allowing the owner-only bootstrap exception for PR #1'
+            exit 0
+          fi
           test "$HEAD_REPOSITORY" != "$BASE_REPOSITORY"
 
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
