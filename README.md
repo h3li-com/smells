@@ -18,6 +18,7 @@ coding environments.
 [Quick start](#quick-start) · [Understand results](#understand-the-result) ·
 [Pre-commit hook](#add-it-to-a-pre-commit-hook) ·
 [Monorepos](#monorepo-behavior) ·
+[Choose rules](#choose-which-policy-groups-run) ·
 [Full-pattern evidence](#source-rules-and-full-pattern-evidence) ·
 [Rule reference](#policies-and-rule-reference)
 
@@ -31,10 +32,11 @@ coding environments.
 - Fails closed when parsing, required evidence, or analysis budgets are incomplete.
 - Covers all 23 Refactoring.Guru smell categories through 28 rules per language pack.
 
-> **Important:** the example policies run every built-in source rule. Rules that
-> need compiler, type, coverage, contract, test, or Git-history facts are included
-> but disabled until you provide a pinned evidence bundle. A disabled rule means
-> “not checked,” never “clean.”
+> **Important:** every rule in every starter policy is active. The default group is
+> `all`, so a scan without provider evidence intentionally exits `2` for rules that
+> need compiler, type, coverage, contract, test, or Git-history facts. Use
+> `--only-group source` for a source-only scan; excluded means “not checked,” never
+> “clean.”
 
 ## Supported languages
 
@@ -71,7 +73,8 @@ This installs the `smells` executable in Cargo's binary directory, normally
 | TypeScript/TSX | `examples/typescript-quality-policy.json` |
 
 A policy selects the language pack, rule modes, thresholds, excluded directory
-names, and analysis budgets. There is no separate language flag.
+names, default rule groups, and analysis budgets. There is no separate language
+flag. Every starter has `"default_groups": ["all"]` and 28 active rules.
 
 Copy the matching starter policy into the repository you want to scan. For a
 Python project:
@@ -94,6 +97,7 @@ Use the table format for an interactive first run:
 smells check \
   --path . \
   --policy quality-policy.json \
+  --only-group source \
   --format table
 ```
 
@@ -106,6 +110,7 @@ Use JSON for CI, hooks, or coding agents:
 smells check \
   --path . \
   --policy quality-policy.json \
+  --only-group source \
   --format json > smells-report.json
 ```
 
@@ -118,7 +123,7 @@ measurements so the verdict can be audited.
 
 | Exit code | Meaning | What to do |
 | ---: | --- | --- |
-| `0` | Every enabled required rule completed and passed | Continue |
+| `0` | Every selected active required rule completed and passed | Continue |
 | `1` | One or more required rules matched | Review the blocking findings |
 | `2` | The scan was incomplete or invalid | Fix the input, policy, parser, ownership, budget, or evidence error |
 
@@ -134,7 +139,7 @@ Implementation: backend | root: backend | ... | 120 python files
 Smell pattern  | Pattern ID     | Result         | Matches | Blocking | Review | Coverage
 Long Method    | long-method    | blocking_match | 3       | 3        | 0      | measured_defined_scope
 Duplicate Code | duplicate-code | review_match   | 8       | 0        | 8      | measured_defined_scope
-Dead Code      | dead-code      | disabled       | 0       | 0        | 0      | disabled
+Dead Code      | dead-code      | excluded       | 0       | 0        | 0      | excluded
 
 Matched evidence for backend:
 Finding | Smell       | Repository symbols          | Metric                   | Value | Matches when | Threshold | Status    | Repository evidence locations
@@ -147,9 +152,11 @@ Read it in this order:
 2. **Blocking** rows caused exit code `1` and should be handled first.
 3. **Review** rows are deterministic signals that still require design judgement.
 4. **Matched evidence** shows the exact symbol, measurement, threshold, and location.
-5. **Disabled** means the pattern was not checked; it does not mean no smell exists.
+5. **Excluded** means the resolved group selection did not run that detector; it
+   does not mean no smell exists. **Disabled** is reserved for an explicit legacy
+   `off` mode.
 
-`checked_no_match_in_measured_scope` means the enabled detector ran and stayed
+`checked_no_match_in_measured_scope` means the selected active detector ran and stayed
 within its configured threshold. `not_applicable` means the smell does not map
 to that language's model.
 
@@ -159,7 +166,7 @@ to that language's model.
 | --- | --- |
 | `required` | A match blocks with exit code `1` |
 | `report` | A match is recorded for human or agent review but does not block |
-| `off` | The rule is disabled and must not be interpreted as passing |
+| `off` | Legacy/custom-policy opt-out; the shipped policies do not use it |
 
 ### What a finding contains
 
@@ -217,7 +224,7 @@ custom integration.
 ### Whole repository
 
 ```sh
-smells check --path . --policy quality-policy.json --format table
+smells check --path . --policy quality-policy.json --only-group source --format table
 ```
 
 `--path` recursively captures only the selected language's supported extensions.
@@ -229,7 +236,7 @@ followed, so dependency caches cannot silently redirect a scan outside its root.
 Run this from the consuming Git repository:
 
 ```sh
-smells check --staged --policy quality-policy.json --format json
+smells check --staged --policy quality-policy.json --only-group source --format json
 ```
 
 Despite the name, `--staged` does not scan only paths changed by the next commit.
@@ -258,7 +265,7 @@ command -v smells >/dev/null 2>&1 || {
   exit 2
 }
 
-exec smells check --staged --policy quality-policy.json --format json
+exec smells check --staged --policy quality-policy.json --only-group source --format json
 ```
 
 Keep formatting, compilation, tests, Gitleaks, OSV, and other project checks in
@@ -284,8 +291,12 @@ without scanning every directory separately.
 
 ## Source rules and full-pattern evidence
 
-The starter policies are immediately usable because they enable source-owned
-rules and leave evidence-backed rules off.
+The starter policies activate all 28 rules and select `all` by default. For an
+immediate syntax-only pass, explicitly choose the `source` group:
+
+```sh
+smells check --path . --policy quality-policy.json --only-group source --format table
+```
 
 Built-in source rules cover deterministic syntax measurements such as:
 
@@ -301,13 +312,14 @@ compiler or type information; CRAP needs complexity plus complete coverage;
 shotgun surgery and divergent change need pinned history; architectural smells
 need dependency or project contracts.
 
-All corresponding evaluators exist, but enabling one requires a complete
-provider-evidence bundle tied to the exact source scan's `input_sha256`:
+All corresponding evaluators exist. Because the starter policy selects them,
+the default full scan requires a complete provider-evidence bundle tied to the
+exact resolved scan's `input_sha256`:
 
 ```sh
 smells check \
   --path /path/to/project \
-  --policy full-policy.json \
+  --policy quality-policy.json \
   --evidence provider-evidence.json \
   --format json
 ```
@@ -324,7 +336,7 @@ The bootstrap sequence is intentionally fail-closed:
 2. Run that exact full policy without `--evidence`. The expected exit code is
    `2`, but the JSON report supplies the snapshot's `input_sha256`.
 3. Run your pinned external providers against that same snapshot and create one
-   complete evidence entry for every enabled provider-backed rule, using that
+   complete evidence entry for every selected provider-backed rule, using that
    digest.
 4. Stage the evidence file when using `--staged`, then rerun the command with
    `--evidence provider-evidence.json`.
@@ -333,6 +345,36 @@ Do not change source or policy between these steps. If anything changes, capture
 a new digest and regenerate the evidence.
 
 ## Policies and rule reference
+
+### Choose which policy groups run
+
+The selection model follows uv's dependency-group behavior. Persistent defaults
+come from `default_groups` in the checked-in policy; the starter policies use
+`["all"]`. Inspect the exact resolved policy before scanning:
+
+```sh
+smells policy show --policy quality-policy.json --format table
+smells policy show --policy quality-policy.json --only-group source --format json
+```
+
+Built-in groups are `all`, `source`, `evidence`, and the five canonical smell
+categories: `bloaters`, `object-orientation-abusers`, `change-preventers`,
+`dispensables`, and `couplers`.
+
+| Selector | Resolution behavior |
+| --- | --- |
+| `--group NAME` | Add a group to the configured defaults; repeatable |
+| `--only-group NAME` | Replace defaults with only these groups; repeatable |
+| `--all-groups` | Include every rule |
+| `--no-default-groups` | Start without configured defaults |
+| `--no-group NAME` | Remove a group after every inclusion; exclusions always win |
+
+`--only-group` conflicts with `--group`, `--all-groups`, and
+`--no-default-groups`. Unknown or duplicate group selectors return exit `2`.
+The resolved selection, group membership, selected/excluded rule IDs, and rule
+mode appear in `policy show` and every scan report. The resolved selection is
+also part of `input_sha256`, so evidence for one selection cannot be replayed
+against another.
 
 List the registered rules for one language pack:
 

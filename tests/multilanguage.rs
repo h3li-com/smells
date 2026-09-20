@@ -42,16 +42,19 @@ impl Workspace {
     }
 
     fn check_path(&self) -> Output {
+        self.check_path_with(&[])
+    }
+
+    fn check_path_source_only(&self) -> Output {
+        self.check_path_with(&["--only-group", "source"])
+    }
+
+    fn check_path_with(&self, selection: &[&str]) -> Output {
+        let mut arguments = vec!["check", "--path", ".", "--policy", "quality-policy.json"];
+        arguments.extend_from_slice(selection);
+        arguments.extend_from_slice(&["--format", "json"]);
         Command::new(env!("CARGO_BIN_EXE_smells"))
-            .args([
-                "check",
-                "--path",
-                ".",
-                "--policy",
-                "quality-policy.json",
-                "--format",
-                "json",
-            ])
+            .args(arguments)
             .current_dir(&self.path)
             .output()
             .expect("run scanner")
@@ -445,7 +448,7 @@ fn example_policies_exclude_common_monorepo_caches() {
         let workspace = Workspace::new(source_path, source, &policy);
         fs::create_dir_all(workspace.path.join(generated_path).parent().unwrap()).unwrap();
         fs::write(workspace.path.join(generated_path), generated).unwrap();
-        let output = workspace.check_path();
+        let output = workspace.check_path_source_only();
         assert_eq!(
             output.status.code(),
             Some(0),
@@ -457,6 +460,45 @@ fn example_policies_exclude_common_monorepo_caches() {
             json!([source_path]),
             "{generated_path} should be excluded"
         );
+    }
+}
+
+#[test]
+fn every_starter_defaults_to_all_rules_and_fails_closed_without_evidence() {
+    for (file, source, policy, evidence_rules) in [
+        (
+            "lib.rs",
+            "fn healthy() {}\n",
+            serde_json::from_str(include_str!("../examples/quality-policy.json")).unwrap(),
+            11,
+        ),
+        (
+            "app.py",
+            "def healthy():\n    return 1\n",
+            serde_json::from_str(include_str!("../examples/python-quality-policy.json")).unwrap(),
+            18,
+        ),
+        (
+            "app.ts",
+            "function healthy() { return 1; }\n",
+            serde_json::from_str(include_str!("../examples/typescript-quality-policy.json"))
+                .unwrap(),
+            18,
+        ),
+    ] {
+        let workspace = Workspace::new(file, source, &policy);
+        let output = workspace.check_path();
+        assert_eq!(output.status.code(), Some(2), "{file}");
+        let data = report(&output);
+        assert_eq!(
+            data["policy_selection"]["active_rule_ids"]
+                .as_array()
+                .unwrap()
+                .len(),
+            28,
+            "{file}"
+        );
+        assert_eq!(data["errors"].as_array().unwrap().len(), evidence_rules);
     }
 }
 
@@ -517,7 +559,7 @@ fn runtime_manifests_partition_monorepo_results_by_repository_implementation() {
     let output = workspace.check_path();
     assert_eq!(output.status.code(), Some(0));
     let data = report(&output);
-    assert_eq!(data["report_schema_version"], 4);
+    assert_eq!(data["report_schema_version"], 5);
     assert_eq!(
         data["implementation_results"]
             .as_array()

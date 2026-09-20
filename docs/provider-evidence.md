@@ -8,7 +8,7 @@ then applies the policy threshold itself with integer cross-products.
 
 The bundle must select the same rule pack and scanner version and must pin the exact
 `input_sha256` printed by a source scan. Evidence used with `--staged` must itself be a
-regular staged Git blob. Every enabled provider-backed rule needs one unique entry with
+regular staged Git blob. Every selected active provider-backed rule needs one unique entry with
 `complete: true`, even when its observation list is empty. Missing, stale, duplicate,
 incomplete, malformed, unknown, or source-owned provider entries fail closed. Provider
 name, version, and configuration SHA-256 are retained in each finding; the report also

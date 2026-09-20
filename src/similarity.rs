@@ -514,6 +514,7 @@ mod tests {
         let captured = crate::input::working_tree(
             &workspace.root,
             &workspace.root.join("quality-policy.json"),
+            &crate::policy::SelectionOptions::default(),
         )
         .unwrap();
         let mut report = if reference {

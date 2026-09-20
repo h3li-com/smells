@@ -50,6 +50,8 @@ impl Workspace {
             ".",
             "--policy",
             "quality-policy.json",
+            "--only-group",
+            "source",
             "--format",
             "json",
         ])
@@ -72,6 +74,205 @@ impl Workspace {
             "{}",
             String::from_utf8_lossy(&result.stderr)
         );
+    }
+}
+
+#[test]
+fn starter_policies_activate_every_rule_and_default_to_all_groups() {
+    for policy in [
+        "examples/quality-policy.json",
+        "examples/python-quality-policy.json",
+        "examples/typescript-quality-policy.json",
+    ] {
+        let value: Value = serde_json::from_slice(&fs::read(policy).unwrap()).unwrap();
+        assert_eq!(value["default_groups"], json!(["all"]), "{policy}");
+        let rules = value["rules"].as_object().unwrap();
+        assert_eq!(rules.len(), 28, "{policy}");
+        assert!(
+            rules.values().all(|rule| rule["mode"] != "off"),
+            "{policy} contains an inactive rule"
+        );
+    }
+}
+
+#[test]
+fn policy_show_explains_the_resolved_all_active_policy() {
+    let output = Command::new(env!("CARGO_BIN_EXE_smells"))
+        .args([
+            "policy",
+            "show",
+            "--policy",
+            "examples/quality-policy.json",
+            "--format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let value = report(&output);
+    assert_eq!(value["status"], "resolved_policy");
+    assert_eq!(value["selection"]["default_groups"], json!(["all"]));
+    assert_eq!(
+        value["selection"]["selected_rule_ids"]
+            .as_array()
+            .unwrap()
+            .len(),
+        28
+    );
+    assert_eq!(
+        value["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|rule| rule["active"] == true)
+            .count(),
+        28
+    );
+}
+
+#[test]
+fn uv_style_group_selection_is_deterministic_and_exclusions_win() {
+    let workspace = Workspace::new("fn concise() {}");
+    for arguments in [
+        vec!["--only-group", "source"],
+        vec!["--all-groups", "--no-group", "evidence"],
+    ] {
+        let mut command = vec![
+            "check",
+            "--path",
+            ".",
+            "--policy",
+            "quality-policy.json",
+            "--format",
+            "json",
+        ];
+        command.extend(arguments);
+        let output = workspace.command(&command);
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+        let value = report(&output);
+        assert_eq!(
+            value["policy_selection"]["selected_rule_ids"]
+                .as_array()
+                .unwrap()
+                .len(),
+            17
+        );
+        assert_eq!(
+            value["policy_selection"]["excluded_rule_ids"]
+                .as_array()
+                .unwrap()
+                .len(),
+            11
+        );
+        assert!(value["coverage"].as_array().unwrap().iter().any(|smell| {
+            smell["rules"].as_array().unwrap().iter().any(|rule| {
+                rule["rule_id"] == "rust.function_crap"
+                    && rule["selected"] == false
+                    && rule["measurement_status"] == "excluded_by_group"
+            })
+        }));
+    }
+}
+
+#[test]
+fn checked_in_default_groups_are_used_until_cli_replaces_them() {
+    let workspace = Workspace::new("fn concise() {}");
+    workspace.modify("/default_groups", json!(["source"]));
+    let configured = workspace.command(&[
+        "check",
+        "--path",
+        ".",
+        "--policy",
+        "quality-policy.json",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(configured.status.code(), Some(0));
+    let configured = report(&configured);
+    assert_eq!(
+        configured["policy_selection"]["default_groups"],
+        json!(["source"])
+    );
+    assert_eq!(
+        configured["policy_selection"]["selected_rule_ids"]
+            .as_array()
+            .unwrap()
+            .len(),
+        17
+    );
+    let configured_digest = configured["input_sha256"].as_str().unwrap().to_string();
+
+    let overridden = workspace.command(&[
+        "check",
+        "--path",
+        ".",
+        "--policy",
+        "quality-policy.json",
+        "--only-group",
+        "evidence",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(overridden.status.code(), Some(2));
+    let overridden = report(&overridden);
+    assert_eq!(
+        overridden["policy_selection"]["only_groups"],
+        json!(["evidence"])
+    );
+    assert_eq!(
+        overridden["policy_selection"]["selected_rule_ids"]
+            .as_array()
+            .unwrap()
+            .len(),
+        11
+    );
+    assert_ne!(overridden["input_sha256"], configured_digest);
+}
+
+#[test]
+fn all_active_default_fails_closed_without_provider_evidence() {
+    let workspace = Workspace::new("fn concise() {}");
+    let output = workspace.command(&[
+        "check",
+        "--path",
+        ".",
+        "--policy",
+        "quality-policy.json",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(output.status.code(), Some(2));
+    let value = report(&output);
+    assert_eq!(
+        value["policy_selection"]["selected_rule_ids"]
+            .as_array()
+            .unwrap()
+            .len(),
+        28
+    );
+    assert_eq!(value["errors"].as_array().unwrap().len(), 11);
+    assert!(
+        value["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|error| { error.as_str().unwrap().contains("provider evidence") })
+    );
+}
+
+#[test]
+fn unknown_and_conflicting_group_selectors_fail_clearly() {
+    let workspace = Workspace::new("fn concise() {}");
+    for arguments in [
+        vec!["--only-group", "unknown"],
+        vec!["--only-group", "source", "--group", "evidence"],
+        vec!["--only-group", "source", "--all-groups"],
+    ] {
+        let mut command = vec!["check", "--path", ".", "--policy", "quality-policy.json"];
+        command.extend(arguments);
+        let output = workspace.command(&command);
+        assert_eq!(output.status.code(), Some(2), "{output:?}");
+        assert!(!String::from_utf8_lossy(&output.stderr).is_empty());
     }
 }
 impl Drop for Workspace {
@@ -380,7 +581,7 @@ fn report_aggregates_rule_evidence_by_canonical_smell_pattern() {
     let output = workspace.check();
     assert_eq!(output.status.code(), Some(1));
     let data = report(&output);
-    assert_eq!(data["report_schema_version"], 4);
+    assert_eq!(data["report_schema_version"], 5);
     let results = data["smell_results"].as_array().unwrap();
     assert_eq!(results.len(), 23);
     assert_eq!(results[0]["smell_id"], "long-method");
@@ -463,15 +664,17 @@ fn smell_results_distinguish_checked_disabled_and_inapplicable_patterns() {
     assert_eq!(long_method["state"], "checked_no_match_in_measured_scope");
     assert_eq!(long_method["coverage_status"], "measured_defined_scope");
     assert_eq!(long_method["pending_rule_ids"], json!([]));
+    assert_eq!(long_method["disabled_rule_ids"], json!([]));
     assert_eq!(
-        long_method["disabled_rule_ids"],
+        long_method["excluded_rule_ids"],
         json!(["rust.function_crap"])
     );
 
     let dead_code = smell_result(&data, "dead-code");
-    assert_eq!(dead_code["state"], "disabled");
-    assert_eq!(dead_code["coverage_status"], "disabled");
-    assert_eq!(dead_code["disabled_rule_ids"], json!(["rust.unused_code"]));
+    assert_eq!(dead_code["state"], "excluded");
+    assert_eq!(dead_code["coverage_status"], "excluded");
+    assert_eq!(dead_code["disabled_rule_ids"], json!([]));
+    assert_eq!(dead_code["excluded_rule_ids"], json!(["rust.unused_code"]));
 
     let refused_bequest = smell_result(&data, "refused-bequest");
     assert_eq!(refused_bequest["state"], "not_applicable");
@@ -771,6 +974,8 @@ fn staged_scan_ignores_unstaged_source_and_policy() {
         "--staged",
         "--policy",
         "quality-policy.json",
+        "--only-group",
+        "source",
         "--format",
         "json",
     ]);
@@ -819,7 +1024,17 @@ fn required_provider_detectors_error_without_complete_evidence() {
     for rule in provider_rules {
         let workspace = Workspace::new("fn f(){}");
         workspace.modify(&format!("/rules/{rule}/mode"), json!("required"));
-        let output = workspace.check();
+        let output = workspace.command(&[
+            "check",
+            "--path",
+            ".",
+            "--policy",
+            "quality-policy.json",
+            "--only-group",
+            "evidence",
+            "--format",
+            "json",
+        ]);
         assert_eq!(output.status.code(), Some(2), "{rule}");
         assert!(
             report(&output)["errors"]
@@ -965,7 +1180,9 @@ fn example_policy_contract_validation_is_not_a_source_scan() {
     let workspace = Workspace::new("fn broken(");
     let output = workspace.command(&["contracts", "validate", "--policy", "quality-policy.json"]);
     assert_eq!(output.status.code(), Some(0));
-    assert_eq!(report(&output)["status"], "valid_contracts");
+    let validated = report(&output);
+    assert_eq!(validated["status"], "valid_contracts");
+    assert_eq!(validated["active_rules"], 28);
     assert_eq!(workspace.check().status.code(), Some(2));
 }
 
@@ -1330,6 +1547,8 @@ fn opt_in_scan_metrics_explain_the_exact_join_without_changing_the_report() {
             ".",
             "--policy",
             "quality-policy.json",
+            "--only-group",
+            "source",
             "--format",
             "json",
         ])

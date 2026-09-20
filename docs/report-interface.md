@@ -2,7 +2,21 @@
 
 The JSON report is the interface between the deterministic scanner and a review agent. The scanner owns measurement and threshold evaluation. The agent owns semantic investigation and any proposed code change.
 
-`report_schema_version` is currently `4`. Version 4 adds `provider_evidence_sha256`; an empty value means no provider bundle was supplied. `input_sha256` continues to identify the captured policy, manifests, and source, while a nonempty provider digest identifies the exact supplemental evidence bytes evaluated against that input. Version 3 introduced `implementation_results` as the primary monorepo result. Each implementation contains its own canonical smell results, while the top-level `smell_results` remains the repository rollup and the rule-level `coverage` and `findings` remain the evidence. Consumers must reject unsupported versions rather than guessing field semantics.
+`report_schema_version` is currently `5`. Version 5 adds `policy_selection`, per-rule `selected`/`groups` fields, `excluded_by_group` coverage, and `excluded_rule_ids`. `input_sha256` now identifies the captured policy, resolved group selection, manifests, and source, so provider evidence cannot be replayed across different selectors. Version 4 added `provider_evidence_sha256`; an empty value means no provider bundle was supplied. A nonempty provider digest identifies the exact supplemental evidence bytes evaluated against that input. Version 3 introduced `implementation_results` as the primary monorepo result. Each implementation contains its own canonical smell results, while the top-level `smell_results` remains the repository rollup and the rule-level `coverage` and `findings` remain the evidence. Consumers must reject unsupported versions rather than guessing field semantics.
+
+## Resolved policy selection
+
+`policy_selection` records the complete uv-style group resolution: configured
+defaults, CLI inclusions, only-groups, exclusions, boolean controls, every
+available group and its members, selected/active/excluded rule IDs, and each
+rule's group memberships. `selected_rule_ids` reflects group algebra;
+`active_rule_ids` additionally removes any rule whose explicit legacy mode is
+`off`. The shipped policies contain no `off` rules, so their default `all`
+selection reports 28 selected and 28 active rules.
+
+Every rule inside `coverage` repeats `selected` and `groups`. A rule excluded by
+the resolved selection has `measurement_status: "excluded_by_group"`; this is
+distinct from `disabled`, and neither status is a passing measurement.
 
 ## Repository implementation model
 
@@ -47,19 +61,20 @@ A cross-implementation finding, such as duplicate code between two packages, is 
 
 Every implementation's `smell_results` is its primary smell result. The top-level collection is the repository rollup. Both contain exactly one entry for each of the 23 canonical Refactoring.Guru smell patterns, in registry order. A smell can have several deterministic rules; these collections aggregate their outcomes without treating the rule machinery as separate user-facing smells.
 
-Each entry contains the canonical `smell_id`, display `smell`, `category`, `reference_url`, language `applicability`, aggregate `state`, and `coverage_status`. Its counts distinguish matched required findings from report-only review signals. `measured_rule_ids`, `matched_rule_ids`, `pending_rule_ids`, `disabled_rule_ids`, and `incomplete_rule_ids` explain which detectors contributed. `affected_files` and `affected_symbols` count unique primary and related evidence locations. `matched_finding_indices` contains zero-based indexes into the top-level `findings` array, so an agent can move from the smell-level result to the exact lines, measurements, thresholds, evidence, and guidance without duplicating findings.
+Each entry contains the canonical `smell_id`, display `smell`, `category`, `reference_url`, language `applicability`, aggregate `state`, and `coverage_status`. Its counts distinguish matched required findings from report-only review signals. `measured_rule_ids`, `matched_rule_ids`, `pending_rule_ids`, `disabled_rule_ids`, `excluded_rule_ids`, and `incomplete_rule_ids` explain which detectors contributed. `affected_files` and `affected_symbols` count unique primary and related evidence locations. `matched_finding_indices` contains zero-based indexes into the top-level `findings` array, so an agent can move from the smell-level result to the exact lines, measurements, thresholds, evidence, and guidance without duplicating findings.
 
 The closed `state` values are:
 
 - `blocking_match`: at least one required rule matched.
 - `review_match`: no required rule matched, but at least one report-only rule matched.
-- `checked_no_match_in_measured_scope`: at least one implemented enabled rule completed and none matched. This never claims that the semantic smell is absent.
+- `checked_no_match_in_measured_scope`: at least one implemented selected active rule completed and none matched. This never claims that the semantic smell is absent.
 - `pending`: reserved for a future rule pack that registers an unavailable detector; all v1 rules now have source or provider evaluators.
+- `excluded`: every registered implemented detector was excluded by resolved policy groups.
 - `disabled`: every registered implemented detector is disabled by policy.
 - `not_applicable`: the canonical smell does not apply to the selected language model.
 - `error`: measurement was incomplete. Do not infer absence or continue as if the check passed.
 
-`coverage_status` independently states whether the smell was `measured_defined_scope`, `measured_with_pending_rules`, `pending`, `disabled`, `not_applicable`, or `incomplete`. In the v1 packs, an enabled provider-backed rule without complete pinned evidence is `incomplete`, never pending or passed. The deterministic source match remains valid evidence, but it is not complete semantic coverage unless every enabled provider rule also completed.
+`coverage_status` independently states whether the smell was `measured_defined_scope`, `measured_with_pending_rules`, `pending`, `excluded`, `disabled`, `not_applicable`, or `incomplete`. In the v1 packs, a selected active provider-backed rule without complete pinned evidence is `incomplete`, never pending or passed. The deterministic source match remains valid evidence, but it is not complete semantic coverage unless every selected provider rule also completed.
 
 Every smell result repeats the canonical URL and `reference_check`. For a matched smell, the consuming agent must open that exact URL before reviewing any referenced finding. The detailed finding retains rule-specific guidance and the same non-negotiable research gate.
 
@@ -91,6 +106,7 @@ Every smell result repeats the canonical URL and `reference_check`. For a matche
   "matched_rule_ids": ["rust.type_fields", "rust.type_function_lines", "rust.type_functions"],
   "pending_rule_ids": [],
   "disabled_rule_ids": [],
+  "excluded_rule_ids": [],
   "incomplete_rule_ids": [],
   "matched_finding_indices": [0, 1, 2]
 }

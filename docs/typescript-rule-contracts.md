@@ -1,6 +1,6 @@
 # Deterministic TypeScript patterns — typescript-v1
 
-This is the normative contract for `typescript-v1`. It maps the exact 23-item Refactoring.Guru catalog to 28 deterministic rules. Ten rules are measured directly from authored source; 18 type-, contract-, compiler-, coverage-, or history-dependent rules use the complete pinned [provider-evidence contract](provider-evidence.md). An enabled provider rule without valid complete evidence is an error, never a pass.
+This is the normative contract for `typescript-v1`. It maps the exact 23-item Refactoring.Guru catalog to 28 deterministic rules. Ten rules are measured directly from authored source; 18 type-, contract-, compiler-, coverage-, or history-dependent rules use the complete pinned [provider-evidence contract](provider-evidence.md). A selected active provider rule without valid complete evidence is an error, never a pass.
 
 ## Shared source contract
 

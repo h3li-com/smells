@@ -51,6 +51,30 @@ pub enum Mode {
     Off,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct SelectionOptions {
+    pub included_groups: Vec<String>,
+    pub only_groups: Vec<String>,
+    pub excluded_groups: Vec<String>,
+    pub all_groups: bool,
+    pub no_default_groups: bool,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct ResolvedSelection {
+    pub default_groups: Vec<String>,
+    pub included_groups: Vec<String>,
+    pub only_groups: Vec<String>,
+    pub excluded_groups: Vec<String>,
+    pub all_groups: bool,
+    pub no_default_groups: bool,
+    pub available_groups: BTreeMap<String, Vec<String>>,
+    pub selected_rule_ids: Vec<String>,
+    pub active_rule_ids: Vec<String>,
+    pub excluded_rule_ids: Vec<String>,
+    pub rule_groups: BTreeMap<String, Vec<String>>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Selection {
@@ -75,11 +99,19 @@ pub struct Policy {
     pub rule_pack: String,
     pub scanner_version: String,
     pub scope: String,
+    #[serde(default = "all_default_groups")]
+    pub default_groups: Vec<String>,
     pub exclude_directories: Vec<String>,
     pub limits: Limits,
     #[serde(deserialize_with = "unique_map")]
     pub rules: BTreeMap<String, Selection>,
     pub exceptions: Vec<serde_json::Value>,
+    #[serde(skip)]
+    pub resolved: ResolvedSelection,
+}
+
+fn all_default_groups() -> Vec<String> {
+    vec!["all".into()]
 }
 
 struct UniqueMapVisitor<T>(std::marker::PhantomData<T>);
@@ -368,6 +400,193 @@ fn validate_selected_rules(policy: &Policy, registry: &Registry) -> Result<(), S
     Ok(())
 }
 
+fn group_definitions(registry: &Registry) -> BTreeMap<String, BTreeSet<String>> {
+    let mut groups: BTreeMap<String, BTreeSet<String>> = BTreeMap::from([
+        ("all".into(), BTreeSet::new()),
+        ("source".into(), BTreeSet::new()),
+        ("evidence".into(), BTreeSet::new()),
+    ]);
+    for smell in &registry.smells {
+        groups.entry(smell.category.clone()).or_default();
+    }
+    for rule in &registry.rules {
+        groups.get_mut("all").unwrap().insert(rule.id.clone());
+        let evaluator_group = if rule.inputs.iter().any(|input| input == "authored_source") {
+            "source"
+        } else {
+            "evidence"
+        };
+        groups
+            .get_mut(evaluator_group)
+            .unwrap()
+            .insert(rule.id.clone());
+        let category = &registry
+            .smells
+            .iter()
+            .find(|smell| smell.id == rule.smell)
+            .expect("validated smell mapping")
+            .category;
+        groups
+            .get_mut(category)
+            .expect("registered category group")
+            .insert(rule.id.clone());
+    }
+    groups
+}
+
+fn unique_groups(values: &[String], label: &str) -> Result<BTreeSet<String>, String> {
+    let set: BTreeSet<_> = values.iter().cloned().collect();
+    if set.len() != values.len() {
+        return Err(format!("duplicate {label} selector"));
+    }
+    Ok(set)
+}
+
+fn validate_group_names(
+    names: &BTreeSet<String>,
+    groups: &BTreeMap<String, BTreeSet<String>>,
+) -> Result<(), String> {
+    for name in names {
+        if !groups.contains_key(name) {
+            return Err(format!("unknown policy group: {name}"));
+        }
+    }
+    Ok(())
+}
+
+fn add_group_rules(
+    selected: &mut BTreeSet<String>,
+    names: &BTreeSet<String>,
+    groups: &BTreeMap<String, BTreeSet<String>>,
+) {
+    for name in names {
+        selected.extend(groups[name].iter().cloned());
+    }
+}
+
+struct NamedGroupSelection {
+    defaults: BTreeSet<String>,
+    included: BTreeSet<String>,
+    only: BTreeSet<String>,
+    excluded: BTreeSet<String>,
+}
+
+fn validate_selection_options(options: &SelectionOptions) -> Result<(), String> {
+    if !options.only_groups.is_empty()
+        && (!options.included_groups.is_empty() || options.all_groups || options.no_default_groups)
+    {
+        return Err(
+            "--only-group conflicts with --group, --all-groups, and --no-default-groups".into(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_named_group_selection(
+    selection: &NamedGroupSelection,
+    groups: &BTreeMap<String, BTreeSet<String>>,
+) -> Result<(), String> {
+    if selection.defaults.is_empty() {
+        return Err("default_groups must select at least one policy group".into());
+    }
+    for names in [
+        &selection.defaults,
+        &selection.included,
+        &selection.only,
+        &selection.excluded,
+    ] {
+        validate_group_names(names, groups)?;
+    }
+    Ok(())
+}
+
+fn normalized_group_selection(
+    policy: &Policy,
+    options: &SelectionOptions,
+    groups: &BTreeMap<String, BTreeSet<String>>,
+) -> Result<NamedGroupSelection, String> {
+    validate_selection_options(options)?;
+    let selection = NamedGroupSelection {
+        defaults: unique_groups(&policy.default_groups, "default group")?,
+        included: unique_groups(&options.included_groups, "--group")?,
+        only: unique_groups(&options.only_groups, "--only-group")?,
+        excluded: unique_groups(&options.excluded_groups, "--no-group")?,
+    };
+    validate_named_group_selection(&selection, groups)?;
+    Ok(selection)
+}
+
+fn selected_rules(
+    selection: &NamedGroupSelection,
+    options: &SelectionOptions,
+    groups: &BTreeMap<String, BTreeSet<String>>,
+) -> BTreeSet<String> {
+    let mut selected = BTreeSet::new();
+    if !selection.only.is_empty() {
+        add_group_rules(&mut selected, &selection.only, groups);
+    } else {
+        if !options.no_default_groups {
+            add_group_rules(&mut selected, &selection.defaults, groups);
+        }
+        if options.all_groups {
+            selected.extend(groups["all"].iter().cloned());
+        }
+        add_group_rules(&mut selected, &selection.included, groups);
+    }
+    let mut removed = BTreeSet::new();
+    add_group_rules(&mut removed, &selection.excluded, groups);
+    selected.retain(|rule| !removed.contains(rule));
+    selected
+}
+
+fn rule_group_memberships(
+    all: &BTreeSet<String>,
+    groups: &BTreeMap<String, BTreeSet<String>>,
+) -> BTreeMap<String, Vec<String>> {
+    all.iter()
+        .map(|rule| {
+            let memberships = groups
+                .iter()
+                .filter(|(_, rules)| rules.contains(rule))
+                .map(|(name, _)| name.clone())
+                .collect();
+            (rule.clone(), memberships)
+        })
+        .collect()
+}
+
+fn resolve_selection(
+    policy: &Policy,
+    registry: &Registry,
+    options: &SelectionOptions,
+) -> Result<ResolvedSelection, String> {
+    let groups = group_definitions(registry);
+    let names = normalized_group_selection(policy, options, &groups)?;
+    let selected = selected_rules(&names, options, &groups);
+    let all = &groups["all"];
+    let active: Vec<_> = selected
+        .iter()
+        .filter(|rule| policy.rules[*rule].mode != Mode::Off)
+        .cloned()
+        .collect();
+    Ok(ResolvedSelection {
+        default_groups: names.defaults.into_iter().collect(),
+        included_groups: names.included.into_iter().collect(),
+        only_groups: names.only.into_iter().collect(),
+        excluded_groups: names.excluded.into_iter().collect(),
+        all_groups: options.all_groups,
+        no_default_groups: options.no_default_groups,
+        available_groups: groups
+            .iter()
+            .map(|(name, rules)| (name.clone(), rules.iter().cloned().collect()))
+            .collect(),
+        selected_rule_ids: selected.iter().cloned().collect(),
+        active_rule_ids: active,
+        excluded_rule_ids: all.difference(&selected).cloned().collect(),
+        rule_groups: rule_group_memberships(all, &groups),
+    })
+}
+
 fn invalid_parameter(name: &str, value: u64) -> bool {
     (name.contains("percent") && value > 100)
         || (name.contains("basis_points") && value > 10_000)
@@ -392,20 +611,39 @@ fn validate_rule_parameters(policy: &Policy, registry: &Registry) -> Result<(), 
     Ok(())
 }
 
-pub fn parse(bytes: &str, registry: &Registry) -> Result<Policy, String> {
-    let policy: Policy = serde_json::from_str(bytes).map_err(|e| format!("invalid policy: {e}"))?;
+pub fn parse_with_selection(
+    bytes: &str,
+    registry: &Registry,
+    options: &SelectionOptions,
+) -> Result<Policy, String> {
+    let mut policy: Policy =
+        serde_json::from_str(bytes).map_err(|e| format!("invalid policy: {e}"))?;
     validate_policy_header(&policy, registry)?;
     validate_scope(&policy, registry)?;
     validate_budgets_and_exceptions(&policy)?;
     validate_exclusions(&policy)?;
     validate_selected_rules(&policy, registry)?;
     validate_rule_parameters(&policy, registry)?;
+    policy.resolved = resolve_selection(&policy, registry, options)?;
     Ok(policy)
 }
 
+pub fn parse(bytes: &str, registry: &Registry) -> Result<Policy, String> {
+    parse_with_selection(bytes, registry, &SelectionOptions::default())
+}
+
 impl Policy {
+    pub fn selected(&self, id: &str) -> bool {
+        self.resolved
+            .selected_rule_ids
+            .binary_search_by(|rule| rule.as_str().cmp(id))
+            .is_ok()
+    }
     pub fn enabled(&self, id: &str) -> bool {
-        self.rules[id].mode != Mode::Off
+        self.resolved
+            .active_rule_ids
+            .binary_search_by(|rule| rule.as_str().cmp(id))
+            .is_ok()
     }
     pub fn required(&self, id: &str) -> bool {
         self.rules[id].mode == Mode::Required

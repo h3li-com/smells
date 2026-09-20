@@ -16,12 +16,13 @@ use std::{
     process::ExitCode,
 };
 
-const USAGE: &str = "smells check (--path DIR | --staged) --policy FILE [--evidence FILE] [--format table|json]\nsmells contracts validate --policy FILE\nsmells rules [--rule-pack rust-v1|python-v1|typescript-v1]";
+const USAGE: &str = "smells check (--path DIR | --staged) --policy FILE [--evidence FILE] [--format table|json] [policy group selectors]\nsmells policy show --policy FILE [--format table|json] [policy group selectors]\nsmells contracts validate --policy FILE\nsmells rules [--rule-pack rust-v1|python-v1|typescript-v1]\n\npolicy group selectors: --group NAME | --only-group NAME | --all-groups | --no-default-groups | --no-group NAME";
 
 enum Command {
     Help,
     Rules(String),
     Validate(PathBuf),
+    Show(ShowOptions),
     Check(CheckOptions),
 }
 
@@ -31,6 +32,13 @@ struct CheckOptions {
     evidence_path: Option<PathBuf>,
     format: Option<String>,
     staged: bool,
+    selection: policy::SelectionOptions,
+}
+
+struct ShowOptions {
+    policy_path: PathBuf,
+    format: Option<String>,
+    selection: policy::SelectionOptions,
 }
 
 #[derive(Default)]
@@ -40,6 +48,7 @@ struct PendingOptions {
     evidence_path: Option<PathBuf>,
     format: Option<String>,
     staged: bool,
+    selection: policy::SelectionOptions,
 }
 
 fn rules_command(args: &[String]) -> Result<Command, String> {
@@ -91,27 +100,43 @@ fn operation_command(args: &[String], contracts: bool) -> Result<Command, String
     let mut index = if contracts { 2 } else { 1 };
     let mut options = PendingOptions::default();
     while index < args.len() {
-        let flag = &args[index];
-        if flag == "--staged" && !contracts && !options.staged {
-            options.staged = true;
-            index += 1;
-            continue;
-        }
-        let value = args
-            .get(index + 1)
-            .ok_or_else(|| format!("missing value for {flag}"))?;
-        set_option(
-            flag,
-            value,
-            contracts,
-            &mut options.source,
-            &mut options.policy_path,
-            &mut options.evidence_path,
-            &mut options.format,
-        )?;
-        index += 2;
+        consume_operation_option(args, &mut index, contracts, &mut options)?;
     }
     finish_operation(options, contracts)
+}
+
+fn consume_operation_option(
+    args: &[String],
+    index: &mut usize,
+    contracts: bool,
+    options: &mut PendingOptions,
+) -> Result<(), String> {
+    let flag = &args[*index];
+    if flag == "--staged" {
+        if contracts || options.staged {
+            return Err(format!("unknown, repeated or invalid option: {flag}"));
+        }
+        options.staged = true;
+        *index += 1;
+        return Ok(());
+    }
+    if !contracts && selection_flag(args, index, &mut options.selection)? {
+        return Ok(());
+    }
+    let value = args
+        .get(*index + 1)
+        .ok_or_else(|| format!("missing value for {flag}"))?;
+    set_option(
+        flag,
+        value,
+        contracts,
+        &mut options.source,
+        &mut options.policy_path,
+        &mut options.evidence_path,
+        &mut options.format,
+    )?;
+    *index += 2;
+    Ok(())
 }
 
 fn finish_operation(options: PendingOptions, contracts: bool) -> Result<Command, String> {
@@ -128,7 +153,111 @@ fn finish_operation(options: PendingOptions, contracts: bool) -> Result<Command,
         evidence_path: options.evidence_path,
         format: options.format,
         staged: options.staged,
+        selection: options.selection,
     }))
+}
+
+fn selection_flag(
+    args: &[String],
+    index: &mut usize,
+    selection: &mut policy::SelectionOptions,
+) -> Result<bool, String> {
+    if group_selection_flag(args, index, selection)? {
+        return Ok(true);
+    }
+    boolean_selection_flag(args, index, selection)
+}
+
+fn group_selection_flag(
+    args: &[String],
+    index: &mut usize,
+    selection: &mut policy::SelectionOptions,
+) -> Result<bool, String> {
+    let flag = &args[*index];
+    let target = match flag.as_str() {
+        "--group" => Some(&mut selection.included_groups),
+        "--only-group" => Some(&mut selection.only_groups),
+        "--no-group" => Some(&mut selection.excluded_groups),
+        _ => None,
+    };
+    if let Some(target) = target {
+        let value = args
+            .get(*index + 1)
+            .ok_or_else(|| format!("missing value for {flag}"))?;
+        if value.starts_with('-') || value.is_empty() {
+            return Err(format!("invalid value for {flag}"));
+        }
+        target.push(value.clone());
+        *index += 2;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+fn boolean_selection_flag(
+    args: &[String],
+    index: &mut usize,
+    selection: &mut policy::SelectionOptions,
+) -> Result<bool, String> {
+    let flag = &args[*index];
+    let boolean = match flag.as_str() {
+        "--all-groups" => Some(&mut selection.all_groups),
+        "--no-default-groups" => Some(&mut selection.no_default_groups),
+        _ => None,
+    };
+    if let Some(target) = boolean {
+        if *target {
+            return Err(format!("repeated option: {flag}"));
+        }
+        *target = true;
+        *index += 1;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+fn show_command(args: &[String]) -> Result<Command, String> {
+    let mut index = 2;
+    let mut policy_path = None;
+    let mut format = None;
+    let mut selection = policy::SelectionOptions::default();
+    while index < args.len() {
+        consume_show_option(
+            args,
+            &mut index,
+            &mut policy_path,
+            &mut format,
+            &mut selection,
+        )?;
+    }
+    Ok(Command::Show(ShowOptions {
+        policy_path: policy_path.ok_or("--policy is required")?,
+        format,
+        selection,
+    }))
+}
+
+fn consume_show_option(
+    args: &[String],
+    index: &mut usize,
+    policy_path: &mut Option<PathBuf>,
+    format: &mut Option<String>,
+    selection: &mut policy::SelectionOptions,
+) -> Result<(), String> {
+    if selection_flag(args, index, selection)? {
+        return Ok(());
+    }
+    let flag = &args[*index];
+    let value = args
+        .get(*index + 1)
+        .ok_or_else(|| format!("missing value for {flag}"))?;
+    match flag.as_str() {
+        "--policy" => set_once(policy_path, PathBuf::from(value), true, flag)?,
+        "--format" => set_format(format, value, false, flag)?,
+        _ => return Err(format!("unknown, repeated or invalid option: {flag}")),
+    }
+    *index += 2;
+    Ok(())
 }
 
 fn command(args: &[String]) -> Result<Command, String> {
@@ -137,6 +266,9 @@ fn command(args: &[String]) -> Result<Command, String> {
     }
     if args[0] == "rules" {
         return rules_command(args);
+    }
+    if args.starts_with(&["policy".into(), "show".into()]) {
+        return show_command(args);
     }
     let contracts = args.starts_with(&["contracts".into(), "validate".into()]);
     if !contracts && args[0] != "check" {
@@ -148,24 +280,95 @@ fn command(args: &[String]) -> Result<Command, String> {
 fn validate_contracts(policy_path: &PathBuf) -> Result<u8, String> {
     let text = fs::read_to_string(policy_path).map_err(|e| format!("cannot read policy: {e}"))?;
     let registry = policy::registry_for_policy(&text)?;
-    let _policy = policy::parse(&text, &registry)?;
+    let policy = policy::parse(&text, &registry)?;
     let implemented = registry
         .rules
         .iter()
         .filter(|rule| rule.implementation == "implemented")
         .count();
     println!(
-        "{{\"status\":\"valid_contracts\",\"smells\":{},\"rules\":{},\"implemented_rules\":{implemented}}}",
+        "{{\"status\":\"valid_contracts\",\"smells\":{},\"rules\":{},\"implemented_rules\":{implemented},\"active_rules\":{}}}",
         registry.smells.len(),
-        registry.rules.len()
+        registry.rules.len(),
+        policy.resolved.active_rule_ids.len()
     );
+    Ok(0)
+}
+
+fn show_policy(options: ShowOptions) -> Result<u8, String> {
+    let text = fs::read_to_string(&options.policy_path)
+        .map_err(|error| format!("cannot read policy: {error}"))?;
+    let registry = policy::registry_for_policy(&text)?;
+    let policy = policy::parse_with_selection(&text, &registry, &options.selection)?;
+    let rules: Vec<_> = registry
+        .rules
+        .iter()
+        .map(|rule| {
+            serde_json::json!({
+                "rule_id": rule.id,
+                "smell_id": rule.smell,
+                "kind": rule.kind,
+                "mode": policy.rules[&rule.id].mode,
+                "selected": policy.selected(&rule.id),
+                "active": policy.enabled(&rule.id),
+                "groups": policy.resolved.rule_groups[&rule.id],
+                "required_inputs": rule.inputs,
+                "parameters": policy.rules[&rule.id].parameters,
+            })
+        })
+        .collect();
+    if options.format.as_deref() == Some("json") {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "status": "resolved_policy",
+                "policy_path": options.policy_path,
+                "policy_schema_version": policy.schema_version,
+                "rule_pack": registry.rule_pack,
+                "language": registry.language,
+                "scanner_version": policy.scanner_version,
+                "selection": policy.resolved,
+                "rules": rules,
+            }))
+            .map_err(|error| error.to_string())?
+        );
+    } else {
+        println!(
+            "Resolved policy: {} ({} / {})",
+            options.policy_path.display(),
+            registry.rule_pack,
+            registry.language
+        );
+        println!(
+            "Active rules: {}/{} | defaults: {}",
+            policy.resolved.active_rule_ids.len(),
+            registry.rules.len(),
+            policy.resolved.default_groups.join(",")
+        );
+        println!("Rule | Mode | Selected | Groups");
+        for rule in rules {
+            println!(
+                "{} | {} | {} | {}",
+                rule["rule_id"].as_str().unwrap(),
+                rule["mode"].as_str().unwrap(),
+                rule["selected"].as_bool().unwrap(),
+                rule["groups"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|group| group.as_str().unwrap())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            );
+        }
+    }
     Ok(0)
 }
 
 fn capture(options: &CheckOptions) -> Result<(input::CapturedInput, Option<Vec<u8>>), String> {
     let captured = match &options.source {
         Some(source) => {
-            let captured = input::working_tree(source, &options.policy_path)?;
+            let captured = input::working_tree(source, &options.policy_path, &options.selection)?;
             let evidence = options
                 .evidence_path
                 .as_ref()
@@ -176,9 +379,11 @@ fn capture(options: &CheckOptions) -> Result<(input::CapturedInput, Option<Vec<u
                 .transpose()?;
             (captured, evidence)
         }
-        None if options.staged => {
-            input::staged(&options.policy_path, options.evidence_path.as_deref())?
-        }
+        None if options.staged => input::staged(
+            &options.policy_path,
+            options.evidence_path.as_deref(),
+            &options.selection,
+        )?,
         None => return Err("select exactly one of --staged and --path".into()),
     };
     Ok(captured)
@@ -270,6 +475,7 @@ fn run() -> Result<u8, String> {
             Ok(0)
         }
         Command::Validate(policy_path) => validate_contracts(&policy_path),
+        Command::Show(options) => show_policy(options),
         Command::Check(options) => check(options),
     }
 }

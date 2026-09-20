@@ -2,9 +2,9 @@
 
 ## Policy and scope
 
-Each project owns a checked-in policy. Schema v2 selects exactly one of `rust-v1`, `python-v1`, or `typescript-v1` and pins scanner 0.1.0, with explicit version, mode, and every parameter for all 28 rules. A mixed-language repository uses one policy and one scanner invocation per language pack; this keeps each input corpus and threshold contract explicit. Version-1 specification policies are rejected rather than silently migrated.
+Each project owns a checked-in policy. Schema v2 selects exactly one of `rust-v1`, `python-v1`, or `typescript-v1` and pins scanner 0.1.0, with explicit version, mode, and every parameter for all 28 rules. `default_groups` controls the persistent selection; the starter policies use `all`. A mixed-language repository uses one policy and one scanner invocation per language pack; this keeps each input corpus and threshold contract explicit. Version-1 specification policies are rejected rather than silently migrated.
 
-Modes are required, report and off. Required matches block; report matches remain reproducible indicators; off is disabled, not passed. The Rust example enables 7 required size rules and 10 report-only structural rules. The Python and TypeScript examples enable 5 required size rules and 5 report-only structural rules. Provider-backed rules are off in the examples. Enabling one requires a complete bundle tied to the exact scan input; otherwise the scan errors.
+Modes are required, report and off. Required matches block; report matches remain reproducible indicators; off is a legacy/custom-policy opt-out and is disabled, not passed. Every starter rule is required or report and therefore active. The `all` default selects every rule; a selected provider-backed rule requires a complete bundle tied to the exact resolved scan input, otherwise the scan errors. Use `--only-group source` when the intended contract is explicitly source-only.
 
 Rust implements `authored_all_cfg`, including tests and inactive branches. Python and TypeScript implement `authored_source`. Each parses all included source text, not a selected compiled target. Exclusions are explicit directory names applied at every depth and reported. No active-production configuration, type information, macro/decorator expansion, target/features, or compiler evidence is guessed. Use the scanner alongside actual compilation, type checking, and tests.
 
@@ -17,16 +17,26 @@ Repository implementations are discovered from the nearest ancestor `Cargo.toml`
 ```text
 smells rules [--rule-pack rust-v1|python-v1|typescript-v1]
 smells contracts validate --policy FILE
-smells check --path DIRECTORY --policy FILE [--evidence FILE] [--format table|json]
-smells check --staged --policy FILE [--evidence FILE] [--format table|json]
+smells policy show --policy FILE [--format table|json] [group selectors]
+smells check --path DIRECTORY --policy FILE [--evidence FILE] [--format table|json] [group selectors]
+smells check --staged --policy FILE [--evidence FILE] [--format table|json] [group selectors]
 ```
+
+Group selectors are repeatable `--group NAME`, repeatable `--only-group NAME`,
+`--all-groups`, `--no-default-groups`, and repeatable `--no-group NAME`.
+Configured defaults are applied first, additions next, and exclusions last.
+`--only-group` replaces defaults and conflicts with positive/default controls;
+`--no-group` always wins. Available groups are `all`, `source`, `evidence`, and
+the five canonical Refactoring.Guru categories. Unknown, duplicate, or
+conflicting selectors fail closed. `policy show` exposes the exact resolved rule
+set before a scan.
 
 - Exactly one of --path and --staged is required for a source check. Worktree policy paths are caller-relative or absolute; the policy is a separate captured input. Validation checks policy structure, not source or detector readiness. Its successful status is valid_contracts, not a smell-scan pass.
 - --path recursively captures only the selected pack's extensions: `.rs`; `.py`/`.pyi`; or `.ts`/`.tsx`/`.mts`/`.cts`, plus the fixed runtime manifests used for implementation ownership. It excludes configured directory names and never follows symlinks. A symlink whose path has a selected source extension or runtime-manifest name is rejected; other symlinks are skipped because they cannot enter that language corpus. It errors on unreadable/empty source input. Worktree capture is not an atomic filesystem transaction; its report refers to the captured bytes, not an unstaged commit guarantee.
 - --staged operates on the current Git repository's root. Its policy path is root-relative, without absolute, dot or escaping components. It reads source, runtime manifests, and policy directly from regular staged blobs, not from the working tree. It checks the index listing before/after capture and rejects concurrent index changes, unmerged entries, symlink source/policy/manifest and absent staged policy. Submodule contents are not traversed as part of the superproject's source corpus.
-- Both source modes emit report schema v4 with the same metric schema, input/provider/implementation digests, repository-relative `implementation_results`, 23 canonically ordered repository `smell_results`, 23-item coverage inventory and sorted findings. Hooks should route by implementation and then smell-level state before following `matched_finding_indices` to exact rule evidence and 1-based line/UTF-8-character-column locations. Unavailable rules have explicit coverage status; no semantic smell is labeled absent from a structural pass.
+- Both source modes emit report schema v5 with the same metric schema, resolved `policy_selection`, input/provider/implementation digests, repository-relative `implementation_results`, 23 canonically ordered repository `smell_results`, 23-item coverage inventory and sorted findings. Each rule records whether it was selected and which groups contain it. Hooks should route by implementation and then smell-level state before following `matched_finding_indices` to exact rule evidence and 1-based line/UTF-8-character-column locations. Excluded and unavailable rules have explicit coverage status; no semantic smell is labeled absent from a structural pass.
 - Exit 0: configured required checks completed and passed. Exit 1: at least one blocking match. Exit 2: input/configuration/parser/budget/ownership/required-detector error. Errors outrank violations. Input/configuration failures before a report exists are printed to stderr with exit 2; a captured-source scan reports errors in JSON when requested.
-- Exact exceptions, automatic provider execution, and source active-cfg selection remain outside the scanner. Provider evidence manifests are validated through `--evidence`; nonempty exceptions, unknown fields/rules/parameters or unsupported versions/scope are rejected. Source allows do not change independent size-rule verdicts.
+- Exact exceptions, automatic provider execution, and source active-cfg selection remain outside the scanner. Provider evidence manifests are validated through `--evidence`; nonempty exceptions, unknown fields/groups/rules/parameters or unsupported versions/scope are rejected. Source allows do not change independent size-rule verdicts.
 
 ## Hook composition
 

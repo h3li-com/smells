@@ -26,6 +26,15 @@
     "scope": {
       "const": "authored_source"
     },
+    "default_groups": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "enum": ["all", "source", "evidence", "bloaters", "object-orientation-abusers", "change-preventers", "dispensables", "couplers"]
+      },
+      "default": ["all"]
+    },
     "exclude_directories": {
       "type": "array",
       "uniqueItems": true,

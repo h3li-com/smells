@@ -3,6 +3,7 @@
   "rule_pack": "python-v1",
   "scanner_version": "0.1.0",
   "scope": "authored_source",
+  "default_groups": ["all"],
   "exclude_directories": [
     ".cache",
     ".git",
@@ -62,7 +63,7 @@
     },
     "python.primitive_slots": {
       "version": 1,
-      "mode": "off",
+      "mode": "report",
       "parameters": {
         "minimum_raw_slots": 5,
         "minimum_share_percent": 80
@@ -78,7 +79,7 @@
     },
     "python.alternative_interfaces": {
       "version": 1,
-      "mode": "off",
+      "mode": "report",
       "parameters": {
         "minimum_similarity_basis_points": 8200,
         "minimum_tokens": 20
@@ -86,7 +87,7 @@
     },
     "python.repeated_dispatch": {
       "version": 1,
-      "mode": "off",
+      "mode": "report",
       "parameters": {
         "minimum_sites": 3,
         "minimum_arms": 4
@@ -94,7 +95,7 @@
     },
     "python.temporary_fields": {
       "version": 1,
-      "mode": "off",
+      "mode": "report",
       "parameters": {
         "minimum_fields": 3,
         "minimum_methods": 4,
@@ -136,7 +137,7 @@
     },
     "python.forwarding_share": {
       "version": 1,
-      "mode": "off",
+      "mode": "report",
       "parameters": {
         "minimum_methods": 5,
         "minimum_share_percent": 80
@@ -144,42 +145,42 @@
     },
     "python.function_crap": {
       "version": 1,
-      "mode": "off",
+      "mode": "report",
       "parameters": {
         "maximum": 5
       }
     },
     "python.unused_code": {
       "version": 1,
-      "mode": "off",
+      "mode": "report",
       "parameters": {
         "maximum_findings": 0
       }
     },
     "python.unused_type_parameters": {
       "version": 1,
-      "mode": "off",
+      "mode": "report",
       "parameters": {
         "maximum_findings": 0
       }
     },
     "python.nominal_slot_contract": {
       "version": 1,
-      "mode": "off",
+      "mode": "report",
       "parameters": {
         "maximum_mismatches": 0
       }
     },
     "python.port_conformance": {
       "version": 1,
-      "mode": "off",
+      "mode": "report",
       "parameters": {
         "maximum_failures": 0
       }
     },
     "python.refused_bequest": {
       "version": 1,
-      "mode": "off",
+      "mode": "report",
       "parameters": {
         "minimum_inherited_members": 3,
         "minimum_unused_percent": 80
@@ -187,7 +188,7 @@
     },
     "python.divergent_change": {
       "version": 1,
-      "mode": "off",
+      "mode": "report",
       "parameters": {
         "minimum_changes": 3,
         "minimum_responsibilities": 3
@@ -195,21 +196,21 @@
     },
     "python.parallel_inheritance": {
       "version": 1,
-      "mode": "off",
+      "mode": "report",
       "parameters": {
         "minimum_parallel_pairs": 3
       }
     },
     "python.shotgun_surgery": {
       "version": 1,
-      "mode": "off",
+      "mode": "report",
       "parameters": {
         "maximum_owners": 3
       }
     },
     "python.foreign_accesses": {
       "version": 1,
-      "mode": "off",
+      "mode": "report",
       "parameters": {
         "minimum_foreign_accesses": 5,
         "minimum_share_percent_exclusive": 60
@@ -217,21 +218,21 @@
     },
     "python.dependency_contract": {
       "version": 1,
-      "mode": "off",
+      "mode": "report",
       "parameters": {
         "maximum_forbidden_accesses": 0
       }
     },
     "python.library_capabilities": {
       "version": 1,
-      "mode": "off",
+      "mode": "report",
       "parameters": {
         "maximum_failures": 0
       }
     },
     "python.navigation_chains": {
       "version": 1,
-      "mode": "off",
+      "mode": "report",
       "parameters": {
         "minimum_transitions": 3
       }

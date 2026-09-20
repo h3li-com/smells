@@ -1,4 +1,4 @@
-use crate::policy::{Policy, Registry};
+use crate::policy::{Policy, Registry, SelectionOptions};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -250,8 +250,13 @@ fn snapshot_digest(
     files: &BTreeMap<String, String>,
     manifests: &BTreeMap<String, String>,
     policy: &str,
+    resolved_selection: &[u8],
 ) -> String {
-    let mut parts = vec![policy.as_bytes()];
+    let mut parts = vec![
+        policy.as_bytes(),
+        b"resolved_policy_selection",
+        resolved_selection,
+    ];
     for (path, source) in manifests {
         parts.push(b"runtime_manifest");
         parts.push(path.as_bytes());
@@ -265,7 +270,11 @@ fn snapshot_digest(
     digest(&parts)
 }
 
-pub fn working_tree(root: &Path, policy_path: &Path) -> Result<CapturedInput, String> {
+pub fn working_tree(
+    root: &Path,
+    policy_path: &Path,
+    selection: &SelectionOptions,
+) -> Result<CapturedInput, String> {
     let root = fs::canonicalize(root).map_err(|e| format!("cannot open source root: {e}"))?;
     if !root.is_dir() {
         return Err("--path must be a source directory".into());
@@ -275,7 +284,7 @@ pub fn working_tree(root: &Path, policy_path: &Path) -> Result<CapturedInput, St
         "policy",
     )?;
     let registry = crate::policy::registry_for_policy(&policy_text)?;
-    let policy = crate::policy::parse(&policy_text, &registry)?;
+    let policy = crate::policy::parse_with_selection(&policy_text, &registry, selection)?;
     let mut files = BTreeMap::new();
     let mut manifests = BTreeMap::new();
     walk(&root, &root, &policy, &registry, &mut files, &mut manifests)?;
@@ -287,7 +296,12 @@ pub fn working_tree(root: &Path, policy_path: &Path) -> Result<CapturedInput, St
     }
     Ok(CapturedInput {
         input: Input {
-            digest: snapshot_digest(&files, &manifests, &policy_text),
+            digest: snapshot_digest(
+                &files,
+                &manifests,
+                &policy_text,
+                &serde_json::to_vec(&policy.resolved).expect("resolved selection serializes"),
+            ),
             implementations: implementations(&files, &manifests),
             files,
             policy,
@@ -348,6 +362,7 @@ fn staged_policy(
     root: &Path,
     entries: &IndexEntries,
     name: &str,
+    selection: &SelectionOptions,
 ) -> Result<(String, Registry, Policy), String> {
     let (mode, oid) = entries
         .get(name)
@@ -357,7 +372,7 @@ fn staged_policy(
     }
     let policy_text = text(git(root, &["cat-file", "blob", oid])?, name)?;
     let registry = crate::policy::registry_for_policy(&policy_text)?;
-    let policy = crate::policy::parse(&policy_text, &registry)?;
+    let policy = crate::policy::parse_with_selection(&policy_text, &registry, selection)?;
     Ok((policy_text, registry, policy))
 }
 
@@ -442,7 +457,12 @@ fn staged_input(
     }
     Ok(CapturedInput {
         input: Input {
-            digest: snapshot_digest(&files, &manifests, policy_text),
+            digest: snapshot_digest(
+                &files,
+                &manifests,
+                policy_text,
+                &serde_json::to_vec(&policy.resolved).expect("resolved selection serializes"),
+            ),
             implementations: implementations(&files, &manifests),
             files,
             policy,
@@ -471,12 +491,13 @@ fn staged_evidence(
 pub fn staged(
     policy_path: &Path,
     evidence_path: Option<&Path>,
+    selection: &SelectionOptions,
 ) -> Result<(CapturedInput, Option<Vec<u8>>), String> {
     let policy_name = validate_staged_policy_path(policy_path)?;
     let root = repository_root()?;
     let initial = git(&root, &["ls-files", "--stage", "-z"])?;
     let entries = parse_index(&initial)?;
-    let (policy_text, registry, policy) = staged_policy(&root, &entries, policy_name)?;
+    let (policy_text, registry, policy) = staged_policy(&root, &entries, policy_name, selection)?;
     let (files, manifests) = staged_corpus(&root, &entries, &registry, &policy)?;
     let evidence = staged_evidence(&root, &entries, evidence_path)?;
     validate_stable_index(&root, &initial)?;

@@ -1,6 +1,6 @@
 use crate::{
     input::Implementation,
-    policy::{Mode, Policy, Registry},
+    policy::{Mode, Policy, Registry, ResolvedSelection},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -140,9 +140,9 @@ pub struct SmellResult {
     pub reference_url: String,
     pub reference_check: ReferenceCheck,
     pub applicability: String,
-    pub state: String,
+    pub state: SmellState,
     pub interpretation: &'static str,
-    pub coverage_status: String,
+    pub coverage_status: CoverageStatus,
     pub evaluated_findings: usize,
     pub matched_findings: usize,
     pub blocking_findings: usize,
@@ -152,10 +152,182 @@ pub struct SmellResult {
     pub affected_symbols: usize,
     pub measured_rule_ids: Vec<String>,
     pub matched_rule_ids: Vec<String>,
+    #[serde(flatten)]
+    pub rule_status: RuleStatusIds,
+    pub matched_finding_indices: Vec<usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RuleStatusIds {
     pub pending_rule_ids: Vec<String>,
     pub disabled_rule_ids: Vec<String>,
+    pub excluded_rule_ids: Vec<String>,
     pub incomplete_rule_ids: Vec<String>,
-    pub matched_finding_indices: Vec<usize>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SmellState {
+    BlockingMatch,
+    ReviewMatch,
+    CheckedNoMatchInMeasuredScope,
+    Pending,
+    Excluded,
+    Disabled,
+    NotApplicable,
+    Error,
+}
+
+impl SmellState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::BlockingMatch => "blocking_match",
+            Self::ReviewMatch => "review_match",
+            Self::CheckedNoMatchInMeasuredScope => "checked_no_match_in_measured_scope",
+            Self::Pending => "pending",
+            Self::Excluded => "excluded",
+            Self::Disabled => "disabled",
+            Self::NotApplicable => "not_applicable",
+            Self::Error => "error",
+        }
+    }
+
+    fn interpretation(self) -> &'static str {
+        match self {
+            Self::NotApplicable => {
+                "This canonical smell does not apply to the selected language model."
+            }
+            Self::Error => "Measurement is incomplete; do not infer that this smell is absent.",
+            Self::BlockingMatch => {
+                "One or more required deterministic rules matched this smell pattern."
+            }
+            Self::ReviewMatch => {
+                "One or more report-only deterministic rules matched; semantic review is required before deciding whether to refactor."
+            }
+            Self::CheckedNoMatchInMeasuredScope => {
+                "No enabled implemented rule matched in its defined source scope; this is not proof that the semantic smell is absent."
+            }
+            Self::Pending => {
+                "No detector for this smell ran because its registered rules are not implemented yet."
+            }
+            Self::Excluded => {
+                "All registered detectors for this smell were excluded by the resolved policy groups."
+            }
+            Self::Disabled => "All registered detectors for this smell are disabled by policy.",
+        }
+    }
+}
+
+impl std::fmt::Display for SmellState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoverageStatus {
+    MeasuredWithPendingRules,
+    MeasuredDefinedScope,
+    Pending,
+    Excluded,
+    Disabled,
+    NotApplicable,
+    Incomplete,
+}
+
+impl CoverageStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::MeasuredWithPendingRules => "measured_with_pending_rules",
+            Self::MeasuredDefinedScope => "measured_defined_scope",
+            Self::Pending => "pending",
+            Self::Excluded => "excluded",
+            Self::Disabled => "disabled",
+            Self::NotApplicable => "not_applicable",
+            Self::Incomplete => "incomplete",
+        }
+    }
+}
+
+impl std::fmt::Display for CoverageStatus {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+struct SmellStatus {
+    state: SmellState,
+    coverage: CoverageStatus,
+}
+
+fn completed_coverage(measured: bool, pending: bool, excluded: bool) -> CoverageStatus {
+    if measured && pending {
+        CoverageStatus::MeasuredWithPendingRules
+    } else if measured {
+        CoverageStatus::MeasuredDefinedScope
+    } else if pending {
+        CoverageStatus::Pending
+    } else if excluded {
+        CoverageStatus::Excluded
+    } else {
+        CoverageStatus::Disabled
+    }
+}
+
+fn completed_state(
+    blocking_findings: usize,
+    review_signals: usize,
+    measured: bool,
+    pending: bool,
+    excluded: bool,
+) -> SmellState {
+    if blocking_findings > 0 {
+        SmellState::BlockingMatch
+    } else if review_signals > 0 {
+        SmellState::ReviewMatch
+    } else if measured {
+        SmellState::CheckedNoMatchInMeasuredScope
+    } else if pending {
+        SmellState::Pending
+    } else if excluded {
+        SmellState::Excluded
+    } else {
+        SmellState::Disabled
+    }
+}
+
+fn smell_state(
+    applicable: bool,
+    incomplete: bool,
+    blocking_findings: usize,
+    review_signals: usize,
+    measured: bool,
+    pending: bool,
+    excluded: bool,
+) -> SmellStatus {
+    if !applicable {
+        return SmellStatus {
+            state: SmellState::NotApplicable,
+            coverage: CoverageStatus::NotApplicable,
+        };
+    }
+    if incomplete {
+        return SmellStatus {
+            state: SmellState::Error,
+            coverage: CoverageStatus::Incomplete,
+        };
+    }
+    SmellStatus {
+        state: completed_state(
+            blocking_findings,
+            review_signals,
+            measured,
+            pending,
+            excluded,
+        ),
+        coverage: completed_coverage(measured, pending, excluded),
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -360,6 +532,7 @@ pub struct Report {
     pub implementation_sha256: String,
     pub scanned_files: Vec<String>,
     pub excluded_directories: Vec<String>,
+    pub policy_selection: ResolvedSelection,
     pub summary: ReportSummary,
     pub implementation_results: Vec<ImplementationResult>,
     pub smell_results: Vec<SmellResult>,
@@ -414,6 +587,7 @@ impl Report {
                     "smell_id":guidance.smell_id,"smell":guidance.smell,
                     "category":guidance.category,"pattern_type":guidance.pattern_type,
                     "mode":policy.rules[id].mode,"implementation":definition.implementation,
+                    "selected":policy.selected(id),"groups":policy.resolved.rule_groups[id],
                     "required_inputs":definition.inputs,"contract":definition.contract,
                     "certainty":guidance.certainty,"signal":guidance.signal,
                     "why_it_matters":guidance.why_it_matters,
@@ -433,7 +607,7 @@ impl Report {
             })
             .collect();
         Self {
-            report_schema_version: 4,
+            report_schema_version: 5,
             scanner_version: env!("CARGO_PKG_VERSION"),
             rule_pack: registry.rule_pack.clone(),
             language: registry.language.clone(),
@@ -502,6 +676,7 @@ impl Report {
             ]),
             scanned_files: vec![],
             excluded_directories: policy.exclude_directories.clone(),
+            policy_selection: policy.resolved.clone(),
             summary: ReportSummary::default(),
             implementation_results: vec![],
             smell_results: vec![],
@@ -640,20 +815,21 @@ impl Report {
         for smell in &mut self.coverage {
             for rule in smell["rules"].as_array_mut().unwrap() {
                 let mode = rule["mode"].as_str().unwrap();
-                rule["measurement_status"] =
-                    json!(if rule["implementation"] == "not_implemented" {
-                        if mode == "required" {
-                            "error_required_detector_missing"
-                        } else {
-                            "not_implemented"
-                        }
-                    } else if mode == "off" {
-                        "disabled"
-                    } else if !self.errors.is_empty() {
-                        "incomplete_scan"
+                rule["measurement_status"] = json!(if rule["selected"] == false {
+                    "excluded_by_group"
+                } else if rule["implementation"] == "not_implemented" {
+                    if mode == "required" {
+                        "error_required_detector_missing"
                     } else {
-                        "measured_defined_scope"
-                    });
+                        "not_implemented"
+                    }
+                } else if mode == "off" {
+                    "disabled"
+                } else if !self.errors.is_empty() {
+                    "incomplete_scan"
+                } else {
+                    "measured_defined_scope"
+                });
             }
         }
         self.findings.sort_by(|a, b| {
@@ -737,17 +913,17 @@ impl Report {
             blocking_smell_patterns: self
                 .smell_results
                 .iter()
-                .filter(|result| result.state == "blocking_match")
+                .filter(|result| result.state == SmellState::BlockingMatch)
                 .count(),
             review_smell_patterns: self
                 .smell_results
                 .iter()
-                .filter(|result| result.state == "review_match")
+                .filter(|result| result.state == SmellState::ReviewMatch)
                 .count(),
             error_smell_patterns: self
                 .smell_results
                 .iter()
-                .filter(|result| result.state == "error")
+                .filter(|result| result.state == SmellState::Error)
                 .count(),
             matched_smell_ids,
             total_findings: self.findings.len(),
@@ -772,15 +948,15 @@ impl Report {
             .collect();
         let blocking_smell_patterns = smell_results
             .iter()
-            .filter(|result| result.state == "blocking_match")
+            .filter(|result| result.state == SmellState::BlockingMatch)
             .count();
         let review_smell_patterns = smell_results
             .iter()
-            .filter(|result| result.state == "review_match")
+            .filter(|result| result.state == SmellState::ReviewMatch)
             .count();
         let error_smell_patterns = smell_results
             .iter()
-            .filter(|result| result.state == "error")
+            .filter(|result| result.state == SmellState::Error)
             .count();
         ImplementationSummary {
             verdict: if error_smell_patterns > 0 {
@@ -832,12 +1008,17 @@ impl Report {
                     .collect();
                 let pending_rule_ids: Vec<_> = rules
                     .iter()
-                    .filter(|rule| rule["implementation"] == "not_implemented")
+                    .filter(|rule| rule["measurement_status"] == "not_implemented")
                     .map(|rule| rule["rule_id"].as_str().unwrap().to_string())
                     .collect();
                 let disabled_rule_ids: Vec<_> = rules
                     .iter()
                     .filter(|rule| rule["measurement_status"] == "disabled")
+                    .map(|rule| rule["rule_id"].as_str().unwrap().to_string())
+                    .collect();
+                let excluded_rule_ids: Vec<_> = rules
+                    .iter()
+                    .filter(|rule| rule["measurement_status"] == "excluded_by_group")
                     .map(|rule| rule["rule_id"].as_str().unwrap().to_string())
                     .collect();
                 let incomplete_rule_ids: Vec<_> = rules
@@ -856,9 +1037,8 @@ impl Report {
                     .enumerate()
                     .filter(|(_, finding)| {
                         finding.smell_id == smell_id
-                            && source_files.is_none_or(|files| {
-                                Self::finding_in_source_files(finding, files)
-                            })
+                            && source_files
+                                .is_none_or(|files| Self::finding_in_source_files(finding, files))
                     })
                     .collect();
                 let matched_findings: Vec<_> = indexed_findings
@@ -871,56 +1051,15 @@ impl Report {
                     .filter(|(_, finding)| finding.blocking)
                     .count();
                 let review_signals = matched_findings.len() - blocking_findings;
-                let state = if applicability != "applicable" {
-                    "not_applicable"
-                } else if !incomplete_rule_ids.is_empty() {
-                    "error"
-                } else if blocking_findings > 0 {
-                    "blocking_match"
-                } else if review_signals > 0 {
-                    "review_match"
-                } else if !measured_rule_ids.is_empty() {
-                    "checked_no_match_in_measured_scope"
-                } else if !pending_rule_ids.is_empty() {
-                    "pending"
-                } else {
-                    "disabled"
-                };
-                let interpretation = match state {
-                    "not_applicable" => {
-                        "This canonical smell does not apply to the selected language model."
-                    }
-                    "error" => {
-                        "Measurement is incomplete; do not infer that this smell is absent."
-                    }
-                    "blocking_match" => {
-                        "One or more required deterministic rules matched this smell pattern."
-                    }
-                    "review_match" => {
-                        "One or more report-only deterministic rules matched; semantic review is required before deciding whether to refactor."
-                    }
-                    "checked_no_match_in_measured_scope" => {
-                        "No enabled implemented rule matched in its defined source scope; this is not proof that the semantic smell is absent."
-                    }
-                    "pending" => {
-                        "No detector for this smell ran because its registered rules are not implemented yet."
-                    }
-                    "disabled" => "All registered detectors for this smell are disabled by policy.",
-                    _ => unreachable!("closed smell result state"),
-                };
-                let coverage_status = if applicability != "applicable" {
-                    "not_applicable"
-                } else if !incomplete_rule_ids.is_empty() {
-                    "incomplete"
-                } else if !measured_rule_ids.is_empty() && !pending_rule_ids.is_empty() {
-                    "measured_with_pending_rules"
-                } else if !measured_rule_ids.is_empty() {
-                    "measured_defined_scope"
-                } else if !pending_rule_ids.is_empty() {
-                    "pending"
-                } else {
-                    "disabled"
-                };
+                let status = smell_state(
+                    applicability == "applicable",
+                    !incomplete_rule_ids.is_empty(),
+                    blocking_findings,
+                    review_signals,
+                    !measured_rule_ids.is_empty(),
+                    !pending_rule_ids.is_empty(),
+                    !excluded_rule_ids.is_empty(),
+                );
                 let affected_files: BTreeSet<_> = matched_findings
                     .iter()
                     .flat_map(|(_, finding)| {
@@ -966,9 +1105,9 @@ impl Report {
                         unavailable_action: REFERENCE_RESEARCH_UNAVAILABLE_ACTION,
                     },
                     applicability: applicability.to_string(),
-                    state: state.to_string(),
-                    interpretation,
-                    coverage_status: coverage_status.to_string(),
+                    state: status.state,
+                    interpretation: status.state.interpretation(),
+                    coverage_status: status.coverage,
                     evaluated_findings: indexed_findings.len(),
                     matched_findings: matched_findings.len(),
                     blocking_findings,
@@ -978,9 +1117,12 @@ impl Report {
                     affected_symbols: affected_symbols.len(),
                     measured_rule_ids,
                     matched_rule_ids: matched_rule_ids.into_iter().collect(),
-                    pending_rule_ids,
-                    disabled_rule_ids,
-                    incomplete_rule_ids,
+                    rule_status: RuleStatusIds {
+                        pending_rule_ids,
+                        disabled_rule_ids,
+                        excluded_rule_ids,
+                        incomplete_rule_ids,
+                    },
                     matched_finding_indices: matched_findings
                         .iter()
                         .map(|(index, _)| *index)
@@ -1150,6 +1292,48 @@ impl Report {
         }
         for error in &self.errors {
             eprintln!("ERROR: {error}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CoverageStatus, SmellState};
+
+    #[test]
+    fn typed_result_states_match_the_report_schema_spellings() {
+        let states = [
+            SmellState::BlockingMatch,
+            SmellState::ReviewMatch,
+            SmellState::CheckedNoMatchInMeasuredScope,
+            SmellState::Pending,
+            SmellState::Excluded,
+            SmellState::Disabled,
+            SmellState::NotApplicable,
+            SmellState::Error,
+        ];
+        for state in states {
+            assert_eq!(
+                serde_json::to_string(&state).unwrap(),
+                format!("\"{}\"", state.as_str())
+            );
+            assert!(!state.interpretation().is_empty());
+        }
+
+        let coverage = [
+            CoverageStatus::MeasuredWithPendingRules,
+            CoverageStatus::MeasuredDefinedScope,
+            CoverageStatus::Pending,
+            CoverageStatus::Excluded,
+            CoverageStatus::Disabled,
+            CoverageStatus::NotApplicable,
+            CoverageStatus::Incomplete,
+        ];
+        for status in coverage {
+            assert_eq!(
+                serde_json::to_string(&status).unwrap(),
+                format!("\"{}\"", status.as_str())
+            );
         }
     }
 }

@@ -8,7 +8,8 @@ report=target/quality/smells-report.json
 mkdir -p target/quality
 
 set +e
-./target/debug/smells check --path . --policy quality-policy.json --format json >"$report"
+./target/debug/smells check --path . --policy quality-policy.json \
+    --only-group source --format json >"$report"
 status=$?
 set -e
 
