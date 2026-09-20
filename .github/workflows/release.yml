@@ -80,6 +80,10 @@ jobs:
 
       - name: Build wheel and binary
         uses: PyO3/maturin-action@423a6347767a8b16e65c2a7a7042e4a921528da8 # v1
+        env:
+          # glibc 2.17 exposes endian conversion macros through its BSD feature set.
+          # https://github.com/tree-sitter/tree-sitter/issues/4186
+          CFLAGS: -D_BSD_SOURCE
         with:
           command: build
           target: ${{ matrix.target }}
