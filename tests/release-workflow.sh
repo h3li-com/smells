@@ -4,6 +4,7 @@ set -eu
 script_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repository_root=$(CDPATH= cd -- "$script_directory/.." && pwd)
 workflow="$repository_root/.github/workflows/release.yml"
+ci_workflow="$repository_root/.github/workflows/ci.yml"
 github_packages_workflow="$repository_root/.github/workflows/publish-github-packages.yml"
 
 grep -F 'publish-github-packages:' "$workflow" >/dev/null
@@ -44,5 +45,9 @@ grep -F 'gh release download "$RELEASE_TAG"' \
     "$github_packages_workflow" >/dev/null
 grep -F 'node npm/publish-packages.mjs' \
     "$github_packages_workflow" >/dev/null
+
+grep -F 'rustup toolchain install "$toolchain" --profile minimal --component cargo' \
+    "$ci_workflow" >/dev/null
+grep -F 'cargo "+$toolchain" package --locked' "$ci_workflow" >/dev/null
 
 printf 'release workflow tests passed\n'
