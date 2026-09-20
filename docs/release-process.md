@@ -76,6 +76,12 @@ After the version PR is merged into `main`:
    the exact published version before it passes. The final registry gate requires all
    four publication jobs.
 
+If GitHub Packages fails after the immutable release exists, the owner dispatches
+**Actions → Publish GitHub Packages from release → Run workflow** on `main` with the
+same tag. The recovery workflow rejects non-owner actors, mutable/draft/prerelease
+releases, release commits outside `main`, mismatched versions, and digest conflicts.
+It publishes directly from the signed GitHub Release assets and is safe to rerun.
+
 For the first npmjs.com release only, npm cannot configure OIDC until each package
 exists. The initial npm job therefore fails closed after the immutable GitHub Release
 is available. The owner runs `scripts/bootstrap-npm-release.sh v0.3.0`, completes the
@@ -89,7 +95,9 @@ The `release` GitHub environment is the publication boundary. Configure that
 environment to require the repository owner when the account plan supports required
 reviewers. Configure registry ownership before dispatching `v0.3.0`; the exact PyPI,
 npmjs.com, GitHub Packages, and crates.io bootstrap is documented in
-[package distribution](package-distribution.md).
+[package distribution](package-distribution.md). crates.io additionally requires its
+first release to be published manually before `release.yml` can authenticate through
+its configured Trusted Publisher.
 
 macOS notarization and Windows Authenticode publisher signing are intentionally
 pending because they require external identities. Checksums and GitHub's signed

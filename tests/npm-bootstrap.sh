@@ -34,6 +34,7 @@ cat > "$fake_bin/gh" <<'EOF'
 #!/bin/sh
 set -eu
 printf 'gh %s\n' "$*" >> "$CALL_LOG"
+test -n "${XDG_CACHE_HOME:-}"
 case "$1 $2" in
     'release verify')
         test "$3" = v0.3.0
@@ -67,6 +68,7 @@ cat > "$fake_bin/npm" <<'EOF'
 set -eu
 printf 'npm %s\n' "$*" >> "$CALL_LOG"
 test -n "${NPM_CONFIG_USERCONFIG:-}"
+test -n "${NPM_CONFIG_CACHE:-}"
 case "$1" in
     login)
         printf 'temporary login\n' > "$NPM_CONFIG_USERCONFIG"

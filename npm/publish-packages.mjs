@@ -33,13 +33,15 @@ const packageRoot = path.dirname(fileURLToPath(import.meta.url));
 const platforms = JSON.parse(
   readFileSync(path.join(packageRoot, "platforms.json"), "utf8"),
 );
-const packages = [
-  ...Object.values(platforms).map(({ name }) => [
-    name,
-    `${name.slice(1).replace("/", "-")}-${version}.tgz`,
-  ]),
-  ["@mindful-time/smells", `mindful-time-smells-${version}.tgz`],
+const nativePackages = Object.values(platforms).map(({ name }) => [
+  name,
+  `${name.slice(1).replace("/", "-")}-${version}.tgz`,
+]);
+const launcherPackage = [
+  "@mindful-time/smells",
+  `mindful-time-smells-${version}.tgz`,
 ];
+const packages = [...nativePackages, launcherPackage];
 
 const expectedFiles = packages.map(([, filename]) => filename).sort();
 const actualFiles = readdirSync(directory)
@@ -90,7 +92,7 @@ function sleep(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-for (const [name, filename] of packages) {
+function publishIfMissing([name, filename]) {
   const expected = localIntegrity(filename);
   const existing = registryIntegrity(name);
   if (existing !== null) {
@@ -99,7 +101,7 @@ for (const [name, filename] of packages) {
       process.exit(2);
     }
     console.log(`npm package already matches: ${name}@${version}`);
-    continue;
+    return false;
   }
 
   const publishArguments = [
@@ -119,26 +121,55 @@ for (const [name, filename] of packages) {
     const recovered = registryIntegrity(name);
     if (recovered === expected) {
       console.log(`npm publish returned an error after ${name}@${version} became available`);
-      continue;
+      return false;
     }
     process.exit(published.status ?? 1);
   }
+  return true;
+}
 
-  let verified = false;
-  for (let attempt = 0; attempt < 10; attempt += 1) {
-    const remote = registryIntegrity(name);
-    if (remote === expected) {
-      verified = true;
-      break;
+async function waitForVisibility(packageEntries) {
+  const pending = new Map(
+    packageEntries.map(([name, filename]) => [name, localIntegrity(filename)]),
+  );
+  for (let attempt = 0; attempt < 180 && pending.size > 0; attempt += 1) {
+    for (const [name, expected] of pending) {
+      const remote = registryIntegrity(name);
+      if (remote === expected) {
+        pending.delete(name);
+        continue;
+      }
+      if (remote !== null) {
+        console.error(`npm digest mismatch after publishing ${name}@${version}`);
+        process.exit(2);
+      }
     }
-    if (remote !== null) {
-      console.error(`npm digest mismatch after publishing ${name}@${version}`);
-      process.exit(2);
+    if (pending.size > 0) {
+      if (attempt === 0 || (attempt + 1) % 12 === 0) {
+        console.log(
+          `waiting for npm registry visibility (${attempt + 1}/180): ${[
+            ...pending.keys(),
+          ].join(", ")}`,
+        );
+      }
+      await sleep(5000);
     }
-    await sleep(3000);
   }
-  if (!verified) {
-    console.error(`npm package did not become visible: ${name}@${version}`);
+  if (pending.size > 0) {
+    console.error(
+      `npm packages did not become visible: ${[...pending.keys()]
+        .map((name) => `${name}@${version}`)
+        .join(", ")}`,
+    );
     process.exit(1);
   }
+}
+
+const publishedNativePackages = nativePackages.filter((packageEntry) =>
+  publishIfMissing(packageEntry),
+);
+await waitForVisibility(publishedNativePackages);
+
+if (publishIfMissing(launcherPackage)) {
+  await waitForVisibility([launcherPackage]);
 }

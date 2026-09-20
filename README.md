@@ -57,36 +57,34 @@ its TypeScript/TSX source, but not its native Android code.
 
 ### 1. Install Smells
 
-The registry packages below are introduced by `v0.3.0`. Until that tag appears on
-the [GitHub Releases page](https://github.com/mindful-time/smells/releases), they
-are release candidates and are not yet available from PyPI, npm, or crates.io.
-The npm tarballs will also be mirrored to the repository's GitHub Packages page.
-
-After `v0.3.0` is published, the fastest cross-language option is the prebuilt PyPI
-tool package:
+The fastest cross-language option is the prebuilt
+[PyPI tool package](https://pypi.org/project/smells/0.3.0/):
 
 ```sh
 uv tool install smells==0.3.0
 smells --version
 ```
 
-Node projects can pin the native npm package. It does not download anything during
-installation:
+Node projects can pin the
+[native npm package](https://www.npmjs.com/package/@mindful-time/smells). It does
+not download anything during installation:
 
 ```sh
 npm install --save-dev --save-exact @mindful-time/smells@0.3.0
 npx --no-install smells --version
 ```
 
-Rust users can build the same executable from its verified crates.io source package:
+After the one-time crates.io ownership bootstrap is complete, Rust users can build
+the same executable from its verified source package:
 
 ```sh
 cargo install --locked --version 0.3.0 smells
 ```
 
-Unlike the PyPI and npm channels, `cargo install` requires Rust 1.88 and compiles
-locally. See [package distribution](docs/package-distribution.md) for package names,
-platform selection, registry provenance, and owner bootstrap requirements.
+Until then, use a standalone release, PyPI, or npm. Unlike those prebuilt channels,
+`cargo install` requires Rust 1.88 and compiles locally. See
+[package distribution](docs/package-distribution.md) for package names, platform
+selection, registry provenance, and owner bootstrap requirements.
 
 ### Install a standalone release
 
@@ -590,11 +588,12 @@ Ordinary tests remain offline and deterministic.
 
 ## Project status
 
-`smells` source is currently version `0.3.0`. Its owner-gated release workflow is
-configured to publish standalone GitHub archives, binary PyPI wheels, native npm
-packages to npmjs.com and GitHub Packages, and the crates.io source package. Those
-registry packages are not complete until the `v0.3.0` workflow and its documented
-one-time interactive npm bootstrap succeed. No Python sdist is produced. Smells is
-open-source software licensed under the [MIT License](LICENSE).
+`smells` source is currently version `0.3.0`. Standalone GitHub archives, binary
+PyPI wheels, and native npm packages on npmjs.com are published. The owner-gated
+workflow publishes the same signed npm artifacts to GitHub Packages and uses an
+idempotent recovery workflow when a registry fails after release creation.
+crates.io still requires its documented one-time ownership bootstrap before future
+releases can use short-lived OIDC credentials. No Python sdist is produced. Smells
+is open-source software licensed under the [MIT License](LICENSE).
 Repository:
 [mindful-time/smells](https://github.com/mindful-time/smells).

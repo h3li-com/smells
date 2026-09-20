@@ -3,8 +3,8 @@
 Smells has one Rust implementation, four package formats, and five publication
 endpoints for that same CLI.
 The package channel never changes which Rust, Python, or TypeScript rules execute.
-The registry channels below are release candidates until `v0.3.0` appears on the
-[GitHub Releases page](https://github.com/mindful-time/smells/releases).
+All registry payloads come from the checksummed, immutable
+[GitHub Release](https://github.com/mindful-time/smells/releases/tag/v0.3.0).
 
 | Channel | Package | User command | Delivery behavior |
 | --- | --- | --- | --- |
@@ -45,7 +45,7 @@ no registry credential.
 
 ### PyPI
 
-Before `v0.3.0`, create a pending PyPI Trusted Publisher with these exact values:
+The `smells` project is live on PyPI. Its Trusted Publisher uses these exact values:
 
 | Field | Value |
 | --- | --- |
@@ -62,11 +62,11 @@ short-lived token, so no PyPI secret belongs in GitHub. See
 ### npm
 
 The unscoped npm package `smells` belongs to another project, so Smells uses the
-`@mindful-time` scope. npm cannot attach a Trusted Publisher until a package already
-exists, so `v0.3.0` uses a one-time, interactive bootstrap with the owner's security
-key instead of a bypass-2FA automation token:
+`@mindful-time` scope. The six `v0.3.0` packages were created through the one-time,
+interactive owner bootstrap because npm cannot attach a Trusted Publisher until a
+package already exists. The retained bootstrap procedure is:
 
-1. Dispatch the owner-gated `v0.3.0` release. Its npmjs.com job is expected to fail
+1. Dispatch the owner-gated initial release. Its npmjs.com job is expected to fail
    after the immutable GitHub Release exists because the six packages have no Trusted
    Publisher yet.
 2. Run `./scripts/bootstrap-npm-release.sh v0.3.0`. The helper refuses token
@@ -81,9 +81,8 @@ key instead of a bypass-2FA automation token:
    and allow `npm publish`.
 4. Require two-factor authentication and disallow traditional token publishing for
    every package.
-5. Rerun the failed release jobs. The deterministic publisher sees the exact
-   `v0.3.0` registry digests, skips republishing, and allows the final release gate to
-   pass.
+5. Rerun the failed release jobs. The deterministic publisher sees the exact release
+   digests, skips republishing, and allows the final release gate to pass.
 
 No npm publishing secret belongs in GitHub. The manual `v0.3.0` bootstrap cannot
 produce npm's CI-bound provenance, but its tarballs must be byte-identical to the
@@ -95,21 +94,32 @@ The workflow requires npm 11.5.1 or newer, as documented by
 ### GitHub Packages
 
 The same six npm tarballs are mirrored to `npm.pkg.github.com` after the immutable
-GitHub Release succeeds. The workflow grants only `packages: write` and authenticates
-with its short-lived `GITHUB_TOKEN`; no additional repository secret is stored. The
-package manifests link every package to `mindful-time/smells`, so the mirror inherits
-the public repository's permissions and appears on the repository Packages page.
-GitHub's npm registry requires authenticated installs even for public packages; the
-ordinary unauthenticated installation path remains npmjs.com. See
+GitHub Release succeeds. Both the normal release and the manually dispatchable
+`Publish GitHub Packages from release` recovery workflow call the same publisher.
+It verifies the release attestation, downloads the exact `.tgz` assets, compares
+registry SHA-512 digests, and only publishes missing versions. The workflow grants
+only `packages: write` and authenticates with its short-lived `GITHUB_TOKEN`; no
+additional repository secret is stored.
+
+Every package manifest links to `mindful-time/smells`, so GitHub associates the six
+packages with this repository and they appear on its Packages page. Repository access
+permissions are inherited, but package visibility is separate: GitHub creates new npm
+packages as private, so the owner must change each package to public after its first
+publication. GitHub's npm registry requires authenticated installs even for public
+packages; the ordinary unauthenticated installation path remains npmjs.com. See
 [GitHub's npm package documentation](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-npm-registry).
 
 ### crates.io
 
-Create a crates.io account and a least-privilege API token, then store only that token
-as the GitHub Actions secret `CARGO_REGISTRY_TOKEN`. crates.io does not currently use
-the PyPI/npm OIDC path in this workflow. Cargo documents both the permanent version
-semantics and the required pre-publication `cargo package` verification in
-[Publishing on crates.io](https://doc.rust-lang.org/cargo/reference/publishing.html).
+crates.io requires the first package release to be published manually. After that
+bootstrap, configure `mindful-time/smells` and `release.yml` as the crate's Trusted
+Publisher. The release workflow uses `rust-lang/crates-io-auth-action` to exchange the
+GitHub OIDC identity for a short-lived token and revokes it when the job finishes; no
+long-lived `CARGO_REGISTRY_TOKEN` secret belongs in GitHub. Cargo documents the
+permanent version semantics and required pre-publication verification in
+[Publishing on crates.io](https://doc.rust-lang.org/cargo/reference/publishing.html),
+and crates.io documents the one-time first-release requirement in
+[Trusted Publishing](https://crates.io/docs/trusted-publishing).
 
 ## Release guarantees
 

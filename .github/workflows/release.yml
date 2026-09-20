@@ -542,70 +542,12 @@ jobs:
   publish-github-packages:
     name: publish npm mirror to GitHub Packages
     needs: [validate, publish]
-    runs-on: ubuntu-24.04
+    uses: ./.github/workflows/publish-github-packages.yml
+    with:
+      tag: ${{ inputs.tag }}
     permissions:
       contents: read
       packages: write
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          ref: ${{ needs.validate.outputs.commit }}
-          persist-credentials: false
-
-      - name: Revalidate the release actor
-        run: |
-          ./scripts/verify-release-actor.sh \
-            "$GITHUB_REPOSITORY_OWNER" \
-            "$GITHUB_ACTOR" \
-            "$GITHUB_TRIGGERING_ACTOR"
-
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: "24.15.0"
-          registry-url: https://npm.pkg.github.com
-          scope: "@mindful-time"
-          package-manager-cache: false
-
-      - name: Download the signed release npm packages
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ inputs.tag }}
-        run: |
-          gh release verify "$RELEASE_TAG"
-          mkdir github-npm-dist
-          gh release download "$RELEASE_TAG" \
-            --pattern '*.tgz' \
-            --dir github-npm-dist
-
-      - name: Publish the GitHub Packages npm mirror
-        env:
-          NODE_AUTH_TOKEN: ${{ github.token }}
-          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
-        run: |
-          node npm/publish-packages.mjs \
-            github-npm-dist "$RELEASE_VERSION" \
-            https://npm.pkg.github.com
-
-      - name: Verify installation from GitHub Packages
-        env:
-          NODE_AUTH_TOKEN: ${{ github.token }}
-          NPM_CONFIG_CACHE: ${{ runner.temp }}/npm-cache
-          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
-        run: |
-          mkdir -p target/github-packages-smoke
-          printf '%s\n' '{"name":"smells-github-packages-smoke","private":true}' \
-            > target/github-packages-smoke/package.json
-          for attempt in 1 2 3 4 5; do
-            if npm install \
-                --prefix target/github-packages-smoke \
-                --ignore-scripts --no-audit --no-fund \
-                --save-exact "@mindful-time/smells@$RELEASE_VERSION"; then
-              target/github-packages-smoke/node_modules/.bin/smells --version
-              exit 0
-            fi
-            sleep 3
-          done
-          exit 1
 
   publish-crates:
     name: publish to crates.io
@@ -613,6 +555,7 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -645,9 +588,13 @@ jobs:
             > crate-release/crate.sha256
           (cd crate-release && sha256sum -c crate.sha256)
 
+      - name: Authenticate to crates.io with Trusted Publishing
+        id: crates_io_auth
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1
+
       - name: Publish the verified source package
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates_io_auth.outputs.token }}
           RELEASE_VERSION: ${{ needs.validate.outputs.version }}
         run: |
           cargo package --locked
