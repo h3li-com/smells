@@ -1,544 +1,61 @@
 use crate::{
-    input::Implementation,
-    policy::{Mode, Policy, Registry, ResolvedSelection},
+    input::{History, Implementation, Input},
+    policy::{Policy, Registry, ResolvedSelection},
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
-const REFERENCE_RESEARCH_ACTION: &str = "perform_external_research_call_to_reference_url";
-const REFERENCE_RESEARCH_REQUIRED_BEFORE: &str = "review_or_remediation";
-const REFERENCE_RESEARCH_UNAVAILABLE_ACTION: &str =
-    "report_reference_research_incomplete_and_do_not_review_or_remediate";
+#[path = "report/guidance.rs"]
+mod guidance;
+#[path = "report/model.rs"]
+mod model;
+#[path = "report/table.rs"]
+mod table;
 
-fn research_gated_review(reference_url: &str, review: &str) -> String {
-    review.replace("{reference_url}", reference_url)
-}
+use guidance::{
+    REFERENCE_RESEARCH_ACTION, REFERENCE_RESEARCH_REQUIRED_BEFORE,
+    REFERENCE_RESEARCH_UNAVAILABLE_ACTION, RuleMetadata, guidance, research_gated_review,
+};
+pub use model::{
+    Diagnostic, Evaluation, Finding, FindingRelations, HistoryScope, ImplementationResult,
+    Location, ReferenceCheck, ReportSummary, RuleStatusIds, SmellResult, SmellState, SourceExcerpt,
+};
+use model::{ImplementationSummary, smell_state, source_excerpt};
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct Location {
-    pub path: String,
-    pub line: usize,
-    pub column: usize,
-}
-
-#[derive(Debug, Serialize)]
-pub struct Finding {
-    pub rule_id: String,
-    pub rule_version: u32,
-    pub smell_id: String,
-    pub smell: String,
-    pub category: String,
-    pub pattern_type: String,
-    pub certainty: String,
-    pub policy_mode: Mode,
-    pub symbol: String,
-    pub location: Location,
-    pub related_symbols: Vec<String>,
-    pub related_locations: Vec<Location>,
-    pub source_excerpt: Option<SourceExcerpt>,
-    pub related_source_excerpts: Vec<SourceExcerpt>,
-    pub omitted_related_excerpts: usize,
-    pub evaluation: Evaluation,
-    pub diagnostic: Diagnostic,
-    pub status: String,
-    pub blocking: bool,
-    pub evidence: Value,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct SourceExcerpt {
-    pub path: String,
-    pub focus_line: usize,
-    pub focus_column: usize,
-    pub lines: Vec<SourceLine>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct SourceLine {
-    pub line: usize,
-    pub display_start_column: usize,
-    pub text: String,
-    pub truncated_before: bool,
-    pub truncated_after: bool,
-}
-
-fn source_excerpt(files: &BTreeMap<String, String>, location: &Location) -> Option<SourceExcerpt> {
-    const CONTEXT: usize = 1;
-    const MAX_CHARACTERS: usize = 320;
-    const FOCUS_LEAD: usize = 80;
-    let source = files.get(&location.path)?;
-    let source_lines: Vec<_> = source.split('\n').collect();
-    if location.line == 0 || location.line > source_lines.len() {
-        return None;
-    }
-    let start_line = location.line.saturating_sub(CONTEXT).max(1);
-    let end_line = (location.line + CONTEXT).min(source_lines.len());
-    let lines = (start_line..=end_line)
-        .map(|line_number| {
-            let raw = source_lines[line_number - 1];
-            let length = raw.chars().count();
-            let focus = if line_number == location.line {
-                location.column.saturating_sub(1).min(length)
-            } else {
-                0
-            };
-            let display_start = if length <= MAX_CHARACTERS {
-                0
-            } else {
-                focus
-                    .saturating_sub(FOCUS_LEAD)
-                    .min(length - MAX_CHARACTERS)
-            };
-            let text: String = raw
-                .chars()
-                .skip(display_start)
-                .take(MAX_CHARACTERS)
-                .collect();
-            SourceLine {
-                line: line_number,
-                display_start_column: display_start + 1,
-                text,
-                truncated_before: display_start > 0,
-                truncated_after: display_start + MAX_CHARACTERS < length,
-            }
-        })
-        .collect();
-    Some(SourceExcerpt {
-        path: location.path.clone(),
-        focus_line: location.line,
-        focus_column: location.column,
-        lines,
-    })
-}
-
-#[derive(Debug, Default, Serialize)]
-pub struct ReportSummary {
-    pub verdict: String,
-    pub implementations: usize,
-    pub unowned_files: usize,
-    pub total_smell_patterns: usize,
-    pub matched_smell_patterns: usize,
-    pub blocking_smell_patterns: usize,
-    pub review_smell_patterns: usize,
-    pub error_smell_patterns: usize,
-    pub matched_smell_ids: Vec<String>,
-    pub total_findings: usize,
-    pub matched_findings: usize,
-    pub blocking_findings: usize,
-    pub review_signals: usize,
-    pub within_pattern_limits: usize,
-    pub matched_rule_ids: Vec<String>,
-    pub error_count: usize,
-}
-
-#[derive(Debug, Serialize)]
-pub struct SmellResult {
-    pub smell_id: String,
-    pub smell: String,
-    pub category: String,
-    pub reference_url: String,
-    pub reference_check: ReferenceCheck,
-    pub applicability: String,
-    pub state: SmellState,
-    pub interpretation: &'static str,
-    pub coverage_status: CoverageStatus,
-    pub evaluated_findings: usize,
-    pub matched_findings: usize,
-    pub blocking_findings: usize,
-    pub review_signals: usize,
-    pub within_pattern_limits: usize,
-    pub affected_files: usize,
-    pub affected_symbols: usize,
-    pub measured_rule_ids: Vec<String>,
-    pub matched_rule_ids: Vec<String>,
-    #[serde(flatten)]
-    pub rule_status: RuleStatusIds,
-    pub matched_finding_indices: Vec<usize>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct RuleStatusIds {
-    pub pending_rule_ids: Vec<String>,
-    pub disabled_rule_ids: Vec<String>,
-    pub excluded_rule_ids: Vec<String>,
-    pub incomplete_rule_ids: Vec<String>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SmellState {
-    BlockingMatch,
-    ReviewMatch,
-    CheckedNoMatchInMeasuredScope,
-    Pending,
-    Excluded,
-    Disabled,
-    NotApplicable,
-    Error,
-}
-
-impl SmellState {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::BlockingMatch => "blocking_match",
-            Self::ReviewMatch => "review_match",
-            Self::CheckedNoMatchInMeasuredScope => "checked_no_match_in_measured_scope",
-            Self::Pending => "pending",
-            Self::Excluded => "excluded",
-            Self::Disabled => "disabled",
-            Self::NotApplicable => "not_applicable",
-            Self::Error => "error",
-        }
-    }
-
-    fn interpretation(self) -> &'static str {
-        match self {
-            Self::NotApplicable => {
-                "This canonical smell does not apply to the selected language model."
-            }
-            Self::Error => "Measurement is incomplete; do not infer that this smell is absent.",
-            Self::BlockingMatch => {
-                "One or more required deterministic rules matched this smell pattern."
-            }
-            Self::ReviewMatch => {
-                "One or more report-only deterministic rules matched; semantic review is required before deciding whether to refactor."
-            }
-            Self::CheckedNoMatchInMeasuredScope => {
-                "No enabled implemented rule matched in its defined source scope; this is not proof that the semantic smell is absent."
-            }
-            Self::Pending => {
-                "No detector for this smell ran because its registered rules are not implemented yet."
-            }
-            Self::Excluded => {
-                "All registered detectors for this smell were excluded by the resolved policy groups."
-            }
-            Self::Disabled => "All registered detectors for this smell are disabled by policy.",
-        }
-    }
-}
-
-impl std::fmt::Display for SmellState {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
-
-#[derive(Clone, Copy, Debug, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CoverageStatus {
-    MeasuredWithPendingRules,
-    MeasuredDefinedScope,
-    Pending,
-    Excluded,
-    Disabled,
-    NotApplicable,
-    Incomplete,
-}
-
-impl CoverageStatus {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::MeasuredWithPendingRules => "measured_with_pending_rules",
-            Self::MeasuredDefinedScope => "measured_defined_scope",
-            Self::Pending => "pending",
-            Self::Excluded => "excluded",
-            Self::Disabled => "disabled",
-            Self::NotApplicable => "not_applicable",
-            Self::Incomplete => "incomplete",
-        }
-    }
-}
-
-impl std::fmt::Display for CoverageStatus {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
-
-struct SmellStatus {
-    state: SmellState,
-    coverage: CoverageStatus,
-}
-
-fn completed_coverage(measured: bool, pending: bool, excluded: bool) -> CoverageStatus {
-    if measured && pending {
-        CoverageStatus::MeasuredWithPendingRules
-    } else if measured {
-        CoverageStatus::MeasuredDefinedScope
-    } else if pending {
-        CoverageStatus::Pending
-    } else if excluded {
-        CoverageStatus::Excluded
-    } else {
-        CoverageStatus::Disabled
-    }
-}
-
-fn completed_state(
-    blocking_findings: usize,
-    review_signals: usize,
-    measured: bool,
-    pending: bool,
-    excluded: bool,
-) -> SmellState {
-    if blocking_findings > 0 {
-        SmellState::BlockingMatch
-    } else if review_signals > 0 {
-        SmellState::ReviewMatch
-    } else if measured {
-        SmellState::CheckedNoMatchInMeasuredScope
-    } else if pending {
-        SmellState::Pending
-    } else if excluded {
-        SmellState::Excluded
-    } else {
-        SmellState::Disabled
-    }
-}
-
-fn smell_state(
-    applicable: bool,
-    incomplete: bool,
-    blocking_findings: usize,
-    review_signals: usize,
-    measured: bool,
-    pending: bool,
-    excluded: bool,
-) -> SmellStatus {
-    if !applicable {
-        return SmellStatus {
-            state: SmellState::NotApplicable,
-            coverage: CoverageStatus::NotApplicable,
-        };
-    }
-    if incomplete {
-        return SmellStatus {
-            state: SmellState::Error,
-            coverage: CoverageStatus::Incomplete,
-        };
-    }
-    SmellStatus {
-        state: completed_state(
-            blocking_findings,
-            review_signals,
-            measured,
-            pending,
-            excluded,
-        ),
-        coverage: completed_coverage(measured, pending, excluded),
-    }
-}
-
-#[derive(Debug, Serialize)]
-pub struct ImplementationSummary {
-    pub verdict: String,
-    pub total_smell_patterns: usize,
-    pub matched_smell_patterns: usize,
-    pub blocking_smell_patterns: usize,
-    pub review_smell_patterns: usize,
-    pub error_smell_patterns: usize,
-    pub matched_smell_ids: Vec<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ImplementationResult {
-    pub implementation_id: String,
-    pub implementation_root: Option<String>,
-    pub ownership: &'static str,
-    pub implementation_types: Vec<String>,
-    pub runtime_types: Vec<String>,
-    pub runtime_manifests: Vec<String>,
-    pub scanned_files: usize,
-    pub summary: ImplementationSummary,
-    pub smell_results: Vec<SmellResult>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct Evaluation {
-    pub metric: String,
-    pub observed: Value,
-    pub match_condition: String,
-    pub threshold: Value,
-    pub matched: bool,
-}
-
-#[derive(Debug, Serialize)]
-pub struct Diagnostic {
-    pub headline: String,
-    pub explanation: String,
-    pub signal: String,
-    pub why_it_matters: String,
-    pub review: String,
-    pub remediation: String,
-    pub contract: String,
-    pub reference_url: String,
-    pub reference_check: ReferenceCheck,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct ReferenceCheck {
-    pub required: bool,
-    pub non_negotiable: bool,
-    pub action: &'static str,
-    pub required_before: &'static str,
-    pub unavailable_action: &'static str,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct Guidance {
-    rule_id: String,
-    smell_id: String,
-    smell: String,
-    category: String,
-    pattern_type: String,
-    reference_url: String,
-    certainty: String,
-    signal: String,
-    why_it_matters: String,
-    review: String,
-    remediation: String,
-}
-
-#[derive(Clone)]
-struct RuleMetadata {
-    guidance: Guidance,
-    contract: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct GuidanceTemplate {
-    rule_suffix: String,
-    smell_id: String,
-    smell: String,
-    category: String,
-    pattern_type: String,
-    reference_url: String,
-    certainty: String,
-    signal: String,
-    why_it_matters: String,
-    review: String,
-    remediation: String,
-}
-
-fn guidance(registry: &Registry) -> BTreeMap<String, Guidance> {
-    let entries: Vec<Guidance> = if registry.language == "rust" {
-        serde_json::from_str(include_str!("../rules/rust-v1-guidance.json"))
-            .expect("embedded Rust diagnostic guidance must parse")
-    } else {
-        let templates: Vec<GuidanceTemplate> =
-            serde_json::from_str(include_str!("../rules/portable-v1-guidance.json"))
-                .expect("embedded portable diagnostic guidance must parse");
-        templates
-            .into_iter()
-            .map(|template| Guidance {
-                rule_id: format!("{}.{}", registry.language, template.rule_suffix),
-                smell_id: template.smell_id,
-                smell: template.smell,
-                category: template.category,
-                pattern_type: template.pattern_type,
-                reference_url: template.reference_url,
-                certainty: template.certainty,
-                signal: template.signal,
-                why_it_matters: template.why_it_matters,
-                review: template.review,
-                remediation: template.remediation,
-            })
-            .collect()
-    };
-    let expected: BTreeSet<_> = registry.rules.iter().map(|rule| rule.id.as_str()).collect();
-    let actual: BTreeSet<_> = entries.iter().map(|entry| entry.rule_id.as_str()).collect();
-    assert_eq!(entries.len(), actual.len(), "duplicate diagnostic guidance");
-    assert_eq!(
-        expected, actual,
-        "diagnostic guidance must cover every rule"
-    );
-    assert!(entries.iter().all(|entry| {
-        matches!(
-            entry.certainty.as_str(),
-            "exact_source_metric"
-                | "structural_indicator"
-                | "provider_evidence"
-                | "typed_indicator"
-                | "project_contract"
-                | "history_signal"
-        ) && entry
-            .reference_url
-            .starts_with("https://refactoring.guru/smells/")
-            && !entry.smell_id.is_empty()
-            && !entry.smell.is_empty()
-            && !entry.category.is_empty()
-            && !entry.pattern_type.is_empty()
-            && !entry.signal.is_empty()
-            && !entry.why_it_matters.is_empty()
-            && entry.review.starts_with("NON-NEGOTIABLE RESEARCH:")
-            && entry.review.contains("{reference_url}")
-            && !entry.remediation.is_empty()
-    }));
-    for smell in &registry.smells {
-        let expected_url = format!("https://refactoring.guru/smells/{}", smell.id);
-        for rule_id in &smell.rules {
-            let entry = entries
-                .iter()
-                .find(|entry| entry.rule_id == *rule_id)
-                .expect("guidance coverage checked above");
-            assert_eq!(
-                entry.reference_url, expected_url,
-                "diagnostic guidance URL must match its catalog smell for {rule_id}"
-            );
-            assert_eq!(
-                entry.smell_id, smell.id,
-                "diagnostic guidance smell ID must match the catalog for {rule_id}"
-            );
-            assert_eq!(
-                entry.smell, smell.name,
-                "diagnostic guidance smell name must match the catalog for {rule_id}"
-            );
-            assert_eq!(
-                entry.category, smell.category,
-                "diagnostic guidance category must match the catalog for {rule_id}"
-            );
-            let definition = registry
-                .rules
-                .iter()
-                .find(|definition| definition.id == *rule_id)
-                .expect("validated registry");
-            assert_eq!(
-                entry.pattern_type, definition.kind,
-                "diagnostic guidance pattern type must match the rule for {rule_id}"
-            );
-        }
-    }
-    entries
-        .into_iter()
-        .map(|entry| (entry.rule_id.clone(), entry))
-        .collect()
+#[derive(Serialize)]
+struct ReportMetadata {
+    report_schema_version: u32,
+    scanner_version: &'static str,
+    rule_pack: String,
+    language: String,
+    source_mode: String,
+    scope: String,
+    ownership_scope: String,
+    limitations: Vec<String>,
+    history_scope: HistoryScope,
+    input_sha256: String,
+    provider_evidence_sha256: String,
+    implementation_sha256: String,
 }
 
 #[derive(Serialize)]
 pub struct Report {
-    pub report_schema_version: u32,
-    pub scanner_version: &'static str,
-    pub rule_pack: String,
-    pub language: String,
-    pub source_mode: String,
-    pub scope: String,
-    pub ownership_scope: String,
-    pub limitations: Vec<String>,
-    pub input_sha256: String,
-    pub provider_evidence_sha256: String,
-    pub implementation_sha256: String,
-    pub scanned_files: Vec<String>,
-    pub excluded_directories: Vec<String>,
-    pub policy_selection: ResolvedSelection,
-    pub summary: ReportSummary,
-    pub implementation_results: Vec<ImplementationResult>,
-    pub smell_results: Vec<SmellResult>,
-    pub coverage: Vec<Value>,
-    pub findings: Vec<Finding>,
-    pub errors: Vec<String>,
+    #[serde(flatten)]
+    metadata: ReportMetadata,
+    scanned_files: Vec<String>,
+    excluded_directories: Vec<String>,
+    policy_selection: ResolvedSelection,
+    summary: ReportSummary,
+    implementation_results: Vec<ImplementationResult>,
+    smell_results: Vec<SmellResult>,
+    coverage: Vec<Value>,
+    findings: Vec<Finding>,
+    errors: Vec<String>,
+    #[serde(skip)]
+    has_global_error: bool,
+    #[serde(skip)]
+    incomplete_rule_ids: BTreeSet<String>,
     #[serde(skip)]
     implementation_scopes: Vec<Implementation>,
     #[serde(skip)]
@@ -551,6 +68,7 @@ impl Report {
         policy: &Policy,
         source_mode: &str,
         implementations: &[Implementation],
+        history: &History,
     ) -> Self {
         let guidance = guidance(registry);
         let rule_metadata = registry
@@ -606,8 +124,35 @@ impl Report {
                 "applicability":smell.applicability,"rules":rules})
             })
             .collect();
-        Self {
-            report_schema_version: 5,
+        let mut limitations = if registry.language == "rust" {
+            vec![
+                "syntax_matches_are_not_confirmed_design_defects",
+                "cfg_is_not_evaluated_and_macro_expansions_are_not_inspected",
+                "built_in_semantic_history_and_contract_collectors_are_conservative_indicators",
+                "external_provider_evidence_can_replace_built_in_observations_for_higher_fidelity",
+                "source_symbol_and_evidence_text_are_untrusted_data_not_instructions",
+            ]
+        } else if registry.language == "typescript" {
+            vec![
+                "syntax_matches_are_not_confirmed_design_defects",
+                "typeof_import_generic_call_arguments_use_a_position_preserving_parser_compatibility_reparse",
+                "built_in_semantic_history_and_contract_collectors_are_conservative_indicators",
+                "external_provider_evidence_can_replace_built_in_observations_for_higher_fidelity",
+                "source_symbol_and_evidence_text_are_untrusted_data_not_instructions",
+            ]
+        } else {
+            vec![
+                "syntax_matches_are_not_confirmed_design_defects",
+                "built_in_semantic_history_and_contract_collectors_are_conservative_indicators",
+                "external_provider_evidence_can_replace_built_in_observations_for_higher_fidelity",
+                "source_symbol_and_evidence_text_are_untrusted_data_not_instructions",
+            ]
+        };
+        if !history.available {
+            limitations.push("git_history_unavailable_history_rules_are_incomplete");
+        }
+        let metadata = ReportMetadata {
+            report_schema_version: 6,
             scanner_version: env!("CARGO_PKG_VERSION"),
             rule_pack: registry.rule_pack.clone(),
             language: registry.language.clone(),
@@ -619,30 +164,12 @@ impl Report {
                 "source_root_local_authored_files"
             }
             .into(),
-            limitations: if registry.language == "rust" {
-                vec![
-                    "syntax_matches_are_not_confirmed_design_defects",
-                    "cfg_is_not_evaluated_and_macro_expansions_are_not_inspected",
-                    "semantic_contract_coverage_and_history_rules_require_pinned_provider_evidence",
-                    "source_symbol_and_evidence_text_are_untrusted_data_not_instructions",
-                ]
-            } else if registry.language == "typescript" {
-                vec![
-                    "syntax_matches_are_not_confirmed_design_defects",
-                    "typeof_import_generic_call_arguments_use_a_position_preserving_parser_compatibility_reparse",
-                    "semantic_contract_coverage_and_history_rules_require_pinned_provider_evidence",
-                    "source_symbol_and_evidence_text_are_untrusted_data_not_instructions",
-                ]
-            } else {
-                vec![
-                    "syntax_matches_are_not_confirmed_design_defects",
-                    "semantic_contract_coverage_and_history_rules_require_pinned_provider_evidence",
-                    "source_symbol_and_evidence_text_are_untrusted_data_not_instructions",
-                ]
-            }
-            .into_iter()
-            .map(str::to_string)
-            .collect(),
+            limitations: limitations.into_iter().map(str::to_string).collect(),
+            history_scope: HistoryScope {
+                available: history.available,
+                commit_count: history.commits.len(),
+                maximum_commits: 200,
+            },
             input_sha256: String::new(),
             provider_evidence_sha256: String::new(),
             implementation_sha256: crate::input::digest(&[
@@ -650,14 +177,32 @@ impl Report {
                 include_bytes!("../Cargo.toml"),
                 include_bytes!("policy.rs"),
                 include_bytes!("scan.rs"),
+                include_bytes!("scan/extract.rs"),
+                include_bytes!("scan/graph.rs"),
                 include_bytes!("portable.rs"),
+                include_bytes!("portable/cache.rs"),
+                include_bytes!("portable/extract.rs"),
+                include_bytes!("portable/rules.rs"),
                 include_bytes!("patterns.rs"),
                 include_bytes!("similarity.rs"),
                 include_bytes!("input.rs"),
+                include_bytes!("collectors/mod.rs"),
+                include_bytes!("collectors/common.rs"),
+                include_bytes!("collectors/contracts.rs"),
+                include_bytes!("collectors/history.rs"),
+                include_bytes!("collectors/model.rs"),
+                include_bytes!("collectors/source.rs"),
+                include_bytes!("collectors/structural.rs"),
+                include_bytes!("collectors/syntax.rs"),
                 include_bytes!("evidence.rs"),
                 include_bytes!("evidence_evaluators.rs"),
                 include_bytes!("metrics.rs"),
                 include_bytes!("report.rs"),
+                include_bytes!("report/guidance.rs"),
+                include_bytes!("report/model.rs"),
+                include_bytes!("report/table.rs"),
+                include_bytes!("rule_runtime.rs"),
+                include_bytes!("typescript_compat.rs"),
                 include_bytes!("main.rs"),
                 include_bytes!("../rules/rust-v1.json"),
                 include_bytes!("../rules/rust-v1-guidance.json"),
@@ -674,6 +219,9 @@ impl Report {
                 include_bytes!("../docs/report-interface.md"),
                 include_bytes!("../docs/provider-evidence.md"),
             ]),
+        };
+        Self {
+            metadata,
             scanned_files: vec![],
             excluded_directories: policy.exclude_directories.clone(),
             policy_selection: policy.resolved.clone(),
@@ -683,9 +231,40 @@ impl Report {
             coverage,
             findings: vec![],
             errors: vec![],
+            has_global_error: false,
+            incomplete_rule_ids: BTreeSet::new(),
             implementation_scopes: implementations.to_vec(),
             rule_metadata,
         }
+    }
+
+    pub fn rule_error(&mut self, rule_id: &str, error: String) {
+        self.incomplete_rule_ids.insert(rule_id.to_string());
+        self.errors.push(format!("rule {rule_id}: {error}"));
+    }
+
+    pub fn begin_scan(&mut self, input: &Input) {
+        self.metadata.input_sha256.clone_from(&input.digest);
+        self.scanned_files = input.files.keys().cloned().collect();
+    }
+
+    pub fn set_provider_evidence_digest(&mut self, digest: String) {
+        self.metadata.provider_evidence_sha256 = digest;
+    }
+
+    pub fn error(&mut self, error: impl Into<String>) {
+        self.has_global_error = true;
+        self.errors.push(error.into());
+    }
+
+    pub fn extend_errors(&mut self, errors: impl IntoIterator<Item = String>) {
+        for error in errors {
+            self.error(error);
+        }
+    }
+
+    pub fn has_errors(&self) -> bool {
+        !self.errors.is_empty()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -702,6 +281,48 @@ impl Report {
         matched: bool,
         evidence: Value,
     ) {
+        self.finding_with_relations(
+            policy,
+            id,
+            symbol,
+            location,
+            metric,
+            value,
+            comparison,
+            threshold,
+            matched,
+            FindingRelations {
+                evidence,
+                symbols: Vec::new(),
+                locations: Vec::new(),
+            },
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn finding_with_relations(
+        &mut self,
+        policy: &Policy,
+        id: &str,
+        symbol: &str,
+        location: &Location,
+        metric: &str,
+        value: Value,
+        comparison: &str,
+        threshold: Value,
+        matched: bool,
+        related: FindingRelations,
+    ) {
+        let FindingRelations {
+            evidence,
+            symbols: related_symbols,
+            locations: related_locations,
+        } = related;
+        assert_eq!(
+            related_symbols.len(),
+            related_locations.len(),
+            "each related symbol must have a related location"
+        );
         if !policy.enabled(id) {
             return;
         }
@@ -758,8 +379,8 @@ impl Report {
             policy_mode: policy.rules[id].mode,
             symbol: symbol.into(),
             location: location.clone(),
-            related_symbols: vec![],
-            related_locations: vec![],
+            related_symbols,
+            related_locations,
             source_excerpt: None,
             related_source_excerpts: vec![],
             omitted_related_excerpts: 0,
@@ -815,6 +436,7 @@ impl Report {
         for smell in &mut self.coverage {
             for rule in smell["rules"].as_array_mut().unwrap() {
                 let mode = rule["mode"].as_str().unwrap();
+                let rule_id = rule["rule_id"].as_str().unwrap();
                 rule["measurement_status"] = json!(if rule["selected"] == false {
                     "excluded_by_group"
                 } else if rule["implementation"] == "not_implemented" {
@@ -825,7 +447,7 @@ impl Report {
                     }
                 } else if mode == "off" {
                     "disabled"
-                } else if !self.errors.is_empty() {
+                } else if self.has_global_error || self.incomplete_rule_ids.contains(rule_id) {
                     "incomplete_scan"
                 } else {
                     "measured_defined_scope"
@@ -1161,231 +783,10 @@ impl Report {
     }
 }
 
-fn print_implementation_header(implementation: &ImplementationResult, language: &str) {
-    let implementation_types = implementation.implementation_types.join(",");
-    let runtime_types = implementation.runtime_types.join(",");
-    let runtime_manifests = implementation.runtime_manifests.join(",");
-    println!(
-        "Implementation: {} | root: {} | ownership: {} | types: {} | runtimes: {} | manifests: {} | {} {} files",
-        implementation.implementation_id,
-        implementation
-            .implementation_root
-            .as_deref()
-            .unwrap_or("unowned"),
-        implementation.ownership,
-        if implementation_types.is_empty() {
-            "-"
-        } else {
-            &implementation_types
-        },
-        if runtime_types.is_empty() {
-            "-"
-        } else {
-            &runtime_types
-        },
-        if runtime_manifests.is_empty() {
-            "-"
-        } else {
-            &runtime_manifests
-        },
-        implementation.scanned_files,
-        language,
-    );
-}
-
-fn print_smell_results(implementation: &ImplementationResult) {
-    println!("Smell pattern | Pattern ID | Result | Matches | Blocking | Review | Coverage");
-    for result in &implementation.smell_results {
-        println!(
-            "{} | {} | {} | {} | {} | {} | {}",
-            result.smell,
-            result.smell_id,
-            result.state,
-            result.matched_findings,
-            result.blocking_findings,
-            result.review_signals,
-            result.coverage_status,
-        );
-    }
-}
-
-fn print_matched_findings(
-    report: &Report,
-    implementation: &ImplementationResult,
-    scope: &Implementation,
-) {
-    println!("Matched evidence for {}:", implementation.implementation_id);
-    println!(
-        "Finding | Smell | Repository symbols | Metric | Value | Matches when | Threshold | Status | Repository evidence locations"
-    );
-    let matched_findings: Vec<_> = report
-        .findings
-        .iter()
-        .enumerate()
-        .filter(|(_, finding)| {
-            finding.evaluation.matched
-                && Report::finding_in_source_files(finding, &scope.source_files)
-        })
-        .collect();
-    for (index, finding) in &matched_findings {
-        print_finding(*index, finding, scope);
-    }
-    if !matched_findings.is_empty() {
-        println!(
-            "Actionable findings for {}:",
-            implementation.implementation_id
-        );
-    }
-    for (index, finding) in &matched_findings {
-        print_actionable_finding(*index, finding);
-    }
-}
-
-fn print_finding(index: usize, finding: &Finding, scope: &Implementation) {
-    let mut symbols = vec![];
-    let mut locations = vec![];
-    push_table_evidence(
-        &finding.symbol,
-        &finding.location,
-        scope,
-        &mut symbols,
-        &mut locations,
-    );
-    for (symbol, location) in finding
-        .related_symbols
-        .iter()
-        .zip(&finding.related_locations)
-    {
-        push_table_evidence(symbol, location, scope, &mut symbols, &mut locations);
-    }
-    println!(
-        "{} | {} | {} | {} | {} | {} | {} | {} | {}",
-        index,
-        finding.smell,
-        symbols.join(","),
-        finding.evaluation.metric,
-        finding.evaluation.observed,
-        finding.evaluation.match_condition,
-        finding.evaluation.threshold,
-        finding.status,
-        locations.join(",")
-    );
-}
-
-fn push_table_evidence<'a>(
-    symbol: &'a str,
-    location: &Location,
-    scope: &Implementation,
-    symbols: &mut Vec<&'a str>,
-    locations: &mut Vec<String>,
-) {
-    if Report::path_in_source_files(&location.path, Some(&scope.source_files)) {
-        symbols.push(symbol);
-        locations.push(format!(
-            "{}:{}:{}",
-            location.path, location.line, location.column
-        ));
-    }
-}
-
-fn print_actionable_finding(index: usize, finding: &Finding) {
-    println!(
-        "Actionable finding {index} | {} | {} | pattern_type={} | certainty={} | status={}",
-        finding.smell, finding.rule_id, finding.pattern_type, finding.certainty, finding.status
-    );
-    println!("  Issue: {}", finding.diagnostic.headline);
-    println!(
-        "  Primary location: {}:{}:{} | symbol: {}",
-        finding.location.path, finding.location.line, finding.location.column, finding.symbol
-    );
-    println!(
-        "  Observed versus threshold: {} = {}; matches when {} {}",
-        finding.evaluation.metric,
-        finding.evaluation.observed,
-        finding.evaluation.match_condition,
-        finding.evaluation.threshold
-    );
-    println!("  Evidence: {}", finding.diagnostic.explanation);
-    println!("  Signal: {}", finding.diagnostic.signal);
-    print_source_excerpt("Source excerpt", finding.source_excerpt.as_ref());
-    for (related_index, excerpt) in finding.related_source_excerpts.iter().enumerate() {
-        print_source_excerpt(
-            &format!("Related source excerpt {}", related_index + 1),
-            Some(excerpt),
-        );
-    }
-    if finding.omitted_related_excerpts > 0 {
-        println!(
-            "  Related source excerpts omitted: {} (all locations remain in the evidence row and JSON report)",
-            finding.omitted_related_excerpts
-        );
-    }
-    println!("  Why it matters: {}", finding.diagnostic.why_it_matters);
-    println!("  Remediation: {}", finding.diagnostic.remediation);
-    println!("  Contract: {}", finding.diagnostic.contract);
-    println!("  Reference URL: {}", finding.diagnostic.reference_url);
-    println!("  Research requirement: {}", finding.diagnostic.review);
-}
-
-fn print_source_excerpt(label: &str, excerpt: Option<&SourceExcerpt>) {
-    let Some(excerpt) = excerpt else {
-        println!("  {label}: unavailable");
-        return;
-    };
-    println!(
-        "  {label}: {}:{}:{}",
-        excerpt.path, excerpt.focus_line, excerpt.focus_column
-    );
-    for line in &excerpt.lines {
-        let marker = if line.line == excerpt.focus_line {
-            ">"
-        } else {
-            " "
-        };
-        println!("    {marker} {:>6} | {}", line.line, line.text);
-    }
-}
-
-impl Report {
-    pub fn print_table(&self) {
-        println!(
-            "Scope: {} | source: {} | {} {} files",
-            self.scope,
-            self.source_mode,
-            self.scanned_files.len(),
-            self.language,
-        );
-        println!(
-            "Scan summary | verdict: {} | implementations: {} | matched patterns: {}/{} | blocking patterns: {} | review patterns: {} | matched findings: {} | blocking findings: {} | review signals: {} | errors: {}",
-            self.summary.verdict,
-            self.summary.implementations,
-            self.summary.matched_smell_patterns,
-            self.summary.total_smell_patterns,
-            self.summary.blocking_smell_patterns,
-            self.summary.review_smell_patterns,
-            self.summary.matched_findings,
-            self.summary.blocking_findings,
-            self.summary.review_signals,
-            self.summary.error_count,
-        );
-        for (implementation, scope) in self
-            .implementation_results
-            .iter()
-            .zip(&self.implementation_scopes)
-        {
-            print_implementation_header(implementation, &self.language);
-            print_smell_results(implementation);
-            print_matched_findings(self, implementation, scope);
-        }
-        for error in &self.errors {
-            eprintln!("ERROR: {error}");
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{CoverageStatus, SmellState};
+    use super::{Report, SmellState, model::CoverageStatus, smell_state};
+    use crate::input::History;
 
     #[test]
     fn typed_result_states_match_the_report_schema_spellings() {
@@ -1421,6 +822,89 @@ mod tests {
                 serde_json::to_string(&status).unwrap(),
                 format!("\"{}\"", status.as_str())
             );
+        }
+    }
+
+    #[test]
+    fn smell_state_precedence_preserves_fail_closed_reporting() {
+        let cases = [
+            (
+                (false, true, 1, 1, true, true, true),
+                SmellState::NotApplicable,
+                CoverageStatus::NotApplicable,
+            ),
+            (
+                (true, true, 1, 1, true, true, true),
+                SmellState::Error,
+                CoverageStatus::Incomplete,
+            ),
+            (
+                (true, false, 1, 1, true, true, false),
+                SmellState::BlockingMatch,
+                CoverageStatus::MeasuredWithPendingRules,
+            ),
+            (
+                (true, false, 0, 1, true, false, false),
+                SmellState::ReviewMatch,
+                CoverageStatus::MeasuredDefinedScope,
+            ),
+            (
+                (true, false, 0, 0, true, false, false),
+                SmellState::CheckedNoMatchInMeasuredScope,
+                CoverageStatus::MeasuredDefinedScope,
+            ),
+            (
+                (true, false, 0, 0, false, true, true),
+                SmellState::Pending,
+                CoverageStatus::Pending,
+            ),
+            (
+                (true, false, 0, 0, false, false, true),
+                SmellState::Excluded,
+                CoverageStatus::Excluded,
+            ),
+            (
+                (true, false, 0, 0, false, false, false),
+                SmellState::Disabled,
+                CoverageStatus::Disabled,
+            ),
+        ];
+
+        for (inputs, expected_state, expected_coverage) in cases {
+            let (applicable, incomplete, blocking, review, measured, pending, excluded) = inputs;
+            let actual = smell_state(
+                applicable, incomplete, blocking, review, measured, pending, excluded,
+            );
+            assert_eq!(actual.state, expected_state);
+            assert_eq!(actual.coverage.as_str(), expected_coverage.as_str());
+        }
+    }
+
+    #[test]
+    fn global_error_scope_does_not_depend_on_display_text() {
+        let registry = crate::policy::registry("rust-v1").unwrap();
+        let policy =
+            crate::policy::parse(include_str!("../examples/quality-policy.json"), &registry)
+                .unwrap();
+        let mut report = Report::new(
+            &registry,
+            &policy,
+            "working_tree",
+            &[],
+            &History {
+                available: true,
+                commits: Vec::new(),
+            },
+        );
+        report.error("rule this is still a global failure");
+        report.finish();
+
+        for smell in &report.coverage {
+            for rule in smell["rules"].as_array().unwrap() {
+                if rule["selected"] == true {
+                    assert_eq!(rule["measurement_status"], "incomplete_scan");
+                }
+            }
         }
     }
 }

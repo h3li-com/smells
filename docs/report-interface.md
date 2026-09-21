@@ -2,7 +2,7 @@
 
 The JSON report is the interface between the deterministic scanner and a review agent. The scanner owns measurement and threshold evaluation. The agent owns semantic investigation and any proposed code change.
 
-`report_schema_version` is currently `5`. Version 5 adds `policy_selection`, per-rule `selected`/`groups` fields, `excluded_by_group` coverage, and `excluded_rule_ids`. `input_sha256` now identifies the captured policy, resolved group selection, manifests, and source, so provider evidence cannot be replayed across different selectors. Version 4 added `provider_evidence_sha256`; an empty value means no provider bundle was supplied. A nonempty provider digest identifies the exact supplemental evidence bytes evaluated against that input. Version 3 introduced `implementation_results` as the primary monorepo result. Each implementation contains its own canonical smell results, while the top-level `smell_results` remains the repository rollup and the rule-level `coverage` and `findings` remain the evidence. Consumers must reject unsupported versions rather than guessing field semantics.
+`report_schema_version` is currently `6`. Version 6 makes built-in collectors the default for every active rule, incorporates bounded Git history into `input_sha256`, treats an external evidence bundle as a per-rule override, and preserves mandatory Refactoring.Guru research before agent review or remediation. Version 5 added `policy_selection`, per-rule `selected`/`groups` fields, `excluded_by_group` coverage, and `excluded_rule_ids`. Version 4 added `provider_evidence_sha256`; an empty value means no provider bundle was supplied. A nonempty provider digest identifies the exact supplemental evidence bytes evaluated against that input. Version 3 introduced `implementation_results` as the primary monorepo result. Consumers must reject unsupported versions rather than guessing field semantics.
 
 ## Resolved policy selection
 
@@ -17,6 +17,14 @@ selection reports 28 selected and 28 active rules.
 Every rule inside `coverage` repeats `selected` and `groups`. A rule excluded by
 the resolved selection has `measurement_status: "excluded_by_group"`; this is
 distinct from `disabled`, and neither status is a passing measurement.
+
+`history_scope.available`, `history_scope.commit_count`, and
+`history_scope.maximum_commits` disclose the bounded history
+scope used by the built-in change-coupling collectors. When history is unavailable,
+every selected history rule is incomplete, the report adds
+`git_history_unavailable_history_rules_are_incomplete` to `limitations`, and the
+scan exits `2`. Rule mode changes whether a match blocks; it never turns a missing
+collector prerequisite into a clean result.
 
 ## Repository implementation model
 
@@ -74,9 +82,9 @@ The closed `state` values are:
 - `not_applicable`: the canonical smell does not apply to the selected language model.
 - `error`: measurement was incomplete. Do not infer absence or continue as if the check passed.
 
-`coverage_status` independently states whether the smell was `measured_defined_scope`, `measured_with_pending_rules`, `pending`, `excluded`, `disabled`, `not_applicable`, or `incomplete`. In the v1 packs, a selected active provider-backed rule without complete pinned evidence is `incomplete`, never pending or passed. The deterministic source match remains valid evidence, but it is not complete semantic coverage unless every selected provider rule also completed.
+`coverage_status` independently states whether the smell was `measured_defined_scope`, `measured_with_pending_rules`, `pending`, `excluded`, `disabled`, `not_applicable`, or `incomplete`. In the v1 packs every selected active rule has a built-in collector. An `incomplete` result therefore means a collector, parser, budget, or supplied external-evidence validation failed; omission of an optional provider entry is not an error.
 
-Every smell result repeats the canonical URL and `reference_check`. For a matched smell, the consuming agent must open that exact URL before reviewing any referenced finding. The detailed finding retains rule-specific guidance and the same non-negotiable research gate.
+Every smell result repeats the canonical URL and `reference_check`. Research is non-negotiable: the reviewing agent must make an external research/tool call to the exact URL and read the page before semantic review or remediation. If the page cannot be consulted, the agent must report the research as incomplete and stop.
 
 ```json
 {
@@ -132,7 +140,7 @@ the `self-smell-report` artifact, even when a later quality-gate command fails.
 7. Enforce `reference_check` before semantic review. The research is non-negotiable: make an external research/tool call that opens the exact `reference_url` and read that page. Memory, a search-result snippet, or the URL string in the report is not completion of the research call. If the page cannot be consulted, report that the reference research is incomplete and stop without reviewing or remediating the finding.
 8. Use the canonical `smell_id`, `smell`, `category`, and `pattern_type` to identify the smell and kind of detector. `diagnostic.signal` states the concrete pattern being checked. After the required research call, use `why_it_matters` and `review` to investigate the risk. Treat `diagnostic.remediation` as a candidate behavior-preserving move, not an instruction to refactor blindly. Follow `diagnostic.contract` for the exact selected language-pack algorithm. Refactoring.Guru does not define this project's numeric thresholds; the checked-in policy does.
 
-Every rule owns its URL in the Rust guidance or the language-neutral portable guidance instantiated for Python/TypeScript. Startup validation requires exactly one guidance entry per registered rule and requires its URL to equal the canonical URL of the smell mapped by the registry. The emitted `diagnostic.review` begins with the non-negotiable research instruction and includes that exact URL. The scanner does not perform network access or falsely claim that the page was read; the consuming hook must require the external call before allowing review output.
+Every rule owns its URL in the Rust guidance or the language-neutral portable guidance instantiated for Python/TypeScript. Startup validation requires exactly one guidance entry per registered rule and requires its URL to equal the canonical URL of the smell mapped by the registry. The emitted `diagnostic.review` begins with the non-negotiable research instruction and includes that exact URL. The scanner does not perform network access or falsely claim that the page was read; the consuming agent must require the external call before allowing review output.
 
 Each guidance entry is self-contained: it repeats the canonical `smell_id`, display `smell`, Refactoring.Guru `category`, and `pattern_type`, followed by the exact `signal` the rule checks. Startup validation rejects guidance when any of those fields disagrees with the registry.
 

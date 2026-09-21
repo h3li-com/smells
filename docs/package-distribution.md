@@ -4,15 +4,15 @@ Smells has one Rust implementation, four package formats, and five publication
 endpoints for that same CLI.
 The package channel never changes which Rust, Python, or TypeScript rules execute.
 All registry payloads come from the checksummed, immutable
-[GitHub Release](https://github.com/mindful-time/smells/releases/tag/v0.3.0).
+[GitHub Release](https://github.com/mindful-time/smells/releases/tag/v0.4.0).
 
 | Channel | Package | User command | Delivery behavior |
 | --- | --- | --- | --- |
 | GitHub | release archives | download the matching archive | prebuilt native executable |
-| PyPI | `smells` | `uv tool install smells==0.3.0` | prebuilt native wheel; no sdist |
-| npm | `@mindful-time/smells` | `npm install --save-dev --save-exact @mindful-time/smells@0.3.0` | exact-version optional native package |
+| PyPI | `smells` | `uv tool install smells==0.4.0` | prebuilt native wheel; no sdist |
+| npm | `@mindful-time/smells` | `npm install --save-dev --save-exact @mindful-time/smells@0.4.0` | exact-version optional native package |
 | GitHub Packages | `@mindful-time/smells` | configure the `@mindful-time` scope for `npm.pkg.github.com`, then install the same exact version | authenticated npm mirror linked to this repository |
-| crates.io | `smells` | `cargo install --locked --version 0.3.0 smells` | builds from source with Rust 1.88 |
+| crates.io | `smells` | `cargo install --locked --version 0.4.0 smells` | builds from source with Rust 1.88 |
 
 The PyPI design follows uv's binary-wheel model: Python packaging transports the
 compiled executable, while `uv tool install` creates an isolated tool environment.

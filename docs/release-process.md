@@ -52,7 +52,7 @@ drift independently. The PR must pass the required `CI / required` check.
 After the version PR is merged into `main`:
 
 1. The repository owner, `mindful-time`, opens **Actions → Release → Run workflow**.
-2. Select `main` and enter the exact stable tag, such as `v0.3.0`.
+2. Select `main` and enter the exact stable tag, such as `v0.4.0`.
 3. The workflow rejects every other dispatch or rerun actor, input other than
    `vMAJOR.MINOR.PATCH`, a tag that already exists, a non-`main` dispatch, or a
    version that differs from `Cargo.toml`. The actor check runs during validation
@@ -93,8 +93,8 @@ token environment variables, and revokes its temporary CLI session on exit. See
 
 The `release` GitHub environment is the publication boundary. Configure that
 environment to require the repository owner when the account plan supports required
-reviewers. Configure registry ownership before dispatching `v0.3.0`; the exact PyPI,
-npmjs.com, GitHub Packages, and crates.io bootstrap is documented in
+reviewers. Registry ownership was established by the initial `v0.3.0` bootstrap; the
+exact PyPI, npmjs.com, GitHub Packages, and crates.io setup is documented in
 [package distribution](package-distribution.md). crates.io additionally requires its
 first release to be published manually before `release.yml` can authenticate through
 its configured Trusted Publisher.
@@ -110,8 +110,8 @@ Download the archive, its matching `.sha256`, and verify it before extraction:
 
 ```sh
 sha256sum --check smells-x86_64-unknown-linux-gnu.tar.gz.sha256
-gh release verify v0.3.0 --repo mindful-time/smells
-gh release verify-asset v0.3.0 \
+gh release verify v0.4.0 --repo mindful-time/smells
+gh release verify-asset v0.4.0 \
   smells-x86_64-unknown-linux-gnu.tar.gz \
   --repo mindful-time/smells
 ```

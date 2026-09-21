@@ -10,9 +10,22 @@ use std::{
 pub struct Input {
     pub files: BTreeMap<String, String>,
     pub implementations: Vec<Implementation>,
+    pub history: History,
     pub policy: Policy,
     pub digest: String,
     pub mode: &'static str,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct History {
+    pub available: bool,
+    pub commits: Vec<HistoryCommit>,
+}
+
+#[derive(Clone, Debug)]
+pub struct HistoryCommit {
+    pub id: String,
+    pub files: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -249,6 +262,7 @@ fn walk_entry(
 fn snapshot_digest(
     files: &BTreeMap<String, String>,
     manifests: &BTreeMap<String, String>,
+    history: &History,
     policy: &str,
     resolved_selection: &[u8],
 ) -> String {
@@ -267,7 +281,88 @@ fn snapshot_digest(
         parts.push(path.as_bytes());
         parts.push(source.as_bytes());
     }
+    parts.push(b"git_history_available");
+    parts.push(if history.available { b"true" } else { b"false" });
+    for commit in &history.commits {
+        parts.push(b"git_commit");
+        parts.push(commit.id.as_bytes());
+        for path in &commit.files {
+            parts.push(path.as_bytes());
+        }
+    }
     digest(&parts)
+}
+
+fn captured_history(root: &Path, files: &BTreeMap<String, String>) -> History {
+    let inside = Command::new("git")
+        .arg("--no-replace-objects")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .current_dir(root)
+        .output();
+    if !inside.is_ok_and(|output| output.status.success() && output.stdout == b"true\n") {
+        return History::default();
+    }
+    let head = Command::new("git")
+        .arg("--no-replace-objects")
+        .args(["rev-parse", "--verify", "HEAD"])
+        .current_dir(root)
+        .output();
+    if head.is_ok_and(|output| !output.status.success()) {
+        return History {
+            available: true,
+            commits: Vec::new(),
+        };
+    }
+    let output = Command::new("git")
+        .arg("--no-replace-objects")
+        .args([
+            "-c",
+            "core.quotepath=false",
+            "log",
+            "--format=%x1e%H",
+            "--name-only",
+            "--no-renames",
+            "--relative",
+            "-n",
+            "200",
+            "--",
+            ".",
+        ])
+        .current_dir(root)
+        .output();
+    let Ok(output) = output else {
+        return History::default();
+    };
+    if !output.status.success() {
+        return History::default();
+    }
+    let Ok(log) = String::from_utf8(output.stdout) else {
+        return History::default();
+    };
+    let mut commits = Vec::new();
+    for block in log.split('\u{1e}').filter(|block| !block.trim().is_empty()) {
+        let mut lines = block.lines().filter(|line| !line.trim().is_empty());
+        let Some(id) = lines.next() else {
+            continue;
+        };
+        let mut changed = lines
+            .map(str::trim)
+            .filter(|path| files.contains_key(*path))
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        changed.sort();
+        changed.dedup();
+        if !changed.is_empty() {
+            commits.push(HistoryCommit {
+                id: id.trim().into(),
+                files: changed,
+            });
+        }
+    }
+    History {
+        available: true,
+        commits,
+    }
 }
 
 pub fn working_tree(
@@ -294,15 +389,18 @@ pub fn working_tree(
             registry.language
         ));
     }
+    let history = captured_history(&root, &files);
     Ok(CapturedInput {
         input: Input {
             digest: snapshot_digest(
                 &files,
                 &manifests,
+                &history,
                 &policy_text,
                 &serde_json::to_vec(&policy.resolved).expect("resolved selection serializes"),
             ),
             implementations: implementations(&files, &manifests),
+            history,
             files,
             policy,
             mode: "working_tree",
@@ -445,6 +543,7 @@ fn validate_stable_index(root: &Path, initial: &[u8]) -> Result<(), String> {
 fn staged_input(
     files: BTreeMap<String, String>,
     manifests: BTreeMap<String, String>,
+    history: History,
     policy_text: &str,
     policy: Policy,
     registry: Registry,
@@ -460,10 +559,12 @@ fn staged_input(
             digest: snapshot_digest(
                 &files,
                 &manifests,
+                &history,
                 policy_text,
                 &serde_json::to_vec(&policy.resolved).expect("resolved selection serializes"),
             ),
             implementations: implementations(&files, &manifests),
+            history,
             files,
             policy,
             mode: "staged_snapshot",
@@ -499,10 +600,11 @@ pub fn staged(
     let entries = parse_index(&initial)?;
     let (policy_text, registry, policy) = staged_policy(&root, &entries, policy_name, selection)?;
     let (files, manifests) = staged_corpus(&root, &entries, &registry, &policy)?;
+    let history = captured_history(&root, &files);
     let evidence = staged_evidence(&root, &entries, evidence_path)?;
     validate_stable_index(&root, &initial)?;
     Ok((
-        staged_input(files, manifests, &policy_text, policy, registry)?,
+        staged_input(files, manifests, history, &policy_text, policy, registry)?,
         evidence,
     ))
 }

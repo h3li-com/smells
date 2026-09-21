@@ -117,6 +117,51 @@ impl Workspace {
         );
     }
 
+    fn initialize_git(&self) {
+        let init = Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&self.path)
+            .output()
+            .expect("initialize Git repository");
+        assert!(
+            init.status.success(),
+            "{}",
+            String::from_utf8_lossy(&init.stderr)
+        );
+    }
+
+    fn commit(&self, message: &str) {
+        let add = Command::new("git")
+            .args(["add", "."])
+            .current_dir(&self.path)
+            .output()
+            .expect("stage commit inputs");
+        assert!(
+            add.status.success(),
+            "{}",
+            String::from_utf8_lossy(&add.stderr)
+        );
+        let commit = Command::new("git")
+            .args([
+                "-c",
+                "user.name=Smells Test",
+                "-c",
+                "user.email=smells@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                message,
+            ])
+            .current_dir(&self.path)
+            .output()
+            .expect("commit inputs");
+        assert!(
+            commit.status.success(),
+            "{}",
+            String::from_utf8_lossy(&commit.stderr)
+        );
+    }
+
     fn check_staged(&self) -> Output {
         Command::new(env!("CARGO_BIN_EXE_smells"))
             .args([
@@ -291,7 +336,7 @@ fn portable_policy(language: &str) -> Value {
     json!({
         "schema_version": 2,
         "rule_pack": format!("{language}-v1"),
-        "scanner_version": "0.3.0",
+        "scanner_version": "0.4.0",
         "scope": "authored_source",
         "exclude_directories": [".git", "target", "node_modules", ".venv", "__pycache__"],
         "limits": {
@@ -319,6 +364,15 @@ fn require_maximum(policy: &mut Value, rule: &str, maximum: u64) {
 
 fn require(policy: &mut Value, rule: &str, parameters: Value) {
     policy["rules"][rule] = selection("required", parameters);
+}
+
+fn require_only(policy: &mut Value, rule_ids: &[&str]) {
+    for rule in policy["rules"].as_object_mut().expect("policy rules") {
+        rule.1["mode"] = json!("off");
+    }
+    for rule_id in rule_ids {
+        policy["rules"][*rule_id]["mode"] = json!("required");
+    }
 }
 
 #[cfg(unix)]
@@ -464,31 +518,34 @@ fn example_policies_exclude_common_monorepo_caches() {
 }
 
 #[test]
-fn every_starter_defaults_to_all_rules_and_fails_closed_without_evidence() {
-    for (file, source, policy, evidence_rules) in [
+fn every_starter_runs_all_rules_without_external_evidence() {
+    for (file, source, policy) in [
         (
             "lib.rs",
             "fn healthy() {}\n",
             serde_json::from_str(include_str!("../examples/quality-policy.json")).unwrap(),
-            11,
         ),
         (
             "app.py",
             "def healthy():\n    return 1\n",
             serde_json::from_str(include_str!("../examples/python-quality-policy.json")).unwrap(),
-            18,
         ),
         (
             "app.ts",
             "function healthy() { return 1; }\n",
             serde_json::from_str(include_str!("../examples/typescript-quality-policy.json"))
                 .unwrap(),
-            18,
         ),
     ] {
         let workspace = Workspace::new(file, source, &policy);
+        workspace.initialize_git();
         let output = workspace.check_path();
-        assert_eq!(output.status.code(), Some(2), "{file}");
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{file}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         let data = report(&output);
         assert_eq!(
             data["policy_selection"]["active_rule_ids"]
@@ -498,8 +555,559 @@ fn every_starter_defaults_to_all_rules_and_fails_closed_without_evidence() {
             28,
             "{file}"
         );
-        assert_eq!(data["errors"].as_array().unwrap().len(), evidence_rules);
+        assert_eq!(data["smell_results"].as_array().unwrap().len(), 23);
+        assert_eq!(data["errors"], json!([]));
+        assert!(
+            data["smell_results"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|result| result["coverage_status"] != "incomplete"),
+            "{file}: {data}"
+        );
     }
+}
+
+#[test]
+fn default_python_scan_detects_message_chains_without_external_evidence() {
+    let policy: Value =
+        serde_json::from_str(include_str!("../examples/python-quality-policy.json")).unwrap();
+    let workspace = Workspace::new(
+        "orders.py",
+        "def city(order):\n    return order.customer.address.city\n",
+        &policy,
+    );
+    workspace.initialize_git();
+    let output = workspace.check_path();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let data = report(&output);
+    let finding = data["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| finding["rule_id"] == "python.navigation_chains")
+        .expect("built-in message-chain finding");
+    assert_eq!(finding["evaluation"]["observed"], 3);
+    assert_eq!(finding["evaluation"]["matched"], true);
+    assert_eq!(finding["evidence"]["provider"]["name"], "smells-built-in");
+}
+
+#[test]
+fn default_python_scan_detects_feature_envy_without_external_evidence() {
+    let policy: Value =
+        serde_json::from_str(include_str!("../examples/python-quality-policy.json")).unwrap();
+    let workspace = Workspace::new(
+        "billing.py",
+        concat!(
+            "def invoice(customer):\n",
+            "    return (customer.name, customer.address, customer.city, ",
+            "customer.country, customer.account, customer.currency)\n",
+        ),
+        &policy,
+    );
+    workspace.initialize_git();
+    let output = workspace.check_path();
+    assert_eq!(output.status.code(), Some(0));
+    let data = report(&output);
+    let finding = data["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| finding["rule_id"] == "python.foreign_accesses")
+        .expect("built-in feature-envy finding");
+    assert_eq!(finding["evaluation"]["observed"]["foreign_accesses"], 6);
+    assert_eq!(finding["evaluation"]["matched"], true);
+}
+
+#[test]
+fn default_python_scan_detects_inappropriate_intimacy_without_contract_file() {
+    let policy: Value =
+        serde_json::from_str(include_str!("../examples/python-quality-policy.json")).unwrap();
+    let workspace = Workspace::new(
+        "accounts.py",
+        "def leak(account):\n    return account._private_token\n",
+        &policy,
+    );
+    workspace.initialize_git();
+    let output = workspace.check_path();
+    assert_eq!(output.status.code(), Some(0));
+    let data = report(&output);
+    let finding = data["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| finding["rule_id"] == "python.dependency_contract")
+        .expect("built-in inappropriate-intimacy finding");
+    assert_eq!(finding["evaluation"]["observed"], 1);
+    assert_eq!(finding["evaluation"]["matched"], true);
+}
+
+#[test]
+fn default_python_scan_detects_primitive_obsession_without_type_provider() {
+    let policy: Value =
+        serde_json::from_str(include_str!("../examples/python-quality-policy.json")).unwrap();
+    let workspace = Workspace::new(
+        "profile.py",
+        concat!(
+            "class Profile:\n",
+            "    name: str\n",
+            "    city: str\n",
+            "    country: str\n",
+            "    age: int\n",
+            "    active: bool\n",
+        ),
+        &policy,
+    );
+    workspace.initialize_git();
+    let output = workspace.check_path();
+    assert_eq!(output.status.code(), Some(0));
+    let data = report(&output);
+    let finding = data["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| finding["rule_id"] == "python.primitive_slots")
+        .expect("built-in primitive-obsession finding");
+    assert_eq!(finding["evaluation"]["observed"]["raw_slots"], 5);
+    assert_eq!(finding["evaluation"]["matched"], true);
+}
+
+fn matched_rule<'a>(data: &'a Value, rule_id: &str) -> &'a Value {
+    data["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| finding["rule_id"] == rule_id && finding["evaluation"]["matched"] == true)
+        .unwrap_or_else(|| {
+            let matched = data["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|finding| finding["evaluation"]["matched"] == true)
+                .map(|finding| finding["rule_id"].as_str().unwrap_or_default())
+                .collect::<Vec<_>>();
+            panic!("missing built-in match for {rule_id}; matched rules: {matched:?}")
+        })
+}
+
+#[test]
+fn default_python_scan_runs_structural_class_collectors() {
+    let policy: Value =
+        serde_json::from_str(include_str!("../examples/python-quality-policy.json")).unwrap();
+    let workspace = Workspace::new(
+        "patterns.py",
+        concat!(
+            "class First:\n",
+            "    def calculate(self, value):\n",
+            "        first = value + 1\n        second = first * 2\n",
+            "        third = second - 3\n        fourth = third / 4\n",
+            "        return fourth + value + first + second + third\n\n",
+            "class Second:\n",
+            "    def transform(self, value):\n",
+            "        first = value + 1\n        second = first * 2\n",
+            "        third = second - 3\n        fourth = third / 4\n",
+            "        return fourth + value + first + second + third\n\n",
+            "class Temporary:\n",
+            "    a: int | None = None\n    b: int | None = None\n    c: int | None = None\n",
+            "    def one(self):\n        return self.a\n",
+            "    def two(self):\n        return 2\n",
+            "    def three(self):\n        return 3\n",
+            "    def four(self):\n        return 4\n\n",
+            "class MiddleMan:\n",
+            "    def one(self, x):\n        return self.backend.send(x)\n",
+            "    def two(self, x):\n        return self.backend.send(x)\n",
+            "    def three(self, x):\n        return self.backend.send(x)\n",
+            "    def four(self, x):\n        return self.backend.send(x)\n",
+            "    def five(self, x):\n        return self.backend.send(x)\n\n",
+            "def dispatch_one(value):\n    match value:\n        case Kind.A: return 1\n",
+            "        case Kind.B: return 2\n        case Kind.C: return 3\n        case Kind.D: return 4\n",
+            "def dispatch_two(value):\n    match value:\n        case Kind.A: return 1\n",
+            "        case Kind.B: return 2\n        case Kind.C: return 3\n        case Kind.D: return 4\n",
+            "def dispatch_three(value):\n    match value:\n        case Kind.A: return 1\n",
+            "        case Kind.B: return 2\n        case Kind.C: return 3\n        case Kind.D: return 4\n",
+        ),
+        &policy,
+    );
+    workspace.initialize_git();
+    let output = workspace.check_path();
+    assert_eq!(output.status.code(), Some(0));
+    let data = report(&output);
+    for rule in [
+        "python.alternative_interfaces",
+        "python.repeated_dispatch",
+        "python.temporary_fields",
+        "python.forwarding_share",
+    ] {
+        matched_rule(&data, rule);
+    }
+}
+
+#[test]
+fn default_python_scan_runs_static_semantic_collectors() {
+    let policy: Value =
+        serde_json::from_str(include_str!("../examples/python-quality-policy.json")).unwrap();
+    let workspace = Workspace::new(
+        "contracts.py",
+        concat!(
+            "class Account:\n    customer_id: int\n\n",
+            "def branching(value):\n    if value > 0:\n        return value\n    return 0\n\n",
+            "def _unused_helper():\n    return 1\n\n",
+            "def generic[T](value: int):\n    return value\n\n",
+            "External.Widget.patch = replacement\n",
+        ),
+        &policy,
+    );
+    workspace.initialize_git();
+    let output = workspace.check_path();
+    assert_eq!(output.status.code(), Some(0));
+    let data = report(&output);
+    for rule in [
+        "python.function_crap",
+        "python.unused_code",
+        "python.unused_type_parameters",
+        "python.nominal_slot_contract",
+        "python.library_capabilities",
+    ] {
+        matched_rule(&data, rule);
+    }
+}
+
+#[test]
+fn python_class_collectors_ignore_method_locals_and_nested_callables() {
+    let policy: Value =
+        serde_json::from_str(include_str!("../examples/python-quality-policy.json")).unwrap();
+    let workspace = Workspace::new(
+        "locals.py",
+        concat!(
+            "class Wrapper:\n",
+            "    def run(self):\n",
+            "        first: str = 'a'\n        second: str = 'b'\n",
+            "        third: str = 'c'\n        fourth: str = 'd'\n",
+            "        fifth: str = 'e'\n",
+            "        one = lambda x: self.backend.send(x)\n",
+            "        two = lambda x: self.backend.send(x)\n",
+            "        three = lambda x: self.backend.send(x)\n",
+            "        four = lambda x: self.backend.send(x)\n",
+            "        return (first, second, third, fourth, fifth, one, two, three, four)\n",
+        ),
+        &policy,
+    );
+    workspace.initialize_git();
+    let output = workspace.check_path();
+    assert_eq!(output.status.code(), Some(0));
+    let data = report(&output);
+    for rule in ["python.primitive_slots", "python.forwarding_share"] {
+        assert!(
+            !data["findings"].as_array().unwrap().iter().any(|finding| {
+                finding["rule_id"] == rule && finding["evaluation"]["matched"] == true
+            }),
+            "method-local syntax must not populate {rule}"
+        );
+    }
+}
+
+#[test]
+fn default_python_scan_runs_inheritance_and_port_collectors() {
+    let policy: Value =
+        serde_json::from_str(include_str!("../examples/python-quality-policy.json")).unwrap();
+    let workspace = Workspace::new(
+        "hierarchies.py",
+        concat!(
+            "class OutputPort(Protocol):\n",
+            "    def save(self): ...\n    def load(self): ...\n\n",
+            "class BrokenOutput(OutputPort):\n    def save(self): return None\n\n",
+            "class Parent:\n",
+            "    def first(self): return 1\n",
+            "    def second(self): return 2\n",
+            "    def third(self): return 3\n\n",
+            "class Child(Parent):\n",
+            "    def first(self): raise NotImplementedError\n",
+            "    def second(self): raise NotImplementedError\n",
+            "    def third(self): raise NotImplementedError\n\n",
+            "class EmailValidator(Validator): pass\nclass SmsValidator(Validator): pass\n",
+            "class PushValidator(Validator): pass\n",
+            "class EmailFormatter(Formatter): pass\nclass SmsFormatter(Formatter): pass\n",
+            "class PushFormatter(Formatter): pass\n",
+        ),
+        &policy,
+    );
+    workspace.initialize_git();
+    let output = workspace.check_path();
+    assert_eq!(output.status.code(), Some(0));
+    let data = report(&output);
+    for rule in [
+        "python.port_conformance",
+        "python.refused_bequest",
+        "python.parallel_inheritance",
+    ] {
+        matched_rule(&data, rule);
+    }
+}
+
+#[test]
+fn default_python_scan_collects_git_history_without_an_evidence_bundle() {
+    let policy: Value =
+        serde_json::from_str(include_str!("../examples/python-quality-policy.json")).unwrap();
+    let workspace = Workspace::new("app.py", "value = 1\n", &policy);
+    workspace.source("accounts/model.py", "value = 1\n");
+    workspace.source("billing/model.py", "value = 1\n");
+    workspace.source("shipping/model.py", "value = 1\n");
+    workspace.stage();
+    workspace.commit("baseline fanout");
+
+    workspace.source("app.py", "value = 2\n");
+    workspace.source("accounts/model.py", "value = 2\n");
+    workspace.commit("accounts change");
+    workspace.source("app.py", "value = 3\n");
+    workspace.source("billing/model.py", "value = 3\n");
+    workspace.commit("billing change");
+
+    let output = workspace.check_path();
+    assert_eq!(output.status.code(), Some(0));
+    let data = report(&output);
+    matched_rule(&data, "python.divergent_change");
+    matched_rule(&data, "python.shotgun_surgery");
+}
+
+#[test]
+fn every_selected_history_rule_is_incomplete_when_git_history_is_unavailable() {
+    let policy: Value =
+        serde_json::from_str(include_str!("../examples/python-quality-policy.json")).unwrap();
+    let workspace = Workspace::new("app.py", "value = 1\n", &policy);
+    let output = workspace.check_path();
+    assert_eq!(output.status.code(), Some(2));
+    let data = report(&output);
+    assert_eq!(data["history_scope"]["available"], false);
+    for (rule, smell) in [
+        ("python.divergent_change", "divergent-change"),
+        ("python.shotgun_surgery", "shotgun-surgery"),
+    ] {
+        assert!(data["errors"].as_array().unwrap().iter().any(|error| {
+            error
+                == &format!(
+                    "rule {rule}: Git history is unavailable for built-in collector: {rule}"
+                )
+        }));
+        let result = smell_result(&data, smell);
+        assert_eq!(result["state"], "error");
+        assert_eq!(result["coverage_status"], "incomplete");
+        assert!(
+            result["incomplete_rule_ids"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|incomplete| incomplete == rule)
+        );
+    }
+    assert_ne!(smell_result(&data, "large-class")["state"], "error");
+}
+
+#[test]
+fn default_typescript_scan_runs_every_built_in_source_collector() {
+    let policy: Value =
+        serde_json::from_str(include_str!("../examples/typescript-quality-policy.json")).unwrap();
+    let workspace = Workspace::new(
+        "patterns.ts",
+        concat!(
+            "interface OutputPort { save(): void; load(): void; }\n",
+            "class BrokenOutput implements OutputPort { save(): void {} }\n",
+            "class Profile { name: string; city: string; country: string; age: number; active: boolean; customer_id: number; }\n",
+            "class First { calculate(value: number) { const a=value+1; const b=a*2; const c=b-3; const d=c/4; return d+value+a+b+c; } }\n",
+            "class Second { transform(value: number) { const a=value+1; const b=a*2; const c=b-3; const d=c/4; return d+value+a+b+c; } }\n",
+            "class Temporary { a?: number; b?: number; c?: number; one(){return this.a;} two(){return 2;} three(){return 3;} four(){return 4;} }\n",
+            "class MiddleMan { one(x:number){return this.backend.send(x);} two(x:number){return this.backend.send(x);} three(x:number){return this.backend.send(x);} four(x:number){return this.backend.send(x);} five(x:number){return this.backend.send(x);} }\n",
+            "function dispatchOne(value: Kind) { switch(value) {\ncase Kind.A: return 1;\ncase Kind.B: return 2;\ncase Kind.C: return 3;\ncase Kind.D: return 4;\n} }\n",
+            "function dispatchTwo(value: Kind) { switch(value) {\ncase Kind.A: return 1;\ncase Kind.B: return 2;\ncase Kind.C: return 3;\ncase Kind.D: return 4;\n} }\n",
+            "function dispatchThree(value: Kind) { switch(value) {\ncase Kind.A: return 1;\ncase Kind.B: return 2;\ncase Kind.C: return 3;\ncase Kind.D: return 4;\n} }\n",
+            "class Parent { first(){return 1;} second(){return 2;} third(){return 3;} }\n",
+            "class Child extends Parent { first(){throw new Error();} second(){throw new Error();} third(){throw new Error();} }\n",
+            "class EmailValidator extends Validator {} class SmsValidator extends Validator {} class PushValidator extends Validator {}\n",
+            "class EmailFormatter extends Formatter {} class SmsFormatter extends Formatter {} class PushFormatter extends Formatter {}\n",
+            "function branching(value:number){ if(value>0){return value;} return 0; }\n",
+            "function _unusedHelper(){ return 1; }\n",
+            "function generic<T>(value:number){ return value; }\n",
+            "function inspect(order:any, customer:any, account:any){ const city=order.customer.address.city; return [customer.name,customer.address,customer.city,customer.country,customer.account,customer.currency,account._secret,city]; }\n",
+            "External.prototype.patch = replacement;\n",
+        ),
+        &policy,
+    );
+    workspace.initialize_git();
+    let output = workspace.check_path();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let data = report(&output);
+    for rule in [
+        "typescript.primitive_slots",
+        "typescript.alternative_interfaces",
+        "typescript.repeated_dispatch",
+        "typescript.temporary_fields",
+        "typescript.forwarding_share",
+        "typescript.function_crap",
+        "typescript.unused_code",
+        "typescript.unused_type_parameters",
+        "typescript.nominal_slot_contract",
+        "typescript.port_conformance",
+        "typescript.refused_bequest",
+        "typescript.parallel_inheritance",
+        "typescript.foreign_accesses",
+        "typescript.dependency_contract",
+        "typescript.library_capabilities",
+        "typescript.navigation_chains",
+    ] {
+        matched_rule(&data, rule);
+    }
+}
+
+#[test]
+fn typescript_structural_collectors_ignore_non_code_text_and_bodyless_signatures() {
+    let policy: Value =
+        serde_json::from_str(include_str!("../examples/typescript-quality-policy.json")).unwrap();
+    let repeated_literal =
+        "case Kind.A: one\\ncase Kind.B: two\\ncase Kind.C: three\\ncase Kind.D: four";
+    let workspace = Workspace::new(
+        "patterns.ts",
+        &format!(
+            concat!(
+                "interface Port {{ execute<T>(): void; }}\n",
+                "abstract class Base {{ abstract required<U>(): void; concrete() {{ return \"if while case catch && ||\"; }} }}\n",
+                "class FalseTemporary {{ one(){{return \"this.a = null\";}} two(){{return \"this.b = null\";}} three(){{return \"this.c = null\";}} four(){{return \"idle\";}} }}\n",
+                "class First {{ one(){{return \"alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau\";}} }}\n",
+                "class Second {{ two(){{return \"alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau\";}} }}\n",
+                "function fakeOne() {{ return `{0}`; }}\n",
+                "function fakeTwo() {{ return `{0}`; }}\n",
+                "function fakeThree() {{ return `{0}`; }}\n",
+                "function _unused<T>() {{ return \"_unused T\"; }} // _unused T\n",
+                "function values(items: Array<Foo>) {{ return items; }}\n",
+                "class Derived extends Base<Foo> {{}}\n",
+                "class Middle {{ a(){{return this./* note */backend.send(1);}} b(){{return this.backend.send(2);}} c(){{return this.backend.send(3);}} d(){{return this.backend.send(4);}} e(){{return this.backend.send(5);}} }}\n",
+                "class Parent {{ a(){{}} b(){{}} c(){{}} }}\n",
+                "class Child extends Parent {{ a(){{throw /* note */ new Error();}} b(){{throw new Error();}} c(){{throw new Error();}} }}\n",
+            ),
+            repeated_literal,
+        ),
+        &policy,
+    );
+    workspace.initialize_git();
+    let output = workspace.check_path();
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let data = report(&output);
+    for rule in [
+        "typescript.temporary_fields",
+        "typescript.alternative_interfaces",
+        "typescript.repeated_dispatch",
+    ] {
+        assert!(data["findings"].as_array().unwrap().iter().all(|finding| {
+            finding["rule_id"] != rule || finding["evaluation"]["matched"] == false
+        }));
+    }
+    let concrete_crap = data["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| {
+            finding["rule_id"] == "typescript.function_crap"
+                && finding["symbol"]
+                    .as_str()
+                    .is_some_and(|symbol| symbol.ends_with("Base.concrete"))
+        })
+        .expect("concrete method CRAP observation");
+    assert_eq!(
+        concrete_crap["evaluation"]["observed"],
+        json!({"numerator": 2, "denominator": 1})
+    );
+    assert!(data["findings"].as_array().unwrap().iter().all(|finding| {
+        finding["rule_id"] != "typescript.function_crap"
+            || !finding["symbol"].as_str().is_some_and(|symbol| {
+                symbol.ends_with("Port.execute") || symbol.ends_with("Base.required")
+            })
+    }));
+    for name in ["Port.execute", "Base.required"] {
+        assert!(data["findings"].as_array().unwrap().iter().any(|finding| {
+            finding["rule_id"] == "typescript.unused_type_parameters"
+                && finding["evaluation"]["matched"] == true
+                && finding["symbol"]
+                    .as_str()
+                    .is_some_and(|symbol| symbol.ends_with(name))
+        }));
+    }
+    assert!(data["findings"].as_array().unwrap().iter().all(|finding| {
+        finding["rule_id"] != "typescript.unused_type_parameters"
+            || !finding["symbol"].as_str().is_some_and(|symbol| {
+                symbol.ends_with("patterns.ts::Port")
+                    || symbol.ends_with("patterns.ts::Base")
+                    || symbol.ends_with("patterns.ts::values")
+                    || symbol.ends_with("patterns.ts::Derived")
+            })
+    }));
+    for rule in [
+        "typescript.unused_code",
+        "typescript.unused_type_parameters",
+        "typescript.forwarding_share",
+        "typescript.refused_bequest",
+    ] {
+        matched_rule(&data, rule);
+    }
+}
+
+#[test]
+fn python_structural_collectors_ignore_literal_and_comment_text() {
+    let policy: Value =
+        serde_json::from_str(include_str!("../examples/python-quality-policy.json")).unwrap();
+    let workspace = Workspace::new(
+        "patterns.py",
+        concat!(
+            "def _unused[T]():\n",
+            "    return 'T if elif for while case catch _unused'\n",
+            "# _unused and T are prose, not references\n\n",
+            "def values(items: list[int]):\n    return items\n\n",
+            "class Derived(Base[int]):\n    pass\n\n",
+            "class FalseTemporary:\n",
+            "    def one(self): return 'self.a = None'\n",
+            "    def two(self): return 'self.b = None'\n",
+            "    def three(self): return 'self.c = None'\n",
+            "    def four(self): return 'idle'\n",
+        ),
+        &policy,
+    );
+    workspace.initialize_git();
+    let output = workspace.check_path();
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let data = report(&output);
+    let crap = data["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| {
+            finding["rule_id"] == "python.function_crap"
+                && finding["symbol"]
+                    .as_str()
+                    .is_some_and(|symbol| symbol.ends_with("::_unused"))
+        })
+        .expect("Python function CRAP observation");
+    assert_eq!(
+        crap["evaluation"]["observed"],
+        json!({"numerator": 2, "denominator": 1})
+    );
+    assert!(data["findings"].as_array().unwrap().iter().all(|finding| {
+        finding["rule_id"] != "python.temporary_fields" || finding["evaluation"]["matched"] == false
+    }));
+    assert!(data["findings"].as_array().unwrap().iter().all(|finding| {
+        finding["rule_id"] != "python.unused_type_parameters"
+            || !finding["symbol"].as_str().is_some_and(|symbol| {
+                symbol.ends_with("patterns.py::values") || symbol.ends_with("patterns.py::Derived")
+            })
+    }));
+    matched_rule(&data, "python.unused_code");
+    matched_rule(&data, "python.unused_type_parameters");
 }
 
 #[test]
@@ -559,7 +1167,7 @@ fn runtime_manifests_partition_monorepo_results_by_repository_implementation() {
     let output = workspace.check_path();
     assert_eq!(output.status.code(), Some(0));
     let data = report(&output);
-    assert_eq!(data["report_schema_version"], 5);
+    assert_eq!(data["report_schema_version"], 6);
     assert_eq!(
         data["implementation_results"]
             .as_array()
@@ -661,8 +1269,9 @@ fn python_class_metrics_combine_declared_state_and_owned_methods() {
     assert_eq!(
         output.status.code(),
         Some(1),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+        "stderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
     );
     let data = report(&output);
     for (rule, observed, threshold) in [
@@ -1549,7 +2158,9 @@ fn typescript_import_type_generic_calls_parse_without_hiding_other_errors() {
   return importOriginal<typeof import("reactflow")>()
 }
 "#;
-    let workspace = Workspace::new("valid.tsx", valid, &portable_policy("typescript"));
+    let policy: Value =
+        serde_json::from_str(include_str!("../examples/typescript-quality-policy.json")).unwrap();
+    let workspace = Workspace::new("valid.tsx", valid, &policy);
     fs::write(
         workspace.path.join("trailing.ts"),
         r#"async function trailingCall(importOriginal: any) {
@@ -1558,6 +2169,7 @@ fn typescript_import_type_generic_calls_parse_without_hiding_other_errors() {
 "#,
     )
     .unwrap();
+    workspace.initialize_git();
     let output = workspace.check_path();
     assert_eq!(
         output.status.code(),
@@ -1584,6 +2196,56 @@ function broken( {
             .unwrap()
             .iter()
             .any(|error| error == "parse error in broken.ts")
+    );
+}
+
+#[test]
+fn typescript_built_in_class_model_honors_direct_member_contract() {
+    let mut policy = portable_policy("typescript");
+    require_only(
+        &mut policy,
+        &[
+            "typescript.primitive_slots",
+            "typescript.alternative_interfaces",
+        ],
+    );
+    require(
+        &mut policy,
+        "typescript.primitive_slots",
+        json!({"minimum_raw_slots": 2, "minimum_share_percent": 100}),
+    );
+    require(
+        &mut policy,
+        "typescript.alternative_interfaces",
+        json!({"minimum_similarity_basis_points": 1, "minimum_tokens": 4}),
+    );
+    let workspace = Workspace::new(
+        "members.ts",
+        concat!(
+            "class First {\n",
+            "  constructor(private count: number, readonly label: string) {}\n",
+            "  execute = (value: number) => value + value + value + 1;\n",
+            "}\n",
+            "class Second { transform = (value: number) => value + value + value + 1; }\n",
+        ),
+        &policy,
+    );
+    let output = workspace.check_path();
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let data = report(&output);
+    let primitive = matched_rule(&data, "typescript.primitive_slots");
+    assert_eq!(primitive["evaluation"]["observed"]["raw_slots"], 2);
+    assert!(
+        !data["findings"].as_array().unwrap().iter().any(|finding| {
+            finding["rule_id"] == "typescript.alternative_interfaces"
+                && finding["evaluation"]["matched"] == true
+        }),
+        "arrow-valued fields are callables, not direct class methods"
     );
 }
 
@@ -1692,6 +2354,176 @@ fn python_lambdas_and_typescript_arrows_are_callable_metrics() {
 }
 
 #[test]
+fn typescript_collects_class_and_callable_expressions_and_generators() {
+    let mut policy = portable_policy("typescript");
+    require_only(
+        &mut policy,
+        &[
+            "typescript.function_arguments",
+            "typescript.primitive_slots",
+        ],
+    );
+    require(
+        &mut policy,
+        "typescript.primitive_slots",
+        json!({"minimum_raw_slots": 2, "minimum_share_percent": 100}),
+    );
+    let workspace = Workspace::new(
+        "expressions.ts",
+        concat!(
+            "const RecordType = class { first: string; second: number; };\n",
+            "const expressed = function(a: number, b: number, c: number, d: number) { return a + b + c + d; };\n",
+            "const arrowed = (a: number, b: number, c: number, d: number) => a + b + c + d;\n",
+            "function* declared(a: number, b: number, c: number, d: number) { yield a + b + c + d; }\n",
+            "const generated = function*(a: number, b: number, c: number, d: number) { yield a + b + c + d; };\n",
+        ),
+        &policy,
+    );
+    let output = workspace.check_path();
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let data = report(&output);
+    let overloaded_callables = data["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|finding| {
+            finding["rule_id"] == "typescript.function_arguments"
+                && finding["evaluation"]["matched"] == true
+        })
+        .count();
+    assert_eq!(overloaded_callables, 4);
+    let primitive = matched_rule(&data, "typescript.primitive_slots");
+    assert_eq!(primitive["evaluation"]["observed"]["raw_slots"], 2);
+}
+
+#[test]
+fn rust_built_in_model_keeps_same_named_types_in_separate_sources() {
+    let mut policy: Value =
+        serde_json::from_str(include_str!("../examples/quality-policy.json")).unwrap();
+    require_only(&mut policy, &["rust.primitive_slots"]);
+    let workspace = Workspace::new(
+        "lib.rs",
+        "struct Config { one: i32, two: i32, three: i32, four: i32, five: i32 }\n",
+        &policy,
+    );
+    workspace.source("other.rs", "struct Config;\n");
+    let output = workspace.check_path();
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let data = report(&output);
+    let findings = data["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|finding| {
+            finding["rule_id"] == "rust.primitive_slots" && finding["evaluation"]["matched"] == true
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(findings.len(), 1);
+    assert_eq!(findings[0]["symbol"], "lib.rs::Config");
+}
+
+#[test]
+fn rust_relation_collectors_resolve_qualified_same_named_traits() {
+    let mut policy: Value =
+        serde_json::from_str(include_str!("../examples/quality-policy.json")).unwrap();
+    require_only(&mut policy, &["rust.port_conformance"]);
+    let workspace = Workspace::new(
+        "lib.rs",
+        concat!(
+            "mod a { pub trait Port { fn save(&self); } }\n",
+            "mod b { pub trait Port { fn remove(&self); } }\n",
+            "struct Service;\n",
+            "impl a::Port for Service { fn save(&self) {} }\n",
+        ),
+        &policy,
+    );
+    let output = workspace.check_path();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let data = report(&output);
+    let finding = data["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| finding["rule_id"] == "rust.port_conformance")
+        .expect("port conformance measurement");
+    assert_eq!(finding["evaluation"]["observed"], 0);
+    assert_eq!(finding["evaluation"]["matched"], false);
+    assert_eq!(finding["related_symbols"], json!(["lib.rs::a::Port"]));
+}
+
+#[test]
+fn built_in_text_collectors_ignore_comments_strings_and_imports() {
+    for (language, file, source) in [
+        (
+            "python",
+            "masked.py",
+            concat!(
+                "import fake.deep.navigation as imported\n",
+                "# order.customer.address.city customer._secret\n",
+                "TEXT = 'order.customer.address.city customer._secret External.prototype.patch = replacement'\n",
+                "def clean(value):\n    return value\n",
+            ),
+        ),
+        (
+            "typescript",
+            "masked.ts",
+            concat!(
+                "import { value } from 'fake.deep.navigation';\n",
+                "// order.customer.address.city customer._secret\n",
+                "const text = 'order.customer.address.city customer._secret External.prototype.patch = replacement';\n",
+                "function clean(value: number) { return value; }\n",
+            ),
+        ),
+    ] {
+        let mut policy = portable_policy(language);
+        let rules = [
+            format!("{language}.navigation_chains"),
+            format!("{language}.foreign_accesses"),
+            format!("{language}.dependency_contract"),
+            format!("{language}.library_capabilities"),
+        ];
+        require_only(
+            &mut policy,
+            &rules.iter().map(String::as_str).collect::<Vec<_>>(),
+        );
+        let workspace = Workspace::new(file, source, &policy);
+        let output = workspace.check_path();
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{language}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let data = report(&output);
+        assert!(
+            data["findings"].as_array().unwrap().iter().all(|finding| {
+                finding["evaluation"]["matched"] == false
+                    || !rules
+                        .iter()
+                        .any(|rule_id| finding["rule_id"] == rule_id.as_str())
+            }),
+            "{language}: {data}"
+        );
+    }
+}
+
+#[test]
 fn python_parameter_separators_are_not_arguments() {
     let workspace = Workspace::new(
         "parameters.py",
@@ -1736,7 +2568,7 @@ fn portable_reports_replay_byte_for_byte() {
 }
 
 #[test]
-fn required_portable_provider_rule_fails_closed_without_evidence() {
+fn required_portable_rule_uses_the_built_in_collector_without_evidence() {
     let mut policy = portable_policy("python");
     require(
         &mut policy,
@@ -1745,15 +2577,16 @@ fn required_portable_provider_rule_fails_closed_without_evidence() {
     );
     let workspace = Workspace::new("model.py", "class Child:\n    pass\n", &policy);
     let output = workspace.check_path();
-    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(output.status.code(), Some(0));
     let data = report(&output);
-    assert_eq!(data["summary"]["verdict"], "incomplete_due_to_errors");
+    assert_ne!(data["summary"]["verdict"], "incomplete_due_to_errors");
+    assert_eq!(data["errors"], json!([]));
     assert!(
-        data["errors"]
+        smell_result(&data, "refused-bequest")["measured_rule_ids"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|error| error == "complete provider evidence required: python.refused_bequest")
+            .any(|rule| rule == "python.refused_bequest")
     );
 }
 
@@ -1767,14 +2600,14 @@ fn complete_provider_evidence_is_pinned_and_evaluated_by_the_scanner() {
     );
     let workspace = Workspace::new("model.py", "class Child:\n    pass\n", &policy);
     let missing = workspace.check_path();
-    assert_eq!(missing.status.code(), Some(2));
+    assert_eq!(missing.status.code(), Some(0));
     let input_sha256 = report(&missing)["input_sha256"]
         .as_str()
         .unwrap()
         .to_string();
     let evidence = json!({
         "schema_version": 1,
-        "scanner_version": "0.3.0",
+        "scanner_version": "0.4.0",
         "rule_pack": "python-v1",
         "input_sha256": input_sha256,
         "providers": [{
@@ -1840,14 +2673,14 @@ fn staged_provider_evidence_cannot_be_replaced_by_unstaged_bytes() {
     );
     workspace.stage();
     let missing = workspace.check_staged();
-    assert_eq!(missing.status.code(), Some(2));
+    assert_eq!(missing.status.code(), Some(0));
     let input_sha256 = report(&missing)["input_sha256"]
         .as_str()
         .unwrap()
         .to_string();
     let evidence = json!({
         "schema_version": 1,
-        "scanner_version": "0.3.0",
+        "scanner_version": "0.4.0",
         "rule_pack": "typescript-v1",
         "input_sha256": input_sha256,
         "providers": [{

@@ -2,6 +2,21 @@
 
 All notable changes to Smells are recorded here. Release tags use `vMAJOR.MINOR.PATCH`.
 
+## 0.4.0 - 2026-09-21
+
+- Run all 28 rules and report all 23 canonical smells by default without requiring
+  consuming repositories to generate provider-evidence bundles.
+- Add built-in Rust, Python, and TypeScript collectors for type-shape, CRAP risk,
+  dead code, architecture, inheritance, delegation, and coupling indicators.
+- Capture up to 200 Git commits automatically for divergent-change and
+  shotgun-surgery indicators, binding the captured history into `input_sha256`;
+  selected history rules are explicitly incomplete when Git is unavailable.
+- Keep `--evidence` as an optional per-rule higher-fidelity override.
+- Report only scanner-owned inputs as required; compiler, coverage, type, test,
+  and project-contract bundles are optional overrides.
+- Preserve non-negotiable Refactoring.Guru research: an agent must open and read
+  the exact emitted URL before review or remediation, or stop as incomplete.
+
 ## 0.3.0 - 2026-09-20
 
 - Prepare the prebuilt scanner wheels as the `smells` PyPI tool package.

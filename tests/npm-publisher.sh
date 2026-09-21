@@ -4,6 +4,9 @@ set -eu
 script_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repository_root=$(CDPATH= cd -- "$script_directory/.." && pwd)
 publisher="$repository_root/npm/publish-packages.mjs"
+version=$(sed -n '/^\[package\]/,/^\[/ s/^version = "\([^"]*\)"/\1/p' \
+    "$repository_root/Cargo.toml")
+test -n "$version"
 temporary=$(mktemp -d "${TMPDIR:-/tmp}/smells-npm-publisher.XXXXXX")
 trap 'rm -rf -- "$temporary"' EXIT HUP INT TERM
 
@@ -20,7 +23,7 @@ for name in \
     mindful-time-smells-win32-x64-msvc \
     mindful-time-smells
 do
-    printf 'identical package fixture\n' > "$packages/$name-0.3.0.tgz"
+    printf 'identical package fixture\n' > "$packages/$name-$version.tgz"
 done
 
 printf '%s\n' \
@@ -49,13 +52,14 @@ EXPECTED_INTEGRITY=$(node -e '
 const { createHash } = require("node:crypto");
 const { readFileSync } = require("node:fs");
 process.stdout.write(`sha512-${createHash("sha512").update(readFileSync(process.argv[1])).digest("base64")}`);
-' "$packages/mindful-time-smells-0.3.0.tgz")
+' "$packages/mindful-time-smells-$version.tgz")
 EXPECTED_REGISTRY=https://npm.pkg.github.com
+EXPECTED_VERSION=$version
 NPM_CALL_LOG="$temporary/npm-calls.txt"
-export EXPECTED_INTEGRITY EXPECTED_REGISTRY NPM_CALL_LOG
+export EXPECTED_INTEGRITY EXPECTED_REGISTRY EXPECTED_VERSION NPM_CALL_LOG
 
 PATH="$fake_bin:$PATH" node "$publisher" \
-    "$packages" 0.3.0 "$EXPECTED_REGISTRY"
+    "$packages" "$version" "$EXPECTED_REGISTRY"
 
 test "$(wc -l < "$NPM_CALL_LOG" | tr -d ' ')" = 6
 if grep -v -- "--registry $EXPECTED_REGISTRY" "$NPM_CALL_LOG" >/dev/null; then
@@ -74,9 +78,10 @@ set -eu
 case "$1" in
     view)
         printf 'view %s\n' "$*" >> "$PUBLISH_CALL_LOG"
-        package_key=$(printf '%s\n' "$2" \
-            | sed 's/^@//; s/@0\.3\.0$//; s#/#-#')
-        marker="$PUBLISH_STATE/$package_key-0.3.0.tgz"
+        package_key=${2#@}
+        package_key=${package_key%"@$EXPECTED_VERSION"}
+        package_key=$(printf '%s\n' "$package_key" | sed 's#/#-#')
+        marker="$PUBLISH_STATE/$package_key-$EXPECTED_VERSION.tgz"
         if [ ! -f "$marker" ]; then
             printf 'npm ERR! code E404\n' >&2
             exit 1
@@ -102,15 +107,16 @@ export PUBLISH_CALL_LOG PUBLISH_STATE
 (
     cd "$temporary"
     PATH="$publish_bin:$PATH" node "$publisher" \
-        packages 0.3.0 https://registry.npmjs.org --provenance
+        packages "$version" https://registry.npmjs.org --provenance
 )
 
-expected_publish_order='mindful-time-smells-darwin-arm64-0.3.0.tgz
-mindful-time-smells-darwin-x64-0.3.0.tgz
-mindful-time-smells-linux-arm64-gnu-0.3.0.tgz
-mindful-time-smells-linux-x64-gnu-0.3.0.tgz
-mindful-time-smells-win32-x64-msvc-0.3.0.tgz
-mindful-time-smells-0.3.0.tgz'
+expected_publish_order=$(printf '%s\n' \
+    "mindful-time-smells-darwin-arm64-$version.tgz" \
+    "mindful-time-smells-darwin-x64-$version.tgz" \
+    "mindful-time-smells-linux-arm64-gnu-$version.tgz" \
+    "mindful-time-smells-linux-x64-gnu-$version.tgz" \
+    "mindful-time-smells-win32-x64-msvc-$version.tgz" \
+    "mindful-time-smells-$version.tgz")
 actual_publish_order=$(sed -n 's#^publish .*\(/mindful-time-.*\.tgz\).*#\1#p' \
     "$publish_log" | sed 's#^.*/##')
 test "$actual_publish_order" = "$expected_publish_order"

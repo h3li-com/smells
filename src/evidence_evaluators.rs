@@ -1,4 +1,4 @@
-use crate::policy::Policy;
+use crate::{policy::Policy, rule_runtime::RuleKind};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -12,25 +12,28 @@ pub(crate) struct Evaluation {
 
 type Evaluator = fn(&str, &BTreeMap<String, u64>, &Policy) -> Result<Evaluation, String>;
 
-const EVALUATORS: &[(&str, Evaluator)] = &[
-    ("alternative_interfaces", alternative_interfaces),
-    ("dependency_contract", dependency_contract),
-    ("divergent_change", divergent_change),
-    ("foreign_accesses", foreign_accesses),
-    ("forwarding_share", forwarding_share),
-    ("function_crap", function_crap),
-    ("library_capabilities", library_capabilities),
-    ("navigation_chains", navigation_chains),
-    ("nominal_slot_contract", nominal_slot_contract),
-    ("parallel_inheritance", parallel_inheritance),
-    ("port_conformance", port_conformance),
-    ("primitive_slots", primitive_slots),
-    ("refused_bequest", refused_bequest),
-    ("repeated_dispatch", repeated_dispatch),
-    ("shotgun_surgery", shotgun_surgery),
-    ("temporary_fields", temporary_fields),
-    ("unused_code", unused_findings),
-    ("unused_type_parameters", unused_findings),
+const EVALUATORS: &[(RuleKind, Evaluator)] = &[
+    (RuleKind::AlternativeInterfaces, alternative_interfaces),
+    (RuleKind::DependencyContract, dependency_contract),
+    (RuleKind::DivergentChange, divergent_change),
+    (RuleKind::ForeignAccesses, foreign_accesses),
+    (RuleKind::ForwardingShare, forwarding_share),
+    (RuleKind::FunctionCrap, function_crap),
+    (RuleKind::LibraryCapabilities, library_capabilities),
+    (RuleKind::NavigationChains, navigation_chains),
+    (RuleKind::NominalSlotContract, nominal_slot_contract),
+    (RuleKind::ParallelInheritance, parallel_inheritance),
+    (RuleKind::PortConformance, port_conformance),
+    (RuleKind::PrimitiveSlots, primitive_slots),
+    (RuleKind::RefusedBequest, refused_bequest),
+    (RuleKind::RepeatedDispatch, repeated_dispatch),
+    (RuleKind::ShotgunSurgery, shotgun_surgery),
+    (RuleKind::TemporaryFields, temporary_fields),
+    (RuleKind::UnusedCode, unused_code_findings),
+    (
+        RuleKind::UnusedTypeParameters,
+        unused_type_parameter_findings,
+    ),
 ];
 
 pub(crate) fn evaluate(
@@ -38,11 +41,11 @@ pub(crate) fn evaluate(
     measurements: &BTreeMap<String, u64>,
     policy: &Policy,
 ) -> Result<Evaluation, String> {
-    let suffix = id.split_once('.').map(|(_, suffix)| suffix).unwrap_or(id);
+    let kind = RuleKind::from_id(id)?;
     let evaluator = EVALUATORS
         .iter()
-        .find_map(|(name, evaluator)| (*name == suffix).then_some(*evaluator))
-        .ok_or_else(|| format!("no provider evaluator for {id}"))?;
+        .find_map(|(registered, evaluator)| (*registered == kind).then_some(*evaluator))
+        .ok_or_else(|| format!("no built-in evaluator for {id}"))?;
     evaluator(id, measurements, policy)
 }
 
@@ -72,7 +75,7 @@ fn primitive_slots(
     let minimum = policy.parameter(id, "minimum_raw_slots");
     let share = policy.parameter(id, "minimum_share_percent");
     Ok(Evaluation {
-        metric: "resolved primitive slots",
+        metric: "primitive slots",
         observed: json!({"raw_slots":raw,"total_slots":total}),
         comparison: "count and share >=",
         threshold: json!({"minimum_raw_slots":minimum,"minimum_share_percent":share}),
@@ -97,7 +100,7 @@ fn alternative_interfaces(
     let minimum = policy.parameter(id, "minimum_tokens");
     let similarity = policy.parameter(id, "minimum_similarity_basis_points");
     Ok(Evaluation {
-        metric: "resolved class behavior similarity",
+        metric: "class behavior similarity",
         observed: json!({"first_tokens":first,"second_tokens":second,"intersection":intersection,"union":union}),
         comparison: "tokens and Jaccard >=",
         threshold: json!({"minimum_tokens":minimum,"minimum_similarity_basis_points":similarity}),
@@ -116,7 +119,7 @@ fn repeated_dispatch(
     let minimum_sites = policy.parameter(id, "minimum_sites");
     let minimum_arms = policy.parameter(id, "minimum_arms");
     Ok(Evaluation {
-        metric: "resolved repeated dispatch sites",
+        metric: "repeated dispatch sites",
         observed: json!({"sites":measured[1],"arms_per_site":measured[0]}),
         comparison: "both >=",
         threshold: json!({"minimum_sites":minimum_sites,"minimum_arms":minimum_arms}),
@@ -142,7 +145,7 @@ fn temporary_fields(
     let minimum_methods = policy.parameter(id, "minimum_methods");
     let maximum_share = policy.parameter(id, "maximum_use_percent");
     Ok(Evaluation {
-        metric: "resolved field-use share",
+        metric: "field-use share",
         observed: json!({"fields":fields,"methods":methods,"uses":uses,"possible_uses":possible}),
         comparison: "counts >= and use share <=",
         threshold: json!({"minimum_fields":minimum_fields,"minimum_methods":minimum_methods,"maximum_use_percent":maximum_share}),
@@ -165,7 +168,7 @@ fn forwarding_share(
     let minimum = policy.parameter(id, "minimum_methods");
     let share = policy.parameter(id, "minimum_share_percent");
     Ok(Evaluation {
-        metric: "resolved forwarding methods",
+        metric: "forwarding methods",
         observed: json!({"forwarders":forwarders,"methods":methods}),
         comparison: "methods and share >=",
         threshold: json!({"minimum_methods":minimum,"minimum_share_percent":share}),
@@ -185,7 +188,7 @@ fn function_crap(
     }
     let maximum = policy.parameter(id, "maximum");
     Ok(Evaluation {
-        metric: "provider CRAP score",
+        metric: "CRAP score",
         observed: json!({"numerator":numerator,"denominator":denominator}),
         comparison: ">",
         threshold: json!({"maximum":maximum}),
@@ -193,7 +196,7 @@ fn function_crap(
     })
 }
 
-fn unused_findings(
+fn unused_code_findings(
     id: &str,
     measurements: &BTreeMap<String, u64>,
     policy: &Policy,
@@ -204,7 +207,22 @@ fn unused_findings(
         policy,
         "findings",
         "maximum_findings",
-        "complete provider findings",
+        "unused-code findings",
+    )
+}
+
+fn unused_type_parameter_findings(
+    id: &str,
+    measurements: &BTreeMap<String, u64>,
+    policy: &Policy,
+) -> Result<Evaluation, String> {
+    count_maximum(
+        id,
+        measurements,
+        policy,
+        "findings",
+        "maximum_findings",
+        "unused type-parameter findings",
     )
 }
 
@@ -320,7 +338,7 @@ fn foreign_accesses(
     let minimum = policy.parameter(id, "minimum_foreign_accesses");
     let share = policy.parameter(id, "minimum_share_percent_exclusive");
     Ok(Evaluation {
-        metric: "resolved foreign member accesses",
+        metric: "foreign member accesses",
         observed: json!({"foreign_accesses":foreign,"total_accesses":total}),
         comparison: "count >= and share >",
         threshold: json!({"minimum_foreign_accesses":minimum,"minimum_share_percent_exclusive":share}),
@@ -369,7 +387,7 @@ fn navigation_chains(
         policy,
         "transitions",
         "minimum_transitions",
-        "resolved owner transitions",
+        "navigation transitions",
     )
 }
 
@@ -409,4 +427,19 @@ fn count_minimum(
         threshold: json!(minimum),
         matched: measured >= minimum,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_rule_kind_has_exactly_one_evaluator() {
+        let registered = EVALUATORS
+            .iter()
+            .map(|(kind, _)| *kind)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(registered.len(), EVALUATORS.len());
+        assert_eq!(registered, RuleKind::all().collect::<BTreeSet<RuleKind>>());
+    }
 }

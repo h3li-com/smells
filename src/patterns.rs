@@ -1,7 +1,7 @@
 use crate::{
     metrics::{self, Counter},
     policy::Policy,
-    report::Report,
+    report::{FindingRelations, Report},
     scan::{Facts, Function, syntax},
     similarity::exact_jaccard_pairs,
 };
@@ -500,7 +500,7 @@ fn clumps(facts: &Facts, policy: &Policy, report: &mut Report) {
             &mut subsets,
             &mut remaining,
         ) {
-            report.errors.push(error);
+            report.error(error);
             return;
         }
         for group in subsets {
@@ -513,18 +513,22 @@ fn clumps(facts: &Facts, policy: &Policy, report: &mut Report) {
         }
         let populations: Vec<_> = support.into_iter().map(|i| &facts.slots[i]).collect();
         let first = populations[0];
-        report.finding(policy,id,&first.symbol,&first.location,"repeated named syntax group",json!({"slots":group.len(),"declarations":populations.len()}),"both >=",
-            json!({"minimum_group_size":size,"minimum_declarations":minimum}),true,json!({"slots":group,"supporting_symbols":populations.iter().map(|s|&s.symbol).collect::<Vec<_>>(),"type_interpretation":"exact_syntax"}));
-        report.findings.last_mut().unwrap().related_symbols = populations
-            .iter()
-            .skip(1)
-            .map(|s| s.symbol.clone())
-            .collect();
-        report.findings.last_mut().unwrap().related_locations = populations
-            .iter()
-            .skip(1)
-            .map(|slots| slots.location.clone())
-            .collect();
+        report.finding_with_relations(policy,id,&first.symbol,&first.location,"repeated named syntax group",json!({"slots":group.len(),"declarations":populations.len()}),"both >=",
+            json!({"minimum_group_size":size,"minimum_declarations":minimum}),true,
+            FindingRelations {
+                evidence: json!({"slots":group,"supporting_symbols":populations.iter().map(|s|&s.symbol).collect::<Vec<_>>(),"type_interpretation":"exact_syntax"}),
+                symbols: populations
+                    .iter()
+                    .skip(1)
+                    .map(|slots| slots.symbol.clone())
+                    .collect(),
+                locations: populations
+                    .iter()
+                    .skip(1)
+                    .map(|slots| slots.location.clone())
+                    .collect(),
+            },
+        );
     }
 }
 
@@ -743,12 +747,13 @@ fn report_duplicate(
         && evidence.token_counts[1] as u64 >= minimum
         && evidence.intersection as u128 * 10_000 >= similarity as u128 * evidence.union as u128
     {
-        report.finding(policy,id,&first.symbol,&first.location,"normalized 4-token multiset Jaccard",json!({"intersection":evidence.intersection,"union":evidence.union}),">=",
+        report.finding_with_relations(policy,id,&first.symbol,&first.location,"normalized 4-token multiset Jaccard",json!({"intersection":evidence.intersection,"union":evidence.union}),">=",
             json!({"minimum_similarity_basis_points":similarity,"minimum_tokens":minimum}),true,
-            json!({"token_counts":evidence.token_counts,"other_location":second.location,"normalization":"syntax_tokens_v1_not_semantic_equivalence"}));
-        let finding = report.findings.last_mut().expect("finding just added");
-        finding.related_symbols.push(second.symbol.clone());
-        finding.related_locations.push(second.location.clone());
+            FindingRelations {
+                evidence: json!({"token_counts":evidence.token_counts,"other_location":second.location,"normalization":"syntax_tokens_v1_not_semantic_equivalence"}),
+                symbols: vec![second.symbol.clone()],
+                locations: vec![second.location.clone()],
+            });
     }
 }
 
@@ -799,7 +804,7 @@ fn duplicates(facts: &Facts, policy: &Policy, report: &mut Report) {
     let pairs = match pairs {
         Ok(pairs) => pairs,
         Err(error) => {
-            report.errors.push(error.into());
+            report.error(error);
             return;
         }
     };
@@ -913,19 +918,21 @@ fn dispatch(facts: &Facts, policy: &Policy, report: &mut Report) {
     for (owner, support) in groups {
         let callables: Vec<_> = support.iter().map(|i| &facts.functions[*i]).collect();
         let first = callables[0];
-        report.finding(policy,id,&owner,&first.location,"distinct named callable dispatch sites",json!(support.len()),">=",json!(sites),support.len() as u64>=sites,
-            json!({"minimum_arms":arms,"callables":callables.iter().map(|function|&function.symbol).collect::<Vec<_>>(),"scope":"resolved_local_enum_variant_patterns_not_scrutinee_type_inference"}));
-        let finding = report.findings.last_mut().unwrap();
-        finding.related_symbols = callables
-            .iter()
-            .skip(1)
-            .map(|function| function.symbol.clone())
-            .collect();
-        finding.related_locations = callables
-            .iter()
-            .skip(1)
-            .map(|function| function.location.clone())
-            .collect();
+        report.finding_with_relations(policy,id,&owner,&first.location,"distinct named callable dispatch sites",json!(support.len()),">=",json!(sites),support.len() as u64>=sites,
+            FindingRelations {
+                evidence: json!({"minimum_arms":arms,"callables":callables.iter().map(|function|&function.symbol).collect::<Vec<_>>(),"scope":"resolved_local_enum_variant_patterns_not_scrutinee_type_inference"}),
+                symbols: callables
+                    .iter()
+                    .skip(1)
+                    .map(|function| function.symbol.clone())
+                    .collect(),
+                locations: callables
+                    .iter()
+                    .skip(1)
+                    .map(|function| function.location.clone())
+                    .collect(),
+            },
+        );
     }
 }
 

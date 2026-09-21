@@ -10,7 +10,7 @@ mkdir -p target/quality
 
 set +e
 "$scanner" check --path . --policy quality-policy.json \
-    --only-group source --format table --report "$report"
+    --format table --report "$report"
 status=$?
 set -e
 

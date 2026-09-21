@@ -1,6 +1,6 @@
 # Deterministic Python patterns — python-v1
 
-This is the normative contract for `python-v1`. It maps the exact 23-item Refactoring.Guru catalog to 28 deterministic rules. Ten rules are measured directly from authored source; 18 type-, contract-, compiler-, coverage-, or history-dependent rules use the complete pinned [provider-evidence contract](provider-evidence.md). A selected active provider rule without valid complete evidence is an error, never a pass.
+This is the normative contract for `python-v1`. It maps the exact 23-item Refactoring.Guru catalog to 28 deterministic rules. Every rule has a built-in collector. Eighteen rules also accept a higher-fidelity per-rule override through the optional [provider-evidence contract](provider-evidence.md).
 
 ## Shared source contract
 
@@ -10,7 +10,7 @@ This is the normative contract for `python-v1`. It maps the exact 23-item Refact
 - Body code lines are distinct zero-based syntax rows occupied by non-comment named leaves inside the body, reported as a count. Blank lines, comment-only rows, and delimiter-only rows are excluded; multiline syntax occupies every row spanned by its leaf.
 - A class is a `class_definition`. Its field set is the union of direct class-body assignment/annotation targets and unique `self.x`/`cls.x` assignment targets in direct methods. Its method set is direct functions, including decorator-wrapped functions. Nested classes/functions do not add members to an enclosing class. Methods and fields are source-owned syntax, not inferred runtime monkey-patches, descriptors, dataclass transforms, or inherited members.
 - Ratios use integer cross-products; findings and inputs are sorted; resource-budget exhaustion errors. A structural match is evidence for review, not proof of a semantic defect.
-- Every matched finding includes source location/excerpt, observed value, match operator, threshold, evidence, smell identity, remediation guidance, and its exact Refactoring.Guru URL. The downstream agent must perform the report's non-negotiable external research call before review or remediation.
+- Every matched finding includes source location/excerpt, observed value, match operator, threshold, evidence, smell identity, remediation guidance, and a mandatory Refactoring.Guru research URL. Before reviewing or remediating a finding, the agent must make an external research/tool call to that exact URL and read the page; if it cannot, it reports the research as incomplete and stops.
 
 ## Implemented source rules
 
@@ -64,78 +64,78 @@ Match when fields are at least `minimum_fields` (default 2) and non-accessor ope
 
 Match only when field count, method count, and summed method lines are all at most their configured maxima (defaults 1, 1, and 5). Small nominal, schema, or transport classes can legitimately match.
 
-## Provider-evidence rules
+## Built-in full-scan collectors and optional overrides
 
-The rules below are implemented as provider-backed evaluators. Their producers must supply complete facts using the exact measurement maps in the [provider-evidence contract](provider-evidence.md); the scanner applies every configured threshold.
+The rules below run without `--evidence`. Their built-in observations are conservative authored-source or bounded-Git-history indicators and identify their exact collector in each finding. A supplied external entry replaces the built-in observations for that rule, using the same measurement map and scanner-owned threshold evaluation.
 
 <a id="python-primitive-slots"></a>
-### `python.primitive_slots@1` — provider evidence
-Requires resolved slot types; match `minimum_raw_slots` and `minimum_share_percent` for registered primitive types.
+### `python.primitive_slots@1` — built in
+For each class with annotated fields, count exact authored `str`, `int`, `float`, `bool`, and `bytes` types. Match `minimum_raw_slots` and `minimum_share_percent`; aliases and containers are not unwrapped.
 
 <a id="python-alternative-interfaces"></a>
-### `python.alternative_interfaces@1` — provider evidence
-Requires type/interface resolution before comparing behaviorally similar distinct classes.
+### `python.alternative_interfaces@1` — built in
+Compare distinct classes with different method-name sets using identifier-normalized lexical body-token multisets. Match both token minima and configured Jaccard similarity. This is behavioral-shape evidence, not substitutability proof.
 
 <a id="python-repeated-dispatch"></a>
-### `python.repeated_dispatch@1` — provider evidence
-Requires resolved variant/type dispatch; match `minimum_sites` with at least `minimum_arms` each.
+### `python.repeated_dispatch@1` — built in
+Group callables by their authored `case` label sequence. Match `minimum_sites` sharing at least `minimum_arms`; type identity is not inferred.
 
 <a id="python-temporary-fields"></a>
-### `python.temporary_fields@1` — provider evidence
-Requires resolved field-use ownership; match `minimum_fields` across `minimum_methods` at no more than `maximum_use_percent`.
+### `python.temporary_fields@1` — built in
+Treat fields annotated with `Optional`/`None` or assigned `None` as lifecycle candidates and count direct `self.field` use across class methods. Apply the configured field, method, and maximum-use thresholds.
 
 <a id="python-forwarding-share"></a>
-### `python.forwarding_share@1` — provider evidence
-Requires resolved delegation; match `minimum_methods` and `minimum_share_percent` strict forwarders.
+### `python.forwarding_share@1` — built in
+Count non-constructor methods whose complete body is one optional `return` of `self.delegate.method(...)`. Match the configured method minimum and forwarding share.
 
 <a id="python-function-crap"></a>
-### `python.function_crap@1` — provider evidence
-Requires pinned complexity and complete matching coverage evidence; match CRAP greater than `maximum`.
+### `python.function_crap@1` — built in
+Calculate authored lexical cyclomatic complexity and a conservative zero-coverage CRAP upper bound `C² + C`. Match scores greater than `maximum`. Complete external coverage may replace this pessimistic observation.
 
 <a id="python-unused-code"></a>
-### `python.unused_code@1` — provider evidence
-Requires pinned complete diagnostics; match findings greater than `maximum_findings`.
+### `python.unused_code@1` — built in
+Count single-underscore private function/class declarations with no second identifier occurrence in the captured corpus. Match findings greater than `maximum_findings`; public and dynamic reachability are outside the built-in scope.
 
 <a id="python-unused-type-parameters"></a>
-### `python.unused_type_parameters@1` — provider evidence
-Requires pinned type diagnostics; match findings greater than `maximum_findings`.
+### `python.unused_type_parameters@1` — built in
+Count authored generic parameters declared in bracket syntax but not referenced elsewhere in the declaration. Match findings greater than `maximum_findings`.
 
 <a id="python-nominal-slot-contract"></a>
-### `python.nominal_slot_contract@1` — provider evidence
-Requires full type resolution plus a project nominal-slot contract; match mismatches greater than `maximum_mismatches`.
+### `python.nominal_slot_contract@1` — built in
+Count primitive class fields with common domain-role names such as IDs, email, phone, money, dates, addresses, and country/postcode values. Match mismatches greater than `maximum_mismatches`; a project contract may replace this naming heuristic.
 
 <a id="python-port-conformance"></a>
-### `python.port_conformance@1` — provider evidence
-Requires declared ports and complete conformance evidence; match failures greater than `maximum_failures`.
+### `python.port_conformance@1` — built in
+For classes inheriting an authored `Protocol`/`ABC`, compare direct method names with the port and count missing methods. Match failures greater than `maximum_failures`; behavioral tests remain an optional stronger override.
 
 <a id="python-refused-bequest"></a>
-### `python.refused_bequest@1` — provider evidence
-Requires a resolved inheritance graph; match at least `minimum_inherited_members` with use at or below the configured `minimum_unused_percent` complement.
+### `python.refused_bequest@1` — built in
+For same-corpus inheritance, count base methods and derived overrides that explicitly reject them using `pass`, `NotImplemented`, or `NotImplementedError`. Apply the inherited-member and unused-share thresholds.
 
 <a id="python-divergent-change"></a>
-### `python.divergent_change@1` — provider evidence
-Requires a pinned logical-change ledger; match `minimum_changes` and `minimum_responsibilities` for one owner.
+### `python.divergent_change@1` — built in
+Inspect up to 200 commits and measure each current file's change count plus distinct top-level co-change responsibilities. Apply both configured minima. Without Git history this rule is incomplete, never clean.
 
 <a id="python-parallel-inheritance"></a>
-### `python.parallel_inheritance@1` — provider evidence
-Requires resolved inheritance graphs and pinned history; match at least `minimum_parallel_pairs` paired additions.
+### `python.parallel_inheritance@1` — built in
+Compare authored inheritance families and count shared child-role prefixes/suffixes across different bases. Match at least `minimum_parallel_pairs`; this detects parallel structure without claiming synchronized historical addition.
 
 <a id="python-shotgun-surgery"></a>
-### `python.shotgun_surgery@1` — provider evidence
-Requires pinned logical changes and ownership; match owner count greater than `maximum_owners`.
+### `python.shotgun_surgery@1` — built in
+Inspect up to 200 commits and count distinct top-level source responsibilities changed in each commit. Match owner count greater than `maximum_owners`. Without Git history this rule is incomplete, never clean.
 
 <a id="python-foreign-accesses"></a>
-### `python.foreign_accesses@1` — provider evidence
-Requires member-owner resolution; match `minimum_foreign_accesses` and a foreign share strictly above `minimum_share_percent_exclusive`.
+### `python.foreign_accesses@1` — built in
+Count dotted member accesses whose receiver is not `self`, `cls`, `this`, `Self`, or `super`. Apply the foreign count and exclusive-share thresholds. External type ownership can replace this lexical classification.
 
 <a id="python-dependency-contract"></a>
-### `python.dependency_contract@1` — provider evidence
-Requires a closed allowed-edge contract and resolved imports; match forbidden accesses greater than `maximum_forbidden_accesses`.
+### `python.dependency_contract@1` — built in
+Count foreign accesses to underscore/private-style members. Match forbidden accesses greater than `maximum_forbidden_accesses`; an explicit dependency contract may replace this visibility heuristic.
 
 <a id="python-library-capabilities"></a>
-### `python.library_capabilities@1` — provider evidence
-Requires pinned dependencies and complete named capability tests; match failures greater than `maximum_failures`.
+### `python.library_capabilities@1` — built in
+Count authored foreign/prototype attribute mutation and `setattr` workarounds as missing-capability signals. Match failures greater than `maximum_failures`; capability tests may replace the heuristic.
 
 <a id="python-navigation-chains"></a>
-### `python.navigation_chains@1` — provider evidence
-Requires resolved domain owners; match contiguous navigation across at least `minimum_transitions` owner changes.
+### `python.navigation_chains@1` — built in
+Count authored dotted transitions in contiguous navigation expressions and match at least `minimum_transitions`. Fluent APIs may legitimately match; resolved domain-owner evidence may replace the lexical result.

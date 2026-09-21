@@ -8,7 +8,7 @@ Deterministic code-smell evidence for Rust, Python, and TypeScript.
 2. Where is it in the repository?
 3. What measurement crossed which threshold?
 4. Why might it matter, and what should be reviewed?
-5. Which Refactoring.Guru reference must an agent research before suggesting a fix?
+5. Which Refactoring.Guru page must the review agent research before judging the finding?
 
 The scanner—not an LLM—decides whether a configured rule matches. The same
 source, policy, evidence, and executable produce the same ordered JSON report.
@@ -30,25 +30,25 @@ coding environments.
 - Separates blocking rules from review-only signals.
 - Understands monorepos and groups results by the nearest runtime manifest.
 - Emits human-readable tables or complete JSON for hooks and coding agents.
-- The `v0.3.0` release pipeline produces versioned GitHub binaries, PyPI wheels,
+- The release pipeline produces versioned GitHub binaries, PyPI wheels,
   native npm packages on npmjs.com and GitHub Packages, and a crates.io package
   from one release build.
-- Fails closed when parsing, required evidence, or analysis budgets are incomplete.
+- Fails closed when parsing or analysis budgets are incomplete.
 - Covers all 23 Refactoring.Guru smell categories through 28 rules per language pack.
 
 > **Important:** every rule in every starter policy is active. The default group is
-> `all`, so a scan without provider evidence intentionally exits `2` for rules that
-> need compiler, type, coverage, contract, test, or Git-history facts. Use
-> `--only-group source` for a source-only scan; excluded means “not checked,” never
-> “clean.”
+> `all`, and `smells check` runs all 28 rules without requiring a separate evidence
+> pipeline. Built-in collectors provide conservative source, type-shape, contract,
+> coverage-risk, and Git-history indicators. `--evidence` remains available as an
+> optional higher-fidelity replacement for individual built-in rule observations.
 
 ## Supported languages
 
-| Language pack | Files scanned | Built-in source rules | Evidence-backed rules | What counts as a class-like type |
+| Language pack | Files scanned | Built-in rules | Optional evidence overrides | What counts as a class-like type |
 | --- | --- | ---: | ---: | --- |
-| `rust-v1` | `.rs` | 17 | 11 | `struct`/`enum` state plus resolved inherent and trait `impl` methods; traits are interface-like contracts |
-| `python-v1` | `.py`, `.pyi` | 10 | 18 | `class` state, direct methods, and `self`/`cls` field assignments |
-| `typescript-v1` | `.ts`, `.tsx`, `.mts`, `.cts` | 10 | 18 | Classes, abstract classes, class expressions, method signatures, and constructor parameter-properties |
+| `rust-v1` | `.rs` | 28 | 11 | `struct`/`enum` state plus inherent and trait `impl` methods; traits are interface-like contracts |
+| `python-v1` | `.py`, `.pyi` | 28 | 18 | `class` state, direct methods, and `self`/`cls` field assignments |
+| `typescript-v1` | `.ts`, `.tsx`, `.mts`, `.cts` | 28 | 18 | Classes, abstract classes, interfaces, method signatures, and authored fields |
 
 Java and Kotlin are not currently supported. A React Native repository can scan
 its TypeScript/TSX source, but not its native Android code.
@@ -58,10 +58,10 @@ its TypeScript/TSX source, but not its native Android code.
 ### 1. Install Smells
 
 The fastest cross-language option is the prebuilt
-[PyPI tool package](https://pypi.org/project/smells/0.3.0/):
+[PyPI tool package](https://pypi.org/project/smells/0.4.0/):
 
 ```sh
-uv tool install smells==0.3.0
+uv tool install smells==0.4.0
 smells --version
 ```
 
@@ -70,7 +70,7 @@ Node projects can pin the
 not download anything during installation:
 
 ```sh
-npm install --save-dev --save-exact @mindful-time/smells@0.3.0
+npm install --save-dev --save-exact @mindful-time/smells@0.4.0
 npx --no-install smells --version
 ```
 
@@ -78,7 +78,7 @@ After the one-time crates.io ownership bootstrap is complete, Rust users can bui
 the same executable from its verified source package:
 
 ```sh
-cargo install --locked --version 0.3.0 smells
+cargo install --locked --version 0.4.0 smells
 ```
 
 Until then, use a standalone release, PyPI, or npm. Unlike those prebuilt channels,
@@ -93,12 +93,12 @@ Download the archive for your host from the matching
 checksum and GitHub provenance before installing it. For macOS Apple Silicon:
 
 ```sh
-gh release download v0.3.0 \
+gh release download v0.4.0 \
   --repo mindful-time/smells \
   --pattern 'smells-aarch64-apple-darwin.tar.gz*'
 shasum -a 256 -c smells-aarch64-apple-darwin.tar.gz.sha256
-gh release verify v0.3.0 --repo mindful-time/smells
-gh release verify-asset v0.3.0 \
+gh release verify v0.4.0 --repo mindful-time/smells
+gh release verify-asset v0.4.0 \
   smells-aarch64-apple-darwin.tar.gz \
   --repo mindful-time/smells
 tar -xzf smells-aarch64-apple-darwin.tar.gz
@@ -111,7 +111,7 @@ archives. It also contains the exact wheel, npm, and crates.io package payloads
 published by the release workflow. After downloading a wheel directly:
 
 ```sh
-uv tool install ./smells-0.3.0-py3-none-PLATFORM.whl
+uv tool install ./smells-0.4.0-py3-none-PLATFORM.whl
 ```
 
 The wheel is a delivery mechanism; the scanner does not become a Python program.
@@ -160,7 +160,6 @@ Use the table format for an interactive first run:
 smells check \
   --path . \
   --policy quality-policy.json \
-  --only-group source \
   --format table
 ```
 
@@ -173,7 +172,6 @@ Use JSON for CI, hooks, or coding agents:
 smells check \
   --path . \
   --policy quality-policy.json \
-  --only-group source \
   --format json > smells-report.json
 ```
 
@@ -187,14 +185,13 @@ terminal or CI log, use `--report` with the table format:
 smells check \
   --path . \
   --policy quality-policy.json \
-  --only-group source \
   --format table \
   --report target/quality/smells-report.json
 ```
 
 This performs one scan. The log includes the verdict, implementation, smell
 pattern, evidence locations, observed value, threshold, source lines, reason,
-remediation, Refactoring.Guru URL, and non-negotiable research instruction for
+remediation, Refactoring.Guru URL, and review guidance for
 every match. `--report` writes the complete machine-readable JSON from that
 same scan.
 
@@ -238,7 +235,7 @@ Actionable finding 42 | Long Method | python.function_lines | pattern_type=metri
   Why it matters: A large callable can conceal multiple responsibilities and make focused testing harder.
   Remediation: Extract coherent steps into named callables or a focused class/module while preserving behavior with tests.
   Reference URL: https://refactoring.guru/smells/long-method
-  Research requirement: NON-NEGOTIABLE RESEARCH: Perform an external research/tool call to the reference URL ...
+  Review guidance: NON-NEGOTIABLE RESEARCH: Perform an external research/tool call to the reference URL and read the page before reviewing or remediating ...
 ```
 
 Read it in this order:
@@ -249,14 +246,16 @@ Read it in this order:
 4. **Matched evidence** shows the exact symbol, measurement, threshold, and location.
 5. **Actionable findings** are self-contained for every match: they add pattern
    type, source lines, why the signal matters, remediation guidance, its exact
-   reference URL, and the mandatory research instruction.
+   reference URL, and focused review guidance.
 6. **Excluded** means the resolved group selection did not run that detector; it
    does not mean no smell exists. **Disabled** is reserved for an explicit legacy
    `off` mode.
 
 `checked_no_match_in_measured_scope` means the selected active detector ran and stayed
 within its configured threshold. `not_applicable` means the smell does not map
-to that language's model.
+to that language's model. `error` with `coverage_status: incomplete` means a
+collector prerequisite such as Git history was unavailable; it is never a clean
+result.
 
 ### Rule modes
 
@@ -277,8 +276,7 @@ Each matched JSON finding is self-contained. It includes:
 - Why the signal matters and what the reviewer should inspect.
 - A behavior-preserving remediation direction.
 - The exact Refactoring.Guru URL.
-- A non-negotiable instruction requiring an external research call to that URL
-  before an agent reviews or changes the code.
+- A mandatory Refactoring.Guru research contract for agent grounding.
 
 A shortened finding looks like this:
 
@@ -306,7 +304,10 @@ A shortened finding looks like this:
     "reference_url": "https://refactoring.guru/smells/long-method",
     "reference_check": {
       "required": true,
-      "non_negotiable": true
+      "non_negotiable": true,
+      "action": "perform_external_research_call_to_reference_url",
+      "required_before": "review_or_remediation",
+      "unavailable_action": "report_reference_research_incomplete_and_do_not_review_or_remediate"
     }
   },
   "status": "violation",
@@ -322,7 +323,7 @@ custom integration.
 ### Whole repository
 
 ```sh
-smells check --path . --policy quality-policy.json --only-group source --format table
+smells check --path . --policy quality-policy.json --format table
 ```
 
 `--path` recursively captures only the selected language's supported extensions.
@@ -334,7 +335,7 @@ followed, so dependency caches cannot silently redirect a scan outside its root.
 Run this from the consuming Git repository:
 
 ```sh
-smells check --staged --policy quality-policy.json --only-group source --format json
+smells check --staged --policy quality-policy.json --format json
 ```
 
 Despite the name, `--staged` does not scan only paths changed by the next commit.
@@ -362,7 +363,7 @@ repos:
       - id: smells
         name: deterministic smell scan
         language: system
-        entry: uvx --from smells==0.3.0 smells check --staged --policy quality-policy.json --only-group source --format json
+        entry: uvx --from smells==0.4.0 smells check --staged --policy quality-policy.json --format json
         pass_filenames: false
 ```
 
@@ -383,7 +384,7 @@ command -v smells >/dev/null 2>&1 || {
   exit 2
 }
 
-exec smells check --staged --policy quality-policy.json --only-group source --format json
+exec smells check --staged --policy quality-policy.json --format json
 ```
 
 Keep formatting, compilation, tests, Gitleaks, OSV, and other project checks in
@@ -409,30 +410,44 @@ without scanning every directory separately.
 
 ## Source rules and full-pattern evidence
 
-The starter policies activate all 28 rules and select `all` by default. For an
-immediate syntax-only pass, explicitly choose the `source` group:
+The starter policies activate all 28 rules and select `all` by default. A normal
+scan therefore evaluates every rule and returns one explicit result for each of
+the 23 canonical smells:
 
 ```sh
-smells check --path . --policy quality-policy.json --only-group source --format table
+smells check --path . --policy quality-policy.json --format table
 ```
 
-Built-in source rules cover deterministic syntax measurements such as:
+Built-in collectors cover deterministic measurements such as:
 
 - Function size and argument count.
 - Class/type fields, methods, and total method lines.
 - Repeated parameter groups and duplicate callable bodies.
 - Comment density, data-only classes, and tiny classes.
-- Additional Rust indicators such as primitive-heavy types, repeated dispatch,
-  temporary fields, forwarding classes, and alternative interfaces.
+- Primitive-heavy slots, repeated dispatch, temporary fields, forwarding classes,
+  alternative interfaces, inheritance rejection, and interface conformance.
+- Conservative zero-coverage CRAP upper bounds, unused private declarations, and
+  unused generic parameters.
+- Private-member access, navigation chains, library-extension workarounds, and
+  domain-significant primitive field names.
+- Up to 200 Git commits of co-change history for divergent change and shotgun
+  surgery when the scanned path is inside a repository.
 
-Some smell claims cannot be made honestly from syntax alone. Dead code needs
-compiler or type information; CRAP needs complexity plus complete coverage;
-shotgun surgery and divergent change need pinned history; architectural smells
-need dependency or project contracts.
+Reports expose `history_scope.available`, `history_scope.commit_count`, and the
+collector's maximum commit bound. Outside a Git repository, every selected
+history rule is `incomplete` and the scan exits `2`; unavailable history is never
+reported as a clean measurement, regardless of rule mode.
 
-All corresponding evaluators exist. Because the starter policy selects them,
-the default full scan requires a complete provider-evidence bundle tied to the
-exact resolved scan's `input_sha256`:
+These are deliberately bounded structural indicators, not proof of a design
+defect. For example, the built-in CRAP collector assumes zero coverage and reports
+a conservative upper bound; unused-code detection is restricted to unreferenced
+private declarations; architectural checks use authored interfaces, visibility,
+and naming conventions. The finding's `evidence.provider_evidence` object names
+the exact built-in algorithm and scope.
+
+Teams that already have compiler diagnostics, complete coverage, resolved type
+graphs, capability tests, or a project ownership ledger can pass those facts as
+an optional evidence bundle tied to the scan's `input_sha256`:
 
 ```sh
 smells check \
@@ -442,25 +457,11 @@ smells check \
   --format json
 ```
 
-Missing, stale, incomplete, or malformed required evidence returns exit code
-`2`; the scanner never silently downgrades the rule. Start with the
-[provider evidence guide](docs/provider-evidence.md) and its
+An external entry replaces the built-in observations for that rule; omitted rules
+continue to use their built-in collectors. Supplied entries still fail closed when
+stale, incomplete, malformed, duplicated, or inconsistent with the selected rule
+pack. Start with the [provider evidence guide](docs/provider-evidence.md) and its
 [JSON Schema](schemas/provider-evidence.schema.json).
-
-The bootstrap sequence is intentionally fail-closed:
-
-1. Finish the full policy and capture a stable source snapshot. Staged mode is
-   preferred because the Git index gives both passes the same source and policy.
-2. Run that exact full policy without `--evidence`. The expected exit code is
-   `2`, but the JSON report supplies the snapshot's `input_sha256`.
-3. Run your pinned external providers against that same snapshot and create one
-   complete evidence entry for every selected provider-backed rule, using that
-   digest.
-4. Stage the evidence file when using `--staged`, then rerun the command with
-   `--evidence provider-evidence.json`.
-
-Do not change source or policy between these steps. If anything changes, capture
-a new digest and regenerate the evidence.
 
 ## Policies and rule reference
 
@@ -477,7 +478,9 @@ smells policy show --policy quality-policy.json --only-group source --format jso
 
 Built-in groups are `all`, `source`, `evidence`, and the five canonical smell
 categories: `bloaters`, `object-orientation-abusers`, `change-preventers`,
-`dispensables`, and `couplers`.
+`dispensables`, and `couplers`. The `evidence` name is retained for policy
+compatibility; in 0.4.0 those rules have built-in collectors and merely *allow*
+external evidence overrides.
 
 | Selector | Resolution behavior |
 | --- | --- |
@@ -519,9 +522,11 @@ limit returns exit code `2`; it never produces a silently truncated success.
 
 - It does not automatically fix or refactor source code.
 - It does not execute application code, builds, compilers, tests, or build scripts.
+- It does not claim that its source-level type, coverage, or architecture
+  approximations are equivalent to a compiler, coverage runner, or project contract.
 - It does not treat a structural indicator as proof of a design defect.
 - It does not guess active Rust features, Python environments, or TypeScript configs.
-- It does not authenticate external evidence producers; the surrounding quality
+- It does not authenticate optional external evidence producers; the surrounding quality
   pipeline must invoke and verify the intended pinned provider.
 - It does not currently scan Java, Kotlin, JavaScript, JSX, or other languages.
 
@@ -588,7 +593,7 @@ Ordinary tests remain offline and deterministic.
 
 ## Project status
 
-`smells` source is currently version `0.3.0`. Standalone GitHub archives, binary
+`smells` source is currently version `0.4.0`. Standalone GitHub archives, binary
 PyPI wheels, and native npm packages on npmjs.com are published. The owner-gated
 workflow publishes the same signed npm artifacts to GitHub Packages and uses an
 idempotent recovery workflow when a registry fails after release creation.

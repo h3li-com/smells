@@ -11,7 +11,10 @@ if [ "$tag" != v0.3.0 ]; then
     printf '%s\n' 'manual npm bootstrap is restricted to v0.3.0' >&2
     exit 2
 fi
-version=$("$script_directory/verify-release-tag.sh" "$tag")
+# This helper is an intentionally retained one-time recovery path for the
+# already-published bootstrap release. It must not compare that historical tag
+# with the repository's current Cargo version after later releases are prepared.
+version=${tag#v}
 
 if [ -n "${NODE_AUTH_TOKEN:-}" ] \
     || [ -n "${NPM_TOKEN:-}" ] \
