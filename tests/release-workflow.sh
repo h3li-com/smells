@@ -6,18 +6,20 @@ repository_root=$(CDPATH= cd -- "$script_directory/.." && pwd)
 workflow="$repository_root/.github/workflows/release.yml"
 ci_workflow="$repository_root/.github/workflows/ci.yml"
 github_packages_workflow="$repository_root/.github/workflows/publish-github-packages.yml"
+pypi_workflow="$repository_root/.github/workflows/publish-pypi.yml"
+npm_workflow="$repository_root/.github/workflows/publish-npm.yml"
+crates_recovery_workflow="$repository_root/.github/workflows/publish-crates.yml"
+registry_release_verifier="$repository_root/scripts/verify-registry-release.sh"
 
+grep -F 'uses: ./.github/workflows/publish-pypi.yml' "$workflow" >/dev/null
+grep -F 'uses: ./.github/workflows/publish-npm.yml' "$workflow" >/dev/null
 grep -F 'publish-github-packages:' "$workflow" >/dev/null
 grep -F 'uses: ./.github/workflows/publish-github-packages.yml' "$workflow" >/dev/null
+grep -F 'uses: ./.github/workflows/publish-crates.yml' "$workflow" >/dev/null
 grep -F 'packages: write' "$workflow" >/dev/null
 grep -F 'GITHUB_PACKAGES_RESULT: ${{ needs.publish-github-packages.result }}' \
     "$workflow" >/dev/null
 grep -F 'test "$GITHUB_PACKAGES_RESULT" = success' "$workflow" >/dev/null
-grep -F 'uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1' \
-    "$workflow" >/dev/null
-grep -F 'CARGO_REGISTRY_TOKEN: ${{ steps.crates_io_auth.outputs.token }}' \
-    "$workflow" >/dev/null
-
 if grep -F 'secrets.NPM_TOKEN' "$workflow" >/dev/null; then
     printf 'release workflow still accepts a long-lived npm publishing token\n' >&2
     exit 1
@@ -33,18 +35,54 @@ grep -F 'workflow_dispatch:' "$github_packages_workflow" >/dev/null
 grep -F 'registry-url: https://npm.pkg.github.com' \
     "$github_packages_workflow" >/dev/null
 grep -F 'packages: write' "$github_packages_workflow" >/dev/null
-grep -F 'test "$(jq -r .isImmutable <<<"$release")" = true' \
-    "$github_packages_workflow" >/dev/null
-grep -F 'test "$(git rev-list -n 1 "$RELEASE_TAG")" = "$release_commit"' \
-    "$github_packages_workflow" >/dev/null
-grep -F 'manifest_version=$(git show "$release_commit:Cargo.toml"' \
-    "$github_packages_workflow" >/dev/null
 grep -F 'gh release verify "$RELEASE_TAG"' \
     "$github_packages_workflow" >/dev/null
 grep -F 'gh release download "$RELEASE_TAG"' \
     "$github_packages_workflow" >/dev/null
 grep -F 'node npm/publish-packages.mjs' \
     "$github_packages_workflow" >/dev/null
+
+for registry_workflow in \
+    "$pypi_workflow" \
+    "$npm_workflow" \
+    "$github_packages_workflow" \
+    "$crates_recovery_workflow"; do
+    grep -F 'workflow_call:' "$registry_workflow" >/dev/null
+    grep -F 'workflow_dispatch:' "$registry_workflow" >/dev/null
+    grep -F '    environment: release' "$registry_workflow" >/dev/null
+    grep -F './scripts/verify-registry-release.sh "$RELEASE_TAG"' \
+        "$registry_workflow" >/dev/null
+    grep -F 'git checkout --detach "${{ steps.release.outputs.commit }}"' \
+        "$registry_workflow" >/dev/null
+    grep -F 'gh release verify "$RELEASE_TAG"' \
+        "$registry_workflow" >/dev/null
+    grep -F 'gh release verify-asset "$RELEASE_TAG"' \
+        "$registry_workflow" >/dev/null
+done
+
+grep -F 'test "$(printf '\''%s'\'' "$release" | jq -r .isImmutable)" = true' \
+    "$registry_release_verifier" >/dev/null
+grep -F 'git merge-base --is-ancestor "$release_commit" HEAD' \
+    "$registry_release_verifier" >/dev/null
+grep -F 'manifest_version=$(git show "$release_commit:Cargo.toml"' \
+    "$registry_release_verifier" >/dev/null
+
+grep -F 'uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2' \
+    "$pypi_workflow" >/dev/null
+grep -F 'python scripts/verify-pypi-release.py' \
+    "$pypi_workflow" >/dev/null
+
+grep -F 'node npm/publish-packages.mjs' \
+    "$npm_workflow" >/dev/null
+grep -F 'registry-url: https://registry.npmjs.org' \
+    "$npm_workflow" >/dev/null
+
+grep -F 'uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1' \
+    "$crates_recovery_workflow" >/dev/null
+grep -F 'CARGO_REGISTRY_TOKEN: ${{ steps.crates_io_auth.outputs.token }}' \
+    "$crates_recovery_workflow" >/dev/null
+grep -F './scripts/publish-crate.sh' \
+    "$crates_recovery_workflow" >/dev/null
 
 grep -F 'rustup toolchain install "$toolchain" --profile minimal --component cargo' \
     "$ci_workflow" >/dev/null

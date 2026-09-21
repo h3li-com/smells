@@ -30,6 +30,7 @@ release-check:
 		scripts/package-npm.sh scripts/smoke-test-npm.sh \
 		scripts/publish-crate.sh scripts/bootstrap-npm-release.sh \
 		scripts/configure-main-protection.sh scripts/verify-release-actor.sh \
+		scripts/verify-registry-release.sh \
 		scripts/collect-release-artifacts.sh tests/release-artifacts.sh \
 		tests/npm-packages.sh tests/npm-publisher.sh tests/npm-bootstrap.sh \
 		tests/crate-package.sh \

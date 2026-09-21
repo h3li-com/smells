@@ -37,7 +37,7 @@ check. GitHub branch protection has no native fork-origin setting; the required 
 check supplies that policy. The script enables administrator enforcement and does
 not configure an owner bypass.
 
-The release workflow independently rejects dispatches and reruns from every actor
-other than `mindful-time`, even if another writer is added later. It repeats the
-check immediately before publication. Immutable releases lock each published
-release's tag and assets.
+The release and registry-publisher workflows independently reject dispatches and
+reruns from every actor other than `mindful-time`, even if another writer is added
+later. Every publication job also requires approval through the protected `release`
+environment. Immutable releases lock each published release's tag and assets.
