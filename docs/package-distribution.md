@@ -52,8 +52,8 @@ The `smells` project is live on PyPI. Its Trusted Publisher uses these exact val
 | PyPI project | `smells` |
 | GitHub owner | `mindful-time` |
 | Repository | `smells` |
-| Workflow | `release.yml` |
-| Environment | leave empty |
+| Workflow | `publish-pypi.yml` |
+| Environment | `release` |
 
 PyPI can create the project on the first OIDC publication. Trusted Publishing uses a
 short-lived token, so no PyPI secret belongs in GitHub. See
@@ -77,12 +77,12 @@ package already exists. The retained bootstrap procedure is:
    verifies each registry SHA-512 digest. Its exit trap logs out and removes the
    temporary configuration, including after an interrupted or failed publication.
 3. Configure each package's GitHub Actions Trusted Publisher as owner
-   `mindful-time`, repository `smells`, workflow `release.yml`, with no environment,
-   and allow `npm publish`.
+   `mindful-time`, repository `smells`, workflow `publish-npm.yml`, environment
+   `release`, and allow `npm publish`.
 4. Require two-factor authentication and disallow traditional token publishing for
    every package.
-5. Rerun the failed release jobs. The deterministic publisher sees the exact release
-   digests, skips republishing, and allows the final release gate to pass.
+5. Dispatch **Publish npm from release** for the existing tag. The deterministic
+   publisher sees the exact release digests and skips packages already present.
 
 No npm publishing secret belongs in GitHub. The manual `v0.3.0` bootstrap cannot
 produce npm's CI-bound provenance, but its tarballs must be byte-identical to the
@@ -112,8 +112,9 @@ packages; the ordinary unauthenticated installation path remains npmjs.com. See
 ### crates.io
 
 crates.io requires the first package release to be published manually. After that
-bootstrap, configure `mindful-time/smells` and `release.yml` as the crate's Trusted
-Publisher. The release workflow uses `rust-lang/crates-io-auth-action` to exchange the
+bootstrap, configure the crate's Trusted Publisher with owner `mindful-time`,
+repository `smells`, workflow `publish-crates.yml`, and environment `release`. The
+publisher workflow uses `rust-lang/crates-io-auth-action` to exchange the protected
 GitHub OIDC identity for a short-lived token and revokes it when the job finishes; no
 long-lived `CARGO_REGISTRY_TOKEN` secret belongs in GitHub. Cargo documents the
 permanent version semantics and required pre-publication verification in
@@ -134,9 +135,11 @@ publication job creates one immutable GitHub Release containing:
 - the crates.io source archive;
 - aggregate checksums and CycloneDX/SPDX SBOMs.
 
-Only after the signed GitHub Release succeeds do independent jobs publish to PyPI,
-npmjs.com, GitHub Packages, and crates.io. Each job rechecks the release actor and
-installs the exact version back from its registry. The crates.io job also requires its
-newly built archive to be byte-identical to the attested `.crate` asset and uses that
-asset's digest for registry verification. Independent jobs make a single failed
-registry retryable without attempting to republish a registry that already succeeded.
+Only after the signed GitHub Release succeeds do independent reusable workflows
+publish to PyPI, npmjs.com, GitHub Packages, and crates.io. Every publisher uses the
+protected `release` environment, rechecks the release actor and immutable release,
+and installs the exact version back from its registry. The same workflows can be
+dispatched independently to recover a partial registry failure without rebuilding or
+mutating release assets. The crates.io job also requires its newly built archive to
+be byte-identical to the attested `.crate` asset and uses that asset's digest for
+registry verification.

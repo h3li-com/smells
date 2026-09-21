@@ -1,0 +1,89 @@
+name: Publish PyPI from release
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: Existing immutable release tag, for example v0.4.0
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing immutable release tag, for example v0.4.0
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-pypi-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: publish wheels
+    runs-on: ubuntu-24.04
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate the owner and immutable release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          ./scripts/verify-registry-release.sh "$RELEASE_TAG" \
+            >> "$GITHUB_OUTPUT"
+
+      - name: Use the exact released source
+        run: git checkout --detach "${{ steps.release.outputs.commit }}"
+
+      - name: Download the signed release wheels
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          gh release verify "$RELEASE_TAG"
+          mkdir pypi-dist
+          gh release download "$RELEASE_TAG" --pattern '*.whl' --dir pypi-dist
+          test "$(find pypi-dist -maxdepth 1 -type f -name '*.whl' \
+            | wc -l | tr -d ' ')" -eq 5
+          for wheel in pypi-dist/*.whl; do
+            gh release verify-asset "$RELEASE_TAG" "$wheel"
+          done
+
+      - name: Publish the wheels with PyPI Trusted Publishing
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          packages-dir: pypi-dist
+          attestations: true
+          skip-existing: true
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Verify the package from PyPI
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          python scripts/verify-pypi-release.py "$RELEASE_VERSION" pypi-dist
+          python -m venv target/pypi-smoke
+          for attempt in 1 2 3 4 5; do
+            if target/pypi-smoke/bin/python -m pip install \
+                --no-cache-dir --only-binary=:all: "smells==$RELEASE_VERSION"; then
+              target/pypi-smoke/bin/smells --version
+              exit 0
+            fi
+            sleep 3
+          done
+          exit 1

@@ -68,36 +68,42 @@ After the version PR is merged into `main`:
    Only after every step succeeds does the workflow create the tag and immutable
    GitHub Release at the exact tested commit. GitHub then produces a cryptographically
    signed release attestation binding the tag, commit, and asset digests.
-7. Independent jobs publish the already-tested wheels to PyPI, the six npm packages
-   to both npmjs.com and GitHub Packages, and the source package to crates.io. Before
+7. Independent reusable workflows publish the already-tested wheels to PyPI, the six
+   npm packages to both npmjs.com and GitHub Packages, and the source package to
+   crates.io. Every publisher declares the protected `release` environment and
+   validates the immutable release before requesting registry credentials. Before
    `cargo publish`, the crates.io job downloads the attested `.crate` from the GitHub
    Release, verifies it against `sha256.sum`, rebuilds locally, and requires the two
    archives to be byte-identical. Each job revalidates the owner actor, then installs
    the exact published version before it passes. The final registry gate requires all
    four publication jobs.
 
-If GitHub Packages fails after the immutable release exists, the owner dispatches
-**Actions → Publish GitHub Packages from release → Run workflow** on `main` with the
-same tag. The recovery workflow rejects non-owner actors, mutable/draft/prerelease
-releases, release commits outside `main`, mismatched versions, and digest conflicts.
-It publishes directly from the signed GitHub Release assets and is safe to rerun.
+If a registry fails after the immutable release exists, the owner dispatches the
+matching **Publish … from release** workflow on `main` with the same tag. The PyPI,
+npm, GitHub Packages, and crates.io recovery entry points are the same reusable
+workflows called by `release.yml`; they reject non-owner actors,
+mutable/draft/prerelease releases, release commits outside `main`, mismatched
+versions, and digest conflicts. They publish directly from the signed GitHub Release
+assets and are safe to rerun.
 
 For the first npmjs.com release only, npm cannot configure OIDC until each package
 exists. The initial npm job therefore fails closed after the immutable GitHub Release
 is available. The owner runs `scripts/bootstrap-npm-release.sh v0.3.0`, completes the
 isolated web login and interactive security-key challenges, configures all six
-Trusted Publishers, and reruns the failed jobs. The helper requires the exact npm
-owner identity, verifies all release checksums and every npm registry digest, refuses
-token environment variables, and revokes its temporary CLI session on exit. See
+Trusted Publishers, and dispatches **Publish npm from release** for the existing tag.
+The helper requires the exact npm owner identity, verifies all release checksums and
+every npm registry digest, refuses token environment variables, and revokes its
+temporary CLI session on exit. See
 [package distribution](package-distribution.md) for the exact bootstrap sequence.
 
-The `release` GitHub environment is the publication boundary. Configure that
-environment to require the repository owner when the account plan supports required
-reviewers. Registry ownership was established by the initial `v0.3.0` bootstrap; the
-exact PyPI, npmjs.com, GitHub Packages, and crates.io setup is documented in
-[package distribution](package-distribution.md). crates.io additionally requires its
-first release to be published manually before `release.yml` can authenticate through
-its configured Trusted Publisher.
+The `release` GitHub environment is the publication boundary. Every job that writes a
+GitHub release or external registry references it. Configure the environment to
+require the repository owner and protected branches. Registry Trusted Publishers
+must use the matching `publish-pypi.yml`, `publish-npm.yml`, or `publish-crates.yml`
+workflow plus the exact environment name `release`; GitHub Packages uses the same
+environment with its short-lived `GITHUB_TOKEN`. Registry ownership was established
+by the initial `v0.3.0` bootstrap; the complete setup is documented in
+[package distribution](package-distribution.md).
 
 macOS notarization and Windows Authenticode publisher signing are intentionally
 pending because they require external identities. Checksums and GitHub's signed
