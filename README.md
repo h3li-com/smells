@@ -1,360 +1,279 @@
 # smells
 
-Deterministic code-smell evidence for Rust, Python, and TypeScript.
+Install once. Scan every configured smell. Give humans and coding agents evidence they can audit.
 
-`smells` scans a codebase and answers five practical questions:
+`smells` is a standalone, deterministic code-smell scanner for Rust, Python, TypeScript, and TSX.
 
-1. What smell pattern was detected?
-2. Where is it in the repository?
-3. What measurement crossed which threshold?
-4. Why might it matter, and what should be reviewed?
-5. Which Refactoring.Guru page must the review agent research before judging the finding?
+A default `smells check` runs all 28 active rules across all 23 Refactoring.Guru smell categories. The scanner collects its own bounded evidence, so every repository gets a complete review without building a custom evidence pipeline.
 
-The scanner—not an LLM—decides whether a configured rule matches. The same
-source, policy, evidence, and executable produce the same ordered JSON report.
-This makes `smells` suitable for local review, CI, pre-commit hooks, and agentic
-coding environments.
+The scanner—not an LLM—decides whether a rule matches. Humans and agents use the resulting locations, measurements, thresholds, source excerpts, and research links to decide what should change.
 
-[Quick start](#quick-start) · [Understand results](#understand-the-result) ·
-[Pre-commit hook](#add-it-to-a-pre-commit-hook) ·
-[Monorepos](#monorepo-behavior) ·
-[Choose rules](#choose-which-policy-groups-run) ·
-[Full-pattern evidence](#source-rules-and-full-pattern-evidence) ·
-[Rule reference](#policies-and-rule-reference) ·
-[Install](#install-smells)
+[Quick start](#five-minute-quick-start) · [Use cases](#when-to-use-smells) · [Coding agents](#use-smells-with-coding-agents) · [Integrate](#integrate-smells-into-a-repository) · [Reports](#understand-the-result)
 
-## At a glance
+## What Smells gives you
 
-- Scans Rust, Python, TypeScript, and TSX source without executing application code.
-- Reports repository-relative files, lines, symbols, measurements, and thresholds.
-- Separates blocking rules from review-only signals.
-- Understands monorepos and groups results by the nearest runtime manifest.
-- Emits human-readable tables or complete JSON for hooks and coding agents.
-- The release pipeline produces versioned GitHub binaries, PyPI wheels,
-  native npm packages on npmjs.com and GitHub Packages, and a crates.io package
-  from one release build.
-- Fails closed when parsing or analysis budgets are incomplete.
-- Covers all 23 Refactoring.Guru smell categories through 28 rules per language pack.
+```text
+source + checked-in policy
+          ↓
+28 deterministic rules across 23 smell categories
+          ↓
+auditable table and JSON evidence
+          ↓
+human or coding-agent review grounded in Refactoring.Guru
+```
 
-> **Important:** every rule in every starter policy is active. The default group is
-> `all`, and `smells check` runs all 28 rules without requiring a separate evidence
-> pipeline. Built-in collectors provide conservative source, type-shape, contract,
-> coverage-risk, and Git-history indicators. `--evidence` remains available as an
-> optional higher-fidelity replacement for individual built-in rule observations.
+- Exact repository-relative files, lines, columns, symbols, and source excerpts.
+- The observed measurement, comparison, configured threshold, and match status.
+- Separate blocking violations and non-blocking review signals.
+- An explicit result for every canonical smell, including excluded, inapplicable, and incomplete states.
+- A mandatory Refactoring.Guru URL and research contract in every matched finding.
+- Stable JSON for Codex, Claude Code, Pi, CI jobs, hooks, and other automation.
+- Fail-closed exit codes when parsing, history, ownership, inputs, or analysis budgets are incomplete.
+
+`smells` does not execute the repository's application code, builds, tests, package scripts, or compilers.
+
+## When to use Smells
+
+| Use case | What Smells contributes |
+| --- | --- |
+| AI-assisted code review | Gives the agent deterministic findings instead of asking it to discover smells from scratch |
+| Refactoring work | Grounds each proposal in a location, threshold, source excerpt, and required design reference |
+| Pull-request CI | Blocks configured violations and invalid or incomplete scans with distinct exit codes |
+| Pre-commit review | Scans the complete staged Git snapshot before a commit is created |
+| Codebase health audit | Produces a reproducible baseline across all 23 smell categories |
+| Monorepo triage | Assigns findings to the nearest Cargo, Python, or Node implementation manifest |
+| Team policy | Keeps thresholds, modes, groups, exclusions, and budgets in a reviewed JSON file |
+| Higher-fidelity analysis | Accepts optional compiler, coverage, type, test, or architecture evidence per rule |
+
+Use Smells alongside formatting, compilation, type checking, tests, coverage, security scans, and human design review. It complements those checks; it does not replace them.
 
 ## Supported languages
 
-| Language pack | Files scanned | Built-in rules | Optional evidence overrides | What counts as a class-like type |
-| --- | --- | ---: | ---: | --- |
-| `rust-v1` | `.rs` | 28 | 11 | `struct`/`enum` state plus inherent and trait `impl` methods; traits are interface-like contracts |
-| `python-v1` | `.py`, `.pyi` | 28 | 18 | `class` state, direct methods, and `self`/`cls` field assignments |
-| `typescript-v1` | `.ts`, `.tsx`, `.mts`, `.cts` | 28 | 18 | Classes, abstract classes, interfaces, method signatures, and authored fields |
+| Language pack | Files scanned | Active built-in rules | Class-like model |
+| --- | --- | ---: | --- |
+| `rust-v1` | `.rs` | 28 | `struct`/`enum` state plus inherent and trait `impl` methods |
+| `python-v1` | `.py`, `.pyi` | 28 | Classes, direct methods, and `self`/`cls` field assignments |
+| `typescript-v1` | `.ts`, `.tsx`, `.mts`, `.cts` | 28 | Classes, abstract classes, interfaces, signatures, and authored fields |
 
-Java and Kotlin are not currently supported. A React Native repository can scan
-its TypeScript/TSX source, but not its native Android code.
+All three packs cover the same 23 canonical categories. Some categories use more than one rule, which is why each pack contains 28 rules.
 
-## Quick start
+| Refactoring.Guru category | Smells covered |
+| --- | --- |
+| Bloaters | Long Method, Large Class, Primitive Obsession, Long Parameter List, Data Clumps |
+| Object-Orientation Abusers | Alternative Classes with Different Interfaces, Refused Bequest, Switch Statements, Temporary Field |
+| Change Preventers | Divergent Change, Parallel Inheritance Hierarchies, Shotgun Surgery |
+| Dispensables | Comments, Duplicate Code, Data Class, Dead Code, Lazy Class, Speculative Generality |
+| Couplers | Feature Envy, Inappropriate Intimacy, Incomplete Library Class, Message Chains, Middle Man |
 
-### 1. Install Smells
+Java, Kotlin, JavaScript, and JSX are not currently supported. React and React Native repositories can scan TypeScript and TSX, but not JavaScript, JSX, or native Android source.
 
-The fastest cross-language option is the prebuilt
-[PyPI tool package](https://pypi.org/project/smells/0.4.0/):
+## Five-minute quick start
+
+### 1. Install the CLI
+
+Choose one channel. Every channel provides the same Rust executable and rule behavior.
+
+General-purpose installation with [uv](https://docs.astral.sh/uv/concepts/tools/):
 
 ```sh
 uv tool install smells==0.4.0
 smells --version
 ```
 
-Node projects can pin the
-[native npm package](https://www.npmjs.com/package/@mindful-time/smells). It does
-not download anything during installation:
+Inside a Node project:
 
 ```sh
 npm install --save-dev --save-exact @mindful-time/smells@0.4.0
 npx --no-install smells --version
 ```
 
-After the one-time crates.io ownership bootstrap is complete, Rust users can build
-the same executable from its verified source package:
+With a Rust toolchain:
 
 ```sh
 cargo install --locked --version 0.4.0 smells
-```
-
-Until then, use a standalone release, PyPI, or npm. Unlike those prebuilt channels,
-`cargo install` requires Rust 1.88 and compiles locally. See
-[package distribution](docs/package-distribution.md) for package names, platform
-selection, registry provenance, and owner bootstrap requirements.
-
-### Install a standalone release
-
-Download the archive for your host from the matching
-[GitHub Release](https://github.com/mindful-time/smells/releases). Verify both its
-checksum and GitHub provenance before installing it. For macOS Apple Silicon:
-
-```sh
-gh release download v0.4.0 \
-  --repo mindful-time/smells \
-  --pattern 'smells-aarch64-apple-darwin.tar.gz*'
-shasum -a 256 -c smells-aarch64-apple-darwin.tar.gz.sha256
-gh release verify v0.4.0 --repo mindful-time/smells
-gh release verify-asset v0.4.0 \
-  smells-aarch64-apple-darwin.tar.gz \
-  --repo mindful-time/smells
-tar -xzf smells-aarch64-apple-darwin.tar.gz
-install -m 0755 smells-aarch64-apple-darwin/smells ~/.local/bin/smells
 smells --version
 ```
 
-The same release contains macOS Intel, Linux AMD64/ARM64 GNU, and Windows AMD64
-archives. It also contains the exact wheel, npm, and crates.io package payloads
-published by the release workflow. After downloading a wheel directly:
+Prebuilt archives for macOS, Linux, and Windows are available from the [v0.4.0 GitHub Release](https://github.com/mindful-time/smells/releases/tag/v0.4.0).
 
-```sh
-uv tool install ./smells-0.4.0-py3-none-PLATFORM.whl
-```
+### 2. Add a policy to the repository
 
-The wheel is a delivery mechanism; the scanner does not become a Python program.
-There is deliberately no source distribution, so an unsupported platform fails
-instead of compiling Rust unexpectedly. See the [release process](docs/release-process.md)
-for the artifact contract and supported targets.
+Choose the policy that matches the language being scanned:
 
-Contributors can still build from source with Rust 1.88:
-
-```sh
-git clone https://github.com/mindful-time/smells.git
-cd smells
-cargo install --path . --locked
-```
-
-### 2. Choose a starter policy
-
-| Your codebase | Starter policy |
+| Language | Starter policy |
 | --- | --- |
-| Rust | `examples/quality-policy.json` |
-| Python | `examples/python-quality-policy.json` |
-| TypeScript/TSX | `examples/typescript-quality-policy.json` |
+| Rust | [`examples/quality-policy.json`](examples/quality-policy.json) |
+| Python | [`examples/python-quality-policy.json`](examples/python-quality-policy.json) |
+| TypeScript/TSX | [`examples/typescript-quality-policy.json`](examples/typescript-quality-policy.json) |
 
-A policy selects the language pack, rule modes, thresholds, excluded directory
-names, default rule groups, and analysis budgets. There is no separate language
-flag. Every starter has `"default_groups": ["all"]` and 28 active rules.
-
-Copy the matching starter policy into the repository you want to scan. For a
-Python project:
+For example, add the immutable v0.4.0 Python starter to another repository:
 
 ```sh
-cp examples/python-quality-policy.json /path/to/python-project/quality-policy.json
-cd /path/to/python-project
+curl -fsSLo quality-policy.json \
+  https://raw.githubusercontent.com/mindful-time/smells/v0.4.0/examples/python-quality-policy.json
 smells contracts validate --policy quality-policy.json
 ```
 
-Use the Rust or TypeScript starter from the table in the same way. Review its
-thresholds, then commit `quality-policy.json` with the project so local, CI, and
-hook scans all use the same contract.
+Commit the policy. Local developers, CI, hooks, and coding agents should all use that same reviewed contract.
 
-### 3. Scan a codebase
+### 3. Scan the repository
 
-Use the table format for an interactive first run:
-
-```sh
-smells check \
-  --path . \
-  --policy quality-policy.json \
-  --format table
-```
-
-Replace the path and policy for Rust or TypeScript. Scan from a monorepo root if
-you want findings grouped by each nested implementation.
-
-Use JSON for CI, hooks, or coding agents:
-
-```sh
-smells check \
-  --path . \
-  --policy quality-policy.json \
-  --format json > smells-report.json
-```
-
-JSON reports can be large because they retain both matched and nonmatching
-measurements so the verdict can be audited.
-
-To keep that complete JSON report while also showing actionable output in the
-terminal or CI log, use `--report` with the table format:
+Use the table for people and keep the complete JSON report for tools:
 
 ```sh
 smells check \
   --path . \
   --policy quality-policy.json \
   --format table \
-  --report target/quality/smells-report.json
+  --report smells-report.json
 ```
 
-This performs one scan. The log includes the verdict, implementation, smell
-pattern, evidence locations, observed value, threshold, source lines, reason,
-remediation, Refactoring.Guru URL, and review guidance for
-every match. `--report` writes the complete machine-readable JSON from that
-same scan.
+This is one scan. The terminal shows actionable matches while `smells-report.json` retains matched and nonmatching measurements, coverage states, digests, and implementation ownership.
+
+Use JSON on standard output when another process consumes the report directly:
+
+```sh
+smells check --path . --policy quality-policy.json --format json
+```
 
 ## Understand the result
 
 ### Exit codes
 
-| Exit code | Meaning | What to do |
+| Exit | Meaning | Required action |
 | ---: | --- | --- |
-| `0` | Every selected active required rule completed and passed | Continue |
+| `0` | Every selected active required rule completed and passed | Continue; review-only signals may still exist |
 | `1` | One or more required rules matched | Review the blocking findings |
-| `2` | The scan was incomplete or invalid | Fix the input, policy, parser, ownership, budget, or evidence error |
+| `2` | The scan was invalid or incomplete | Fix the input, policy, parser, ownership, history, budget, or evidence error |
 
-Review-only findings do not change a successful exit code. Errors always take
-precedence over matches.
+An exit code of `2` never means “clean.” Errors take precedence over violations, and violations take precedence over a successful result.
 
-### Read the table from top to bottom
+### Blocking and review findings
 
-An abbreviated table report looks like this:
-
-```text
-Scan summary | verdict: blocked_by_required_patterns | implementations: 1 | matched patterns: 2/23 | blocking patterns: 1 | review patterns: 1 | matched findings: 11 | blocking findings: 3 | review signals: 8 | errors: 0
-Implementation: backend | root: backend | ... | 120 python files
-Smell pattern  | Pattern ID     | Result         | Matches | Blocking | Review | Coverage
-Long Method    | long-method    | blocking_match | 3       | 3        | 0      | measured_defined_scope
-Duplicate Code | duplicate-code | review_match   | 8       | 0        | 8      | measured_defined_scope
-Dead Code      | dead-code      | excluded       | 0       | 0        | 0      | excluded
-
-Matched evidence for backend:
-Finding | Smell       | Repository symbols          | Metric                   | Value | Matches when | Threshold | Status    | Repository evidence locations
-42      | Long Method | app/jobs.py::process_batch | authored body code lines | 146   | >            | 100       | violation | app/jobs.py:42:1
-
-Actionable finding 42 | Long Method | python.function_lines | pattern_type=metric | certainty=exact_source_metric | status=violation
-  Issue: Long Method: python.function_lines violation
-  Primary location: app/jobs.py:42:1 | symbol: app/jobs.py::process_batch
-  Observed versus threshold: authored body code lines = 146; matches when > 100
-  Evidence: Observed authored body code lines = 146; this satisfies the configured match condition > 100.
-  Signal: A callable's authored body contains more code lines than the configured maximum.
-  Source excerpt: app/jobs.py:42:1
-    >     42 | def process_batch(...):
-  Why it matters: A large callable can conceal multiple responsibilities and make focused testing harder.
-  Remediation: Extract coherent steps into named callables or a focused class/module while preserving behavior with tests.
-  Reference URL: https://refactoring.guru/smells/long-method
-  Review guidance: NON-NEGOTIABLE RESEARCH: Perform an external research/tool call to the reference URL and read the page before reviewing or remediating ...
-```
-
-Read it in this order:
-
-1. **Implementation** tells you which application, package, or service owns the result.
-2. **Blocking** rows caused exit code `1` and should be handled first.
-3. **Review** rows are deterministic signals that still require design judgement.
-4. **Matched evidence** shows the exact symbol, measurement, threshold, and location.
-5. **Actionable findings** are self-contained for every match: they add pattern
-   type, source lines, why the signal matters, remediation guidance, its exact
-   reference URL, and focused review guidance.
-6. **Excluded** means the resolved group selection did not run that detector; it
-   does not mean no smell exists. **Disabled** is reserved for an explicit legacy
-   `off` mode.
-
-`checked_no_match_in_measured_scope` means the selected active detector ran and stayed
-within its configured threshold. `not_applicable` means the smell does not map
-to that language's model. `error` with `coverage_status: incomplete` means a
-collector prerequisite such as Git history was unavailable; it is never a clean
-result.
-
-### Rule modes
-
-| Mode | Behavior |
+| Rule mode | Effect |
 | --- | --- |
-| `required` | A match blocks with exit code `1` |
-| `report` | A match is recorded for human or agent review but does not block |
-| `off` | Legacy/custom-policy opt-out; the shipped policies do not use it |
+| `required` | A match is a blocking violation and produces exit `1` |
+| `report` | A match is a review signal and does not change an otherwise successful exit |
+| `off` | An explicit custom-policy opt-out; shipped starter policies do not use it |
 
-### What a finding contains
+Each matched finding contains:
 
-Each matched JSON finding is self-contained. It includes:
-
-- Smell name, category, pattern type, and rule identity.
-- File, one-based line and column, symbol, and related locations.
-- The observed measurement, comparison, and configured threshold.
-- A source excerpt when applicable.
+- The canonical smell, rule ID, pattern type, and certainty.
+- A primary symbol and location plus any related symbols and locations.
+- The observed value, match condition, and configured threshold.
+- A source excerpt when the rule maps to authored source.
 - Why the signal matters and what the reviewer should inspect.
 - A behavior-preserving remediation direction.
 - The exact Refactoring.Guru URL.
-- A mandatory Refactoring.Guru research contract for agent grounding.
+- A non-negotiable instruction to research that page before review or remediation.
 
-A shortened finding looks like this:
+`checked_no_match_in_measured_scope` means the detector ran and stayed within its threshold. It does not claim the code is free of every possible design problem.
 
-```json
-{
-  "smell_id": "long-method",
-  "smell": "Long Method",
-  "pattern_type": "metric",
-  "symbol": "process_batch",
-  "location": {
-    "path": "src/jobs.py",
-    "line": 42,
-    "column": 1
-  },
-  "evaluation": {
-    "metric": "authored body code lines",
-    "observed": 146,
-    "match_condition": ">",
-    "threshold": 100,
-    "matched": true
-  },
-  "diagnostic": {
-    "why_it_matters": "A large callable can conceal multiple responsibilities and make focused testing harder.",
-    "remediation": "Extract coherent steps into named callables or a focused class/module while preserving behavior with tests.",
-    "reference_url": "https://refactoring.guru/smells/long-method",
-    "reference_check": {
-      "required": true,
-      "non_negotiable": true,
-      "action": "perform_external_research_call_to_reference_url",
-      "required_before": "review_or_remediation",
-      "unavailable_action": "report_reference_research_incomplete_and_do_not_review_or_remediate"
-    }
-  },
-  "status": "violation",
-  "blocking": true
-}
+`incomplete` means a prerequisite was unavailable. For example, selected history rules are incomplete outside a Git repository and force exit `2` instead of returning a false clean result.
+
+See the [report interface](docs/report-interface.md) before building a custom parser or integration.
+
+## Use Smells with coding agents
+
+Smells needs no MCP server, plugin, model provider, or agent-specific API. The agent runs the CLI, reads the report, researches each finding's exact reference URL, inspects the code, and proposes a behavior-preserving change.
+
+### Add a shared agent contract
+
+Put this section in the consuming repository's root `AGENTS.md`:
+
+```md
+## Smell review
+
+- Run `smells check --path . --policy quality-policy.json --format table --report smells-report.json` before reviewing or refactoring code smells.
+- Treat exit code 2 as an incomplete scan, never as a clean result.
+- Review blocking findings before review-only signals.
+- Treat each finding as evidence to investigate, not proof that a defect exists.
+- Before judging or changing a matched finding, open and read its exact `diagnostic.reference_url`.
+- NON-NEGOTIABLE RESEARCH: If the URL cannot be consulted, report the research as incomplete and stop review or remediation for that finding.
+- Verify the finding against the surrounding design, tests, and repository contracts.
+- Prefer small behavior-preserving changes. Run the project's tests and rerun Smells after editing.
 ```
 
-See the complete [report interface](docs/report-interface.md) before building a
-custom integration.
+Keep the policy and these instructions under version control. The scanner supplies evidence; the agent supplies contextual judgement.
 
-## Scan a working tree or the Git index snapshot
+### Codex
 
-### Whole repository
+[Codex reads `AGENTS.md`](https://developers.openai.com/codex/guides/agents-md/) from the repository root toward its working directory. Put the shared contract at the root. Add narrower overrides only where needed.
+
+Ask Codex:
+
+```text
+Run the repository's Smells scan. Explain the exit code and prioritize blocking findings.
+For every finding you review, follow its reference_check and read the exact
+Refactoring.Guru URL first. Do not edit code until the evidence is verified against
+the repository. Then propose the smallest behavior-preserving change and test it.
+```
+
+### Claude Code
+
+Current Claude Code versions can read `AGENTS.md`. If the project already has a `CLAUDE.md`, add this import so one contract remains authoritative:
+
+```md
+@AGENTS.md
+```
+
+Claude Code documents this pattern in [Share one file with other coding tools](https://code.claude.com/docs/en/memory#share-one-file-with-other-coding-tools).
+
+Ask Claude Code the same review prompt. The contract and JSON schema do not change by model or provider.
+
+### Pi
+
+[Pi loads `AGENTS.md` or `CLAUDE.md`](https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/docs/quickstart.md#give-pi-project-instructions) from the project path. Restart Pi or run `/reload` after changing the instructions.
+
+Start Pi in the repository, then ask it to run the shared Smells workflow:
+
+```text
+Use the repository Smell review instructions. Run the scan, research each matched
+finding's exact reference URL, and return a prioritized review before changing code.
+```
+
+### Other coding agents
+
+Place the shared contract in the tool's project-instruction file or include it in the task prompt. The only required capabilities are running a local command, reading JSON and source, and opening the emitted HTTPS reference URL.
+
+Do not ask an agent to “fix every smell.” Ask it to verify findings, explain tradeoffs, preserve behavior, test each change, and rerun the deterministic scan.
+
+## Integrate Smells into a repository
+
+### Keep one source of truth
+
+A typical single-language integration contains:
+
+```text
+quality-policy.json   reviewed rules, modes, thresholds, exclusions, and budgets
+AGENTS.md             shared human/agent review contract
+CLAUDE.md             optional `@AGENTS.md` import
+smells-report.json    generated report; usually ignored by Git
+```
+
+Pin the Smells version in the installation command. Upgrade the executable and policy contract deliberately, then review the resulting report changes.
+
+### Run it in CI
+
+Add the same command to the repository's existing quality job:
 
 ```sh
-smells check --path . --policy quality-policy.json --format table
+uvx --from smells==0.4.0 smells check \
+  --path . \
+  --policy quality-policy.json \
+  --format table \
+  --report smells-report.json
 ```
 
-`--path` recursively captures only the selected language's supported extensions.
-Configured cache/build directories are excluded by name. Symlinks are never
-followed, so dependency caches cannot silently redirect a scan outside its root.
+For GitHub Actions, check out full history with `fetch-depth: 0`. Divergent Change and Shotgun Surgery use up to 200 commits of bounded Git co-change history.
 
-### Git index snapshot for pre-commit
+Preserve `smells-report.json` as a CI artifact when agents or reviewers need the complete evidence. Let exit `1` block configured violations and exit `2` block incomplete analysis.
 
-Run this from the consuming Git repository:
+### Run it before commits
 
-```sh
-smells check --staged --policy quality-policy.json --format json
-```
+`--staged` scans the complete tracked source snapshot in the Git index. It reads source, runtime manifests, policy, and optional evidence from staged blobs rather than unstaged replacements.
 
-Despite the name, `--staged` does not scan only paths changed by the next commit.
-It scans the complete tracked source snapshot in the Git index for the selected
-language. It reads source, runtime manifests, policy, and optional evidence from
-index blobs—not from unstaged working-tree replacements. The policy itself must
-be staged.
-
-For a mixed Rust/Python/TypeScript repository, keep one policy per language and
-invoke the scanner once for each policy.
-
-## Add it to a pre-commit hook
-
-The repository includes an inactive [consumer hook example](hooks/pre-commit.example).
-Pin and validate the scanner version before adding it to another project, and
-merge the command into any existing hook rather than overwriting that hook.
-
-For the Python `pre-commit` framework, `uvx` provides a pinned, cached executable
-without checking scanner source into the consuming repository:
+With the Python `pre-commit` framework:
 
 ```yaml
 repos:
@@ -367,238 +286,134 @@ repos:
         pass_filenames: false
 ```
 
-A Node project that already pins `@mindful-time/smells` can use the same hook with
-`entry: npx --no-install smells check ...`. A Rust-oriented development image can
-install `smells` once with Cargo and keep the plain `smells check ...` entry. In all
-three cases the policy stays checked into the consuming repository and the hook scans
-the same Git-index snapshot.
+Node projects can replace the entry with `npx --no-install smells check ...`. Rust development images can install Smells once and use `smells check ...` directly.
 
-A minimal single-language hook is:
+The repository also includes an inactive [shell hook example](hooks/pre-commit.example). Merge it into an existing hook instead of overwriting other quality checks.
 
-```sh
-#!/bin/sh
-set -eu
+### Scan a monorepo
 
-command -v smells >/dev/null 2>&1 || {
-  printf '%s\n' 'smells: scanner executable is unavailable' >&2
-  exit 2
-}
+Run from the monorepo root. Each source file is assigned to its nearest `Cargo.toml`, `pyproject.toml`, or `package.json`, and each implementation receives a separate report section.
 
-exec smells check --staged --policy quality-policy.json --format json
-```
+Nested manifests override parent ownership. Source without a matching manifest stays visible under `__unowned__`.
 
-Keep formatting, compilation, tests, Gitleaks, OSV, and other project checks in
-the same quality pipeline. `smells` complements them; it does not replace them.
-See [project integration](docs/project-integration.md) for mixed-language hooks,
-scope guarantees, and fail-closed behavior.
-
-## Monorepo behavior
-
-When scanning from a monorepo root, each source file is assigned to its nearest
-ancestor manifest:
-
-- `Cargo.toml` for Rust
-- `pyproject.toml` for Python
-- `package.json` for TypeScript
-
-The report gets one `implementation_results` section per discovered runtime.
-Nested manifests take ownership from parent manifests. Source without a matching
-manifest remains visible under `__unowned__` instead of disappearing.
-
-This makes it possible to answer “which application or service owns this smell?”
-without scanning every directory separately.
-
-## Source rules and full-pattern evidence
-
-The starter policies activate all 28 rules and select `all` by default. A normal
-scan therefore evaluates every rule and returns one explicit result for each of
-the 23 canonical smells:
+A mixed-language repository needs one checked-in policy and one invocation per language pack:
 
 ```sh
-smells check --path . --policy quality-policy.json --format table
+smells check --path . --policy rust-quality-policy.json --format json
+smells check --path . --policy python-quality-policy.json --format json
+smells check --path . --policy typescript-quality-policy.json --format json
 ```
 
-Built-in collectors cover deterministic measurements such as:
+Keep the reports separate so their language-pack identities and thresholds remain explicit.
 
-- Function size and argument count.
-- Class/type fields, methods, and total method lines.
-- Repeated parameter groups and duplicate callable bodies.
-- Comment density, data-only classes, and tiny classes.
-- Primitive-heavy slots, repeated dispatch, temporary fields, forwarding classes,
-  alternative interfaces, inheritance rejection, and interface conformance.
-- Conservative zero-coverage CRAP upper bounds, unused private declarations, and
-  unused generic parameters.
-- Private-member access, navigation chains, library-extension workarounds, and
-  domain-significant primitive field names.
-- Up to 200 Git commits of co-change history for divergent change and shotgun
-  surgery when the scanned path is inside a repository.
+## How the default scan works
 
-Reports expose `history_scope.available`, `history_scope.commit_count`, and the
-collector's maximum commit bound. Outside a Git repository, every selected
-history rule is `incomplete` and the scan exits `2`; unavailable history is never
-reported as a clean measurement, regardless of rule mode.
+Every starter policy selects `all`. A normal scan runs all 28 rules and returns one explicit result for each of the 23 canonical smells.
 
-These are deliberately bounded structural indicators, not proof of a design
-defect. For example, the built-in CRAP collector assumes zero coverage and reports
-a conservative upper bound; unused-code detection is restricted to unreferenced
-private declarations; architectural checks use authored interfaces, visibility,
-and naming conventions. The finding's `evidence.provider_evidence` object names
-the exact built-in algorithm and scope.
+Built-in collectors cover:
 
-Teams that already have compiler diagnostics, complete coverage, resolved type
-graphs, capability tests, or a project ownership ledger can pass those facts as
-an optional evidence bundle tied to the scan's `input_sha256`:
+- Function size, arguments, class/type size, fields, and method lines.
+- Data clumps, duplicate callable bodies, comment density, data classes, and tiny classes.
+- Primitive-heavy state, repeated dispatch, temporary fields, forwarding types, and alternative interfaces.
+- Inheritance rejection, interface conformance, private-member access, message chains, and extension workarounds.
+- Conservative zero-coverage CRAP bounds, unused private declarations, and unused generic parameters.
+- Up to 200 Git commits of co-change history for Divergent Change and Shotgun Surgery.
+
+These are bounded structural indicators, not proof of a design defect. The report names each collector, certainty, scope, and limitation so a reviewer can judge the evidence honestly.
+
+## Configure what runs
+
+The checked-in policy owns the language pack, rule modes, thresholds, exclusions, default groups, and analysis budgets.
+
+Inspect the resolved selection before scanning:
+
+```sh
+smells policy show --policy quality-policy.json --format table
+smells rules --rule-pack python-v1
+```
+
+Available groups are `all`, `source`, `evidence`, and the five canonical smell categories. Starter policies select `all`; users must make any narrower selection intentionally.
+
+| Selector | Effect |
+| --- | --- |
+| `--group NAME` | Add a group to configured defaults |
+| `--only-group NAME` | Replace defaults with only the named groups |
+| `--all-groups` | Select every rule |
+| `--no-default-groups` | Start without configured defaults |
+| `--no-group NAME` | Remove a group after inclusions; exclusions win |
+
+Unknown, duplicate, or conflicting selectors return exit `2`. The resolved selection and selected/excluded rules appear in every report.
+
+### Optional higher-fidelity evidence
+
+`--evidence` is not required for a complete default scan. It is an optional replacement for individual built-in observations when a team already has stronger compiler, type, coverage, test, or architecture facts.
 
 ```sh
 smells check \
-  --path /path/to/project \
+  --path . \
   --policy quality-policy.json \
   --evidence provider-evidence.json \
   --format json
 ```
 
-An external entry replaces the built-in observations for that rule; omitted rules
-continue to use their built-in collectors. Supplied entries still fail closed when
-stale, incomplete, malformed, duplicated, or inconsistent with the selected rule
-pack. Start with the [provider evidence guide](docs/provider-evidence.md) and its
-[JSON Schema](schemas/provider-evidence.schema.json).
+Rules omitted from the evidence bundle continue using built-in collectors. Supplied evidence must match the exact input digest and fails closed when stale, malformed, duplicated, or incomplete.
 
-## Policies and rule reference
+Start with the [provider evidence guide](docs/provider-evidence.md) and [JSON Schema](schemas/provider-evidence.schema.json).
 
-### Choose which policy groups run
+## Safety and limitations
 
-The selection model follows uv's dependency-group behavior. Persistent defaults
-come from `default_groups` in the checked-in policy; the starter policies use
-`["all"]`. Inspect the exact resolved policy before scanning:
+- Smells captures source and fixed runtime manifests without following symlinks.
+- It never executes repository code, dependencies, build scripts, tests, compilers, or package managers.
+- Deterministic analysis budgets prevent unbounded work; exhaustion returns exit `2`.
+- Missing Git history, unresolved ownership, parser failure, and invalid evidence are incomplete—not clean.
+- Rust scans authored branches, including inactive `cfg` source; Python and TypeScript scan authored source text.
+- Built-in type, coverage, and architecture indicators do not claim compiler-level or runtime certainty.
+- The scanner reports evidence but never edits or automatically refactors source.
 
-```sh
-smells policy show --policy quality-policy.json --format table
-smells policy show --policy quality-policy.json --only-group source --format json
-```
+Run the project's compiler, type checker, tests, fresh coverage, and security tooling alongside Smells.
 
-Built-in groups are `all`, `source`, `evidence`, and the five canonical smell
-categories: `bloaters`, `object-orientation-abusers`, `change-preventers`,
-`dispensables`, and `couplers`. The `evidence` name is retained for policy
-compatibility; in 0.4.0 those rules have built-in collectors and merely *allow*
-external evidence overrides.
+## Installation and release provenance
 
-| Selector | Resolution behavior |
-| --- | --- |
-| `--group NAME` | Add a group to the configured defaults; repeatable |
-| `--only-group NAME` | Replace defaults with only these groups; repeatable |
-| `--all-groups` | Include every rule |
-| `--no-default-groups` | Start without configured defaults |
-| `--no-group NAME` | Remove a group after every inclusion; exclusions always win |
+| Channel | Package | Installation |
+| --- | --- | --- |
+| PyPI | [`smells`](https://pypi.org/project/smells/0.4.0/) | `uv tool install smells==0.4.0` |
+| npm | [`@mindful-time/smells`](https://www.npmjs.com/package/@mindful-time/smells/v/0.4.0) | `npm install --save-dev --save-exact @mindful-time/smells@0.4.0` |
+| crates.io | [`smells`](https://crates.io/crates/smells/0.4.0) | `cargo install --locked --version 0.4.0 smells` |
+| GitHub | [v0.4.0 release](https://github.com/mindful-time/smells/releases/tag/v0.4.0) | Download the archive for the host platform |
 
-`--only-group` conflicts with `--group`, `--all-groups`, and
-`--no-default-groups`. Unknown or duplicate group selectors return exit `2`.
-The resolved selection, group membership, selected/excluded rule IDs, and rule
-mode appear in `policy show` and every scan report. The resolved selection is
-also part of `input_sha256`, so evidence for one selection cannot be replayed
-against another.
+All registry payloads originate from one immutable GitHub Release. Protected workflows verify its commit, attestations, checksums, and exact assets before publishing through short-lived identities.
 
-List the registered rules for one language pack:
+See [package distribution](docs/package-distribution.md) and the [release process](docs/release-process.md) for platform packages, provenance verification, SBOMs, and recovery guarantees.
 
-```sh
-smells rules --rule-pack rust-v1
-smells rules --rule-pack python-v1
-smells rules --rule-pack typescript-v1
-```
+## Reference documentation
 
-Exact thresholds and measurement contracts are documented here:
-
+- [Project integration](docs/project-integration.md)
+- [Report interface](docs/report-interface.md)
+- [Provider evidence](docs/provider-evidence.md)
 - [Rust rule contracts](docs/rust-rule-contracts.md)
 - [Python rule contracts](docs/python-rule-contracts.md)
 - [TypeScript rule contracts](docs/typescript-rule-contracts.md)
-- [Report interface](docs/report-interface.md)
-- [Provider evidence](docs/provider-evidence.md)
-- [Project integration](docs/project-integration.md)
+- [Performance and algorithm research](docs/performance-algorithm-research.md)
+- [Repository governance](docs/repository-governance.md)
 
-Analysis limits such as `maximum_files`, `maximum_pairs`, and
-`maximum_group_combinations` are deterministic safety ceilings. Exceeding a
-limit returns exit code `2`; it never produces a silently truncated success.
+## Developing Smells
 
-## What `smells` does not do
-
-- It does not automatically fix or refactor source code.
-- It does not execute application code, builds, compilers, tests, or build scripts.
-- It does not claim that its source-level type, coverage, or architecture
-  approximations are equivalent to a compiler, coverage runner, or project contract.
-- It does not treat a structural indicator as proof of a design defect.
-- It does not guess active Rust features, Python environments, or TypeScript configs.
-- It does not authenticate optional external evidence producers; the surrounding quality
-  pipeline must invoke and verify the intended pinned provider.
-- It does not currently scan Java, Kotlin, JavaScript, JSX, or other languages.
-
-The tool supplies deterministic evidence. A human or coding agent still decides
-whether the detected structure is intentional and which behavior-preserving
-change, if any, is appropriate.
-
-## Performance and benchmarking
-
-Python and TypeScript parsing uses bounded Rayon workers. Duplicate detection
-uses exact prefix, size, and positional filters before charging the pair budget,
-avoiding comparisons that cannot reach the configured similarity threshold.
-
-Measure your own repository instead of assuming one machine or corpus represents
-another:
+Run the deterministic local gate:
 
 ```sh
-./scripts/benchmark-scan.sh . quality-policy.json 5 cold default
-./scripts/benchmark-scan.sh . quality-policy.json 5 warm default
-```
-
-The benchmark discards the report but records wall time, cache hits/misses,
-syntax work, candidate comparisons, output bytes, and peak memory. Always compare
-cold and warm results; cache hits are deterministic but are not guaranteed to be
-faster for every corpus. See [performance and algorithm research](docs/performance-algorithm-research.md)
-for the algorithm and benchmark design.
-
-## Developing `smells`
-
-Run the deterministic test suite:
-
-```sh
-cargo fmt --all -- --check
-cargo clippy --locked --all-targets -- -D warnings
-cargo test --locked
-```
-
-Install this repository's own pre-commit and pre-push hooks:
-
-```sh
-make install-hooks
 make pre-commit-push
 ```
 
-The shared gate runs formatting, build, Clippy, tests, the scanner against
-itself, CRAP analysis, Gitleaks, and OSV. CRAP has a target of `5` and a hard
-blocking limit of `10`; scores above the target remain visible to coding agents.
+It runs formatting, build, Clippy, 131 offline tests, the scanner against itself, CRAP analysis, Gitleaks, and OSV. Pull requests run the same fail-closed gate and must originate from a fork.
 
-Pull requests run that same gate in GitHub Actions and additionally build, install,
-and execute a binary wheel and standalone archive. Pull requests must originate
-from a fork. Only repository owner `mindful-time` can dispatch release publication
-from `main`; read
-[repository governance](docs/repository-governance.md) and the
-[release process](docs/release-process.md) before changing either workflow.
-
-The optional live E2E test verifies the hook-to-finding-to-Refactoring.Guru
-research path and therefore requires network access:
+The optional live test exercises the complete finding-to-Refactoring.Guru research path:
 
 ```sh
 cargo test --locked --test e2e_live -- --ignored --nocapture
 ```
 
-Ordinary tests remain offline and deterministic.
-
 ## Project status
 
-`smells` source is currently version `0.4.0`. Standalone GitHub archives, binary
-PyPI wheels, and native npm packages on npmjs.com are published. The owner-gated
-workflow publishes the same signed npm artifacts to GitHub Packages and uses an
-idempotent recovery workflow when a registry fails after release creation.
-crates.io still requires its documented one-time ownership bootstrap before future
-releases can use short-lived OIDC credentials. No Python sdist is produced. Smells
-is open-source software licensed under the [MIT License](LICENSE).
-Repository:
-[mindful-time/smells](https://github.com/mindful-time/smells).
+Version `0.4.0` is available from GitHub Releases, PyPI, npm, GitHub Packages, and crates.io. Smells is open-source software licensed under the [MIT License](LICENSE).
+
+Repository: [mindful-time/smells](https://github.com/mindful-time/smells)
