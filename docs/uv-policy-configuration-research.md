@@ -1,5 +1,9 @@
 # uv configuration patterns for selectable smell policies
 
+> Historical note: this document records the v0.3.0 provider-required design.
+> Version 0.4.0 supersedes that execution contract with built-in collectors for
+> every active rule and optional per-rule evidence overrides.
+
 Research date: 2026-09-20
 uv source revision inspected: [`7b090fba99bc89a6670a23de5368d48d2418a756`](https://github.com/astral-sh/uv/tree/7b090fba99bc89a6670a23de5368d48d2418a756)
 

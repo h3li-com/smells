@@ -5,7 +5,9 @@ script_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repository_root=$(CDPATH= cd -- "$script_directory/.." && pwd)
 packager="$repository_root/scripts/package-npm.sh"
 smoke_test="$repository_root/scripts/smoke-test-npm.sh"
-version=0.3.0
+version=$(sed -n '/^\[package\]/,/^\[/ s/^version = "\([^"]*\)"/\1/p' \
+    "$repository_root/Cargo.toml")
+test -n "$version"
 
 temporary=$(mktemp -d "${TMPDIR:-/tmp}/smells-npm-packages.XXXXXX")
 mkdir -p "$repository_root/target"

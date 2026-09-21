@@ -1,5 +1,6 @@
 use serde_json::{Value, json};
 use std::{
+    collections::BTreeSet,
     fs,
     path::PathBuf,
     process::{Command, Output},
@@ -142,6 +143,21 @@ fn policy_show_explains_the_resolved_all_active_policy() {
             .count(),
         28
     );
+    for rule in value["rules"].as_array().unwrap() {
+        if rule["required_inputs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|input| input == "built_in_collector")
+        {
+            assert_eq!(
+                rule["required_inputs"],
+                json!(["built_in_collector"]),
+                "optional evidence is not a required input for {}",
+                rule["rule_id"]
+            );
+        }
+    }
 }
 
 #[test]
@@ -191,6 +207,7 @@ fn uv_style_group_selection_is_deterministic_and_exclusions_win() {
 #[test]
 fn checked_in_default_groups_are_used_until_cli_replaces_them() {
     let workspace = Workspace::new("fn concise() {}");
+    workspace.git(&["init", "-q"]);
     workspace.modify("/default_groups", json!(["source"]));
     let configured = workspace.command(&[
         "check",
@@ -227,7 +244,7 @@ fn checked_in_default_groups_are_used_until_cli_replaces_them() {
         "--format",
         "json",
     ]);
-    assert_eq!(overridden.status.code(), Some(2));
+    assert_eq!(overridden.status.code(), Some(0));
     let overridden = report(&overridden);
     assert_eq!(
         overridden["policy_selection"]["only_groups"],
@@ -240,12 +257,14 @@ fn checked_in_default_groups_are_used_until_cli_replaces_them() {
             .len(),
         11
     );
+    assert_eq!(overridden["errors"], json!([]));
     assert_ne!(overridden["input_sha256"], configured_digest);
 }
 
 #[test]
-fn all_active_default_fails_closed_without_provider_evidence() {
+fn all_active_default_uses_built_in_collectors_without_provider_evidence() {
     let workspace = Workspace::new("fn concise() {}");
+    workspace.git(&["init", "-q"]);
     let output = workspace.command(&[
         "check",
         "--path",
@@ -255,7 +274,7 @@ fn all_active_default_fails_closed_without_provider_evidence() {
         "--format",
         "json",
     ]);
-    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(output.status.code(), Some(0));
     let value = report(&output);
     assert_eq!(
         value["policy_selection"]["selected_rule_ids"]
@@ -264,14 +283,146 @@ fn all_active_default_fails_closed_without_provider_evidence() {
             .len(),
         28
     );
-    assert_eq!(value["errors"].as_array().unwrap().len(), 11);
-    assert!(
-        value["errors"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|error| { error.as_str().unwrap().contains("provider evidence") })
+    assert_eq!(value["errors"], json!([]));
+    assert_eq!(value["summary"]["error_smell_patterns"], 0);
+}
+
+#[test]
+fn default_rust_scan_detects_compiler_and_type_shape_signals_without_evidence() {
+    let workspace = Workspace::new(
+        "trait OutputPort { fn save(&self); fn load(&self); }\n\
+         struct BrokenOutput { customer_id: u64 }\n\
+         impl OutputPort for BrokenOutput { fn save(&self) {} }\n\
+         fn branching(value: i32) -> i32 { if value > 0 { value } else { 0 } }\n\
+         fn generic<T>(value: i32) -> i32 { value }\n",
     );
+    workspace.git(&["init", "-q"]);
+    let output = workspace.command(&[
+        "check",
+        "--path",
+        ".",
+        "--policy",
+        "quality-policy.json",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(output.status.code(), Some(0));
+    let data = report(&output);
+    for rule in [
+        "rust.function_crap",
+        "rust.unused_code",
+        "rust.unused_type_parameters",
+        "rust.nominal_slot_contract",
+        "rust.port_conformance",
+    ] {
+        assert!(matched(&data, rule), "missing built-in match for {rule}");
+        assert!(data["findings"].as_array().unwrap().iter().any(|finding| {
+            finding["rule_id"] == rule
+                && finding["evidence"]["provider"]["name"] == "smells-built-in"
+        }));
+    }
+    assert_eq!(
+        finding(&data, "rust.unused_code", "unused-private-declarations")["evaluation"]["metric"],
+        "unused-code findings"
+    );
+    assert_eq!(
+        finding(&data, "rust.unused_type_parameters", "src/lib.rs::generic")["evaluation"]["metric"],
+        "unused type-parameter findings"
+    );
+}
+
+#[test]
+fn built_in_rust_model_uses_authored_tokens_not_literal_or_comment_text() {
+    let workspace = Workspace::new(
+        "fn _unused<T>() -> &'static str { \"T if while case catch && || => _unused\" }\n\
+         // _unused and T are prose, not references\n",
+    );
+    workspace.git(&["init", "-q"]);
+    let output = workspace.command(&[
+        "check",
+        "--path",
+        ".",
+        "--policy",
+        "quality-policy.json",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let data = report(&output);
+    let crap = finding(&data, "rust.function_crap", "src/lib.rs::_unused");
+    assert_eq!(
+        crap["evaluation"]["observed"],
+        json!({"numerator": 2, "denominator": 1})
+    );
+    assert_eq!(crap["evaluation"]["matched"], false);
+    assert!(matched(&data, "rust.unused_code"));
+    assert!(matched(&data, "rust.unused_type_parameters"));
+}
+
+#[test]
+fn default_rust_scan_uses_rust_match_privacy_and_extension_signals() {
+    let workspace = Workspace::new(
+        "struct Secret { token: String }\n\
+         fn leak(secret: Secret) -> String { secret.token }\n\
+         trait PathExt { fn normalized(&self) -> bool; }\n\
+         impl PathExt for std::path::Path { fn normalized(&self) -> bool { true } }\n\
+         fn dispatch(value: u8) -> u8 { match value { 0 => 0, 1 => 1, 2 => 2, _ => 3 } }\n",
+    );
+    workspace.git(&["init", "-q"]);
+    let output = workspace.command(&[
+        "check",
+        "--path",
+        ".",
+        "--policy",
+        "quality-policy.json",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(output.status.code(), Some(0));
+    let data = report(&output);
+    for rule in [
+        "rust.function_crap",
+        "rust.dependency_contract",
+        "rust.library_capabilities",
+    ] {
+        assert!(
+            matched(&data, rule),
+            "missing Rust built-in match for {rule}"
+        );
+    }
+}
+
+#[test]
+fn built_in_model_excludes_const_and_static_initializer_declarations() {
+    let workspace = Workspace::new(
+        "const _: () = {\n\
+             struct HiddenConst { a: i32, b: i32, c: i32, d: i32, e: i32 }\n\
+             fn hidden_const() { if true {} }\n\
+         };\n\
+         static VALUE: () = {\n\
+             struct HiddenStatic { a: i32, b: i32, c: i32, d: i32, e: i32 }\n\
+             fn hidden_static() { if true {} }\n\
+         };\n",
+    );
+    workspace.git(&["init", "-q"]);
+    let output = workspace.command(&[
+        "check",
+        "--path",
+        ".",
+        "--policy",
+        "quality-policy.json",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let data = report(&output);
+    assert!(data["findings"].as_array().unwrap().iter().all(|finding| {
+        let symbol = finding["symbol"].as_str().unwrap_or_default();
+        !symbol.contains("HiddenConst")
+            && !symbol.contains("HiddenStatic")
+            && !symbol.contains("hidden_const")
+            && !symbol.contains("hidden_static")
+    }));
 }
 
 #[test]
@@ -595,7 +746,7 @@ fn report_aggregates_rule_evidence_by_canonical_smell_pattern() {
     let output = workspace.check();
     assert_eq!(output.status.code(), Some(1));
     let data = report(&output);
-    assert_eq!(data["report_schema_version"], 5);
+    assert_eq!(data["report_schema_version"], 6);
     let results = data["smell_results"].as_array().unwrap();
     assert_eq!(results.len(), 23);
     assert_eq!(results[0]["smell_id"], "long-method");
@@ -674,7 +825,7 @@ fn table_output_is_actionable_while_json_report_is_saved() {
         "Why it matters:",
         "Remediation:",
         "Reference URL: https://refactoring.guru/smells/data-class",
-        "Research requirement: NON-NEGOTIABLE RESEARCH:",
+        "Review guidance: NON-NEGOTIABLE RESEARCH:",
     ] {
         assert!(
             stdout.contains(expected),
@@ -725,7 +876,7 @@ fn self_smell_script_keeps_actionable_output_visible() {
         "Source excerpt:",
         "Remediation:",
         "Reference URL: https://refactoring.guru/smells/",
-        "Research requirement: NON-NEGOTIABLE RESEARCH:",
+        "Review guidance: NON-NEGOTIABLE RESEARCH:",
         "self smell scan passed; complete deterministic JSON report:",
     ] {
         assert!(stdout.contains(expected), "missing {expected:?}");
@@ -1112,7 +1263,7 @@ fn unstaged_policy_and_escaping_staged_paths_error() {
 }
 
 #[test]
-fn required_provider_detectors_error_without_complete_evidence() {
+fn required_evidence_group_rules_use_built_in_collectors() {
     let catalog: Value = serde_json::from_str(include_str!("../rules/rust-v1.json")).unwrap();
     let provider_rules: Vec<_> = catalog["rules"]
         .as_array()
@@ -1130,6 +1281,7 @@ fn required_provider_detectors_error_without_complete_evidence() {
     assert_eq!(provider_rules.len(), 11);
     for rule in provider_rules {
         let workspace = Workspace::new("fn f(){}");
+        workspace.git(&["init", "-q"]);
         workspace.modify(&format!("/rules/{rule}/mode"), json!("required"));
         let output = workspace.command(&[
             "check",
@@ -1142,16 +1294,12 @@ fn required_provider_detectors_error_without_complete_evidence() {
             "--format",
             "json",
         ]);
-        assert_eq!(output.status.code(), Some(2), "{rule}");
-        assert!(
-            report(&output)["errors"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|error| error.as_str().unwrap().contains(rule)),
-            "{rule}"
-        );
         let data = report(&output);
+        assert!(
+            matches!(output.status.code(), Some(0 | 1)),
+            "{rule}: {data}"
+        );
+        assert_eq!(data["errors"], json!([]), "{rule}");
         let smell_id = catalog["rules"]
             .as_array()
             .unwrap()
@@ -1160,7 +1308,14 @@ fn required_provider_detectors_error_without_complete_evidence() {
             .unwrap()["smell"]
             .as_str()
             .unwrap();
-        assert_eq!(smell_result(&data, smell_id)["state"], "error", "{rule}");
+        assert!(
+            smell_result(&data, smell_id)["measured_rule_ids"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|measured| measured == rule),
+            "{rule}"
+        );
     }
 }
 
@@ -1603,6 +1758,106 @@ fn nested_named_functions_are_measured_once_at_every_depth() {
             .filter(|f| f["rule_id"] == "rust.function_lines")
             .count(),
         3
+    );
+}
+
+#[test]
+fn built_in_rust_callable_population_matches_body_metrics_and_excludes_required_methods() {
+    let workspace = Workspace::new(
+        "trait Port {\n\
+             fn required<T>(&self);\n\
+             fn defaulted(&self) { fn nested_trait() { if true {} } nested_trait(); }\n\
+         }\n\
+         struct Owner;\n\
+         impl Owner {\n\
+             fn method(&self) { fn nested_method() { if true {} } nested_method(); }\n\
+         }\n\
+         struct Foo;\n\
+         fn value(_items: Vec<Foo>) {}\n\
+         mod first { pub fn duplicate() { if true {} } }\n\
+         mod second { pub fn duplicate() { if true {} } }\n\
+         fn outer() { fn nested_free() { if true {} } nested_free(); }\n",
+    );
+    workspace.git(&["init", "-q"]);
+    let output = workspace.command(&[
+        "check",
+        "--path",
+        ".",
+        "--policy",
+        "quality-policy.json",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let data = report(&output);
+    let locations = |rule: &str| {
+        data["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|finding| finding["rule_id"] == rule)
+            .map(|finding| {
+                (
+                    finding["location"]["line"].as_u64().unwrap(),
+                    finding["location"]["column"].as_u64().unwrap(),
+                )
+            })
+            .collect::<BTreeSet<_>>()
+    };
+    assert_eq!(
+        locations("rust.function_crap"),
+        locations("rust.function_lines")
+    );
+    for name in ["nested_trait", "nested_method", "nested_free"] {
+        assert!(data["findings"].as_array().unwrap().iter().any(|finding| {
+            finding["rule_id"] == "rust.function_crap"
+                && finding["symbol"]
+                    .as_str()
+                    .is_some_and(|symbol| symbol.contains(name))
+        }));
+    }
+    assert!(data["findings"].as_array().unwrap().iter().all(|finding| {
+        finding["rule_id"] != "rust.function_crap"
+            || !finding["symbol"]
+                .as_str()
+                .is_some_and(|symbol| symbol.contains("required"))
+    }));
+    assert_eq!(
+        finding(
+            &data,
+            "rust.unused_type_parameters",
+            "src/lib.rs::Port.required"
+        )["evaluation"]["matched"],
+        true
+    );
+    assert!(data["findings"].as_array().unwrap().iter().all(|finding| {
+        finding["rule_id"] != "rust.unused_type_parameters"
+            || !finding["symbol"].as_str().is_some_and(|symbol| {
+                symbol.ends_with("src/lib.rs::Port") || symbol.ends_with("src/lib.rs::value")
+            })
+    }));
+    let duplicate_symbols = data["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|finding| {
+            finding["rule_id"] == "rust.function_crap"
+                && finding["symbol"]
+                    .as_str()
+                    .is_some_and(|symbol| symbol.ends_with("::duplicate"))
+        })
+        .map(|finding| finding["symbol"].as_str().unwrap())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        duplicate_symbols,
+        BTreeSet::from([
+            "src/lib.rs::first::duplicate",
+            "src/lib.rs::second::duplicate"
+        ])
+    );
+    assert_eq!(
+        finding(&data, "rust.type_functions", "::Owner")["evaluation"]["observed"],
+        1
     );
 }
 

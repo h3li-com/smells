@@ -1,3 +1,4 @@
+mod collectors;
 mod evidence;
 mod evidence_evaluators;
 mod input;
@@ -6,8 +7,10 @@ mod patterns;
 mod policy;
 mod portable;
 mod report;
+mod rule_runtime;
 mod scan;
 mod similarity;
+mod typescript_compat;
 
 use std::{
     env, fs,
@@ -422,7 +425,7 @@ fn check(options: CheckOptions) -> Result<u8, String> {
     metrics::add(metrics::Counter::Files, captured.input.files.len());
     let (evidence, evidence_sha256) = load_evidence(evidence_bytes.as_deref(), &captured)?;
     let mut report = scan(&captured)?;
-    report.provider_evidence_sha256 = evidence_sha256;
+    report.set_provider_evidence_digest(evidence_sha256);
     evidence::apply(
         evidence.as_ref(),
         &captured.input,

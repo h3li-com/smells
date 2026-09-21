@@ -1,8 +1,9 @@
 use crate::{
+    collectors,
     evidence_evaluators::evaluate,
     input::Input,
     policy::{Registry, Rule},
-    report::{Location, Report},
+    report::{FindingRelations, Location, Report},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -20,7 +21,7 @@ pub struct EvidenceBundle {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct RuleEvidence {
+pub(crate) struct RuleEvidence {
     rule_id: String,
     provider: Provider,
     complete: bool,
@@ -29,7 +30,7 @@ struct RuleEvidence {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct Provider {
+pub(crate) struct Provider {
     name: String,
     version: String,
     configuration_sha256: String,
@@ -37,13 +38,13 @@ struct Provider {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct Observation {
-    symbol: String,
-    location: Location,
-    related_symbols: Vec<String>,
-    related_locations: Vec<Location>,
-    measurements: BTreeMap<String, u64>,
-    evidence: Value,
+pub(crate) struct Observation {
+    pub(crate) symbol: String,
+    pub(crate) location: Location,
+    pub(crate) related_symbols: Vec<String>,
+    pub(crate) related_locations: Vec<Location>,
+    pub(crate) measurements: BTreeMap<String, u64>,
+    pub(crate) evidence: Value,
 }
 
 pub fn parse(bytes: &[u8]) -> Result<EvidenceBundle, String> {
@@ -54,7 +55,7 @@ pub fn digest(bytes: &[u8]) -> String {
     crate::input::digest(&[b"provider-evidence-v1", bytes])
 }
 
-fn provider_rule(rule: &Rule) -> bool {
+fn collector_rule(rule: &Rule) -> bool {
     !rule.inputs.iter().any(|input| input == "authored_source")
 }
 
@@ -158,7 +159,7 @@ pub fn validate(bundle: &EvidenceBundle, input: &Input, registry: &Registry) -> 
     let registered: BTreeMap<_, _> = registry
         .rules
         .iter()
-        .filter(|rule| provider_rule(rule))
+        .filter(|rule| collector_rule(rule))
         .map(|rule| (rule.id.as_str(), rule))
         .collect();
     let registered = registered.keys().copied().collect::<BTreeSet<_>>();
@@ -186,25 +187,49 @@ pub fn apply(
                 .collect::<BTreeMap<_, _>>()
         })
         .unwrap_or_default();
-    for rule in registry.rules.iter().filter(|rule| provider_rule(rule)) {
+    let built_in_collectors = collectors::BuiltInCollectors::new(input);
+    for rule in registry.rules.iter().filter(|rule| collector_rule(rule)) {
         if !input.policy.enabled(&rule.id) {
             continue;
         }
-        let Some(provider) = supplied.get(rule.id.as_str()) else {
-            report
-                .errors
-                .push(format!("complete provider evidence required: {}", rule.id));
-            continue;
-        };
-        for observation in &provider.observations {
+        let built_in;
+        let (provider, complete, observations) =
+            if let Some(provider) = supplied.get(rule.id.as_str()) {
+                (
+                    json!(provider.provider),
+                    provider.complete,
+                    provider.observations.as_slice(),
+                )
+            } else {
+                built_in = match built_in_collectors.collect(rule) {
+                    Ok(observations) => observations,
+                    Err(error) => {
+                        report.rule_error(&rule.id, error);
+                        continue;
+                    }
+                };
+                (
+                    json!({
+                        "name": "smells-built-in",
+                        "version": env!("CARGO_PKG_VERSION"),
+                        "configuration_sha256": crate::input::digest(&[
+                            b"smells-built-in-collectors-v1",
+                            rule.id.as_bytes(),
+                        ]),
+                    }),
+                    true,
+                    built_in.as_slice(),
+                )
+            };
+        for observation in observations {
             let evaluation = match evaluate(&rule.id, &observation.measurements, &input.policy) {
                 Ok(evaluation) => evaluation,
                 Err(error) => {
-                    report.errors.push(error);
+                    report.rule_error(&rule.id, error);
                     continue;
                 }
             };
-            report.finding(
+            report.finding_with_relations(
                 &input.policy,
                 &rule.id,
                 &observation.symbol,
@@ -214,16 +239,17 @@ pub fn apply(
                 evaluation.comparison,
                 evaluation.threshold,
                 evaluation.matched,
-                json!({
-                    "provider": provider.provider,
-                    "measurements": observation.measurements,
-                    "provider_evidence": observation.evidence,
-                    "complete": provider.complete
-                }),
+                FindingRelations {
+                    evidence: json!({
+                        "provider": provider,
+                        "measurements": observation.measurements,
+                        "provider_evidence": observation.evidence,
+                        "complete": complete
+                    }),
+                    symbols: observation.related_symbols.clone(),
+                    locations: observation.related_locations.clone(),
+                },
             );
-            let finding = report.findings.last_mut().expect("finding just added");
-            finding.related_symbols = observation.related_symbols.clone();
-            finding.related_locations = observation.related_locations.clone();
         }
     }
 }
@@ -319,7 +345,7 @@ mod tests {
         ] {
             let registry = crate::policy::registry(pack).unwrap();
             let policy = crate::policy::parse(policy_text, &registry).unwrap();
-            for rule in registry.rules.iter().filter(|rule| provider_rule(rule)) {
+            for rule in registry.rules.iter().filter(|rule| collector_rule(rule)) {
                 let suffix = rule.id.split_once('.').unwrap().1;
                 let values = cases
                     .get(suffix)
