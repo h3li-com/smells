@@ -4,8 +4,13 @@ use super::{
 };
 use crate::{input::Input, policy::Rule, report::Location};
 use quote::ToTokens;
+use rayon::prelude::*;
 use regex::Regex;
-use std::{collections::BTreeMap, path::Path, sync::OnceLock};
+use std::{
+    collections::BTreeMap,
+    path::Path,
+    sync::{Arc, OnceLock},
+};
 use syn::{ImplItem, TraitItem, spanned::Spanned, visit::Visit};
 use tree_sitter::{Language, Node, Parser, Tree};
 
@@ -15,8 +20,8 @@ pub(super) struct FunctionFact {
     pub(super) symbol: String,
     pub(super) location: Location,
     pub(super) type_parameters: Vec<String>,
-    pub(super) body: Option<String>,
-    pub(super) source: String,
+    pub(super) body: Option<Arc<str>>,
+    pub(super) source: Arc<str>,
     pub(super) private: bool,
 }
 
@@ -34,7 +39,7 @@ pub(super) struct ClassFact {
     pub(super) symbol: String,
     pub(super) location: Location,
     pub(super) type_parameters: Vec<String>,
-    pub(super) source: String,
+    pub(super) source: Arc<str>,
     pub(super) bases: Vec<String>,
     pub(super) interface: bool,
     pub(super) private: bool,
@@ -47,7 +52,7 @@ pub(super) struct ClassFact {
 pub(super) struct SourceModel {
     pub(super) functions: Vec<FunctionFact>,
     pub(super) classes: Vec<ClassFact>,
-    pub(super) code_by_path: BTreeMap<String, String>,
+    pub(super) code_by_path: BTreeMap<String, Arc<str>>,
 }
 
 fn annotated_slot() -> &'static Regex {
@@ -429,10 +434,12 @@ fn rust_function(
             |owner| format!("{path}::{owner}.{name}"),
         ),
         location: rust_location(path, signature.ident.span()),
-        source: code_only(path, &raw_source).expect("Rust token masking cannot fail"),
+        source: code_only(path, &raw_source)
+            .expect("Rust token masking cannot fail")
+            .into(),
         type_parameters: rust_type_parameters(&signature.generics),
         body: body_source.map(|body| {
-            code_only(path, &body).expect("Rust function-body token masking cannot fail")
+            Arc::from(code_only(path, &body).expect("Rust function-body token masking cannot fail"))
         }),
         private,
         name,
@@ -452,7 +459,7 @@ fn ensure_rust_class<'a>(
         symbol: key,
         location,
         type_parameters: Vec::new(),
-        source: String::new(),
+        source: Arc::from(""),
         bases: Vec::new(),
         interface: false,
         private: false,
@@ -575,7 +582,8 @@ impl<'ast> Visit<'ast> for RustModelVisitor<'_> {
             rust_location(&self.path, structure.ident.span()),
         );
         class.source = code_only(&self.path, &structure.to_token_stream().to_string())
-            .expect("Rust type token masking cannot fail");
+            .expect("Rust type token masking cannot fail")
+            .into();
         class.type_parameters = rust_type_parameters(&structure.generics);
         class.private = matches!(structure.vis, syn::Visibility::Inherited);
         class.fields = structure
@@ -597,7 +605,8 @@ impl<'ast> Visit<'ast> for RustModelVisitor<'_> {
             rust_location(&self.path, enumeration.ident.span()),
         );
         class.source = code_only(&self.path, &enumeration.to_token_stream().to_string())
-            .expect("Rust type token masking cannot fail");
+            .expect("Rust type token masking cannot fail")
+            .into();
         class.type_parameters = rust_type_parameters(&enumeration.generics);
         class.private = matches!(enumeration.vis, syn::Visibility::Inherited);
     }
@@ -629,7 +638,8 @@ impl<'ast> Visit<'ast> for RustModelVisitor<'_> {
         );
         class.interface = true;
         class.source = code_only(&self.path, &trait_item.to_token_stream().to_string())
-            .expect("Rust trait token masking cannot fail");
+            .expect("Rust trait token masking cannot fail")
+            .into();
         class.type_parameters = rust_type_parameters(&trait_item.generics);
         class.methods.extend(functions.iter().cloned());
         self.model.functions.extend(functions);
@@ -716,7 +726,7 @@ fn rust_source_model(input: &Input) -> Result<SourceModel, String> {
     for (path, source) in &input.files {
         model
             .code_by_path
-            .insert(path.clone(), code_only(path, source)?);
+            .insert(path.clone(), code_only(path, source)?.into());
         let file = syn::parse_file(source)
             .map_err(|error| format!("collector parse error in {path}: {error}"))?;
         RustModelVisitor {
@@ -786,7 +796,7 @@ fn portable_class(
         symbol: format!("{path}::{name}"),
         location: node_location(path, node),
         type_parameters: portable_type_parameters(node, source, language),
-        source: text_of(node, authored_code),
+        source: text_of(node, authored_code).into(),
         bases: class_bases(&header, language, &name),
         interface: node.kind() == "interface_declaration"
             || header.contains("Protocol")
@@ -815,7 +825,7 @@ fn portable_function(
     let owner = owner_index.map(|index| classes[index].name.clone());
     let body = node
         .child_by_field_name("body")
-        .map(|body| text_of(body, authored_code));
+        .map(|body| Arc::from(text_of(body, authored_code)));
     let signature = header_before_body(node, source);
     let function = FunctionFact {
         symbol: owner.as_ref().map_or_else(
@@ -824,7 +834,7 @@ fn portable_function(
         ),
         location: node_location(path, node),
         type_parameters: portable_type_parameters(node, source, language),
-        source: text_of(node, authored_code),
+        source: text_of(node, authored_code).into(),
         body,
         private: name.starts_with('_') || signature.contains("private "),
         name,
@@ -861,14 +871,26 @@ fn append_portable_file(
         model.functions.push(function);
     }
     model.classes.append(&mut classes);
-    model.code_by_path.insert(path.into(), authored_code);
+    model.code_by_path.insert(path.into(), authored_code.into());
     Ok(())
 }
 
 fn portable_source_model(language: &str, input: &Input) -> Result<SourceModel, String> {
+    let sources = input.files.iter().collect::<Vec<_>>();
+    let partials = sources
+        .par_iter()
+        .map(|(path, source)| {
+            let mut model = SourceModel::default();
+            append_portable_file(&mut model, language, path, source)?;
+            Ok(model)
+        })
+        .collect::<Vec<Result<SourceModel, String>>>();
     let mut model = SourceModel::default();
-    for (path, source) in &input.files {
-        append_portable_file(&mut model, language, path, source)?;
+    for partial in partials {
+        let mut partial = partial?;
+        model.functions.append(&mut partial.functions);
+        model.classes.append(&mut partial.classes);
+        model.code_by_path.append(&mut partial.code_by_path);
     }
     Ok(model)
 }

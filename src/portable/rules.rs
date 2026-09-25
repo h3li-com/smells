@@ -253,7 +253,7 @@ fn duplicates(facts: &Facts, policy: &Policy, language: &str, report: &mut Repor
     let pairs = match pairs {
         Ok(pairs) => pairs,
         Err(error) => {
-            report.error(error);
+            report.rule_error(&id, error);
             return;
         }
     };

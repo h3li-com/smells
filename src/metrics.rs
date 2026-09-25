@@ -4,7 +4,7 @@ use std::{
     fs,
     sync::{
         OnceLock,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 
@@ -34,6 +34,7 @@ pub enum Counter {
 const COUNTER_COUNT: usize = 18;
 static COUNTERS: [AtomicU64; COUNTER_COUNT] = [const { AtomicU64::new(0) }; COUNTER_COUNT];
 static METRICS_FILE: OnceLock<Option<OsString>> = OnceLock::new();
+static METRICS_WRITTEN: AtomicBool = AtomicBool::new(false);
 
 fn output_path() -> Option<&'static OsString> {
     METRICS_FILE
@@ -47,6 +48,7 @@ pub fn enabled() -> bool {
 
 pub fn reset() {
     if enabled() {
+        METRICS_WRITTEN.store(false, Ordering::Relaxed);
         for counter in &COUNTERS {
             counter.store(0, Ordering::Relaxed);
         }
@@ -121,6 +123,9 @@ pub fn write(json_bytes: usize) -> Result<(), String> {
     let Some(path) = output_path() else {
         return Ok(());
     };
+    if METRICS_WRITTEN.swap(true, Ordering::Relaxed) {
+        return Err("scan metrics may only be written once".into());
+    }
     let snapshot = Snapshot {
         schema_version: 2,
         files: get(Counter::Files),

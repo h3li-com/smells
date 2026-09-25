@@ -7,8 +7,10 @@ if ! command -v smells >/dev/null 2>&1; then
     exit 2
 fi
 
-# JSON is intentional: agentic coding environments need the complete actionable
-# finding, including source evidence and the mandatory reference-research gate.
+# The Finding Log is the one required agent-facing artifact. Its Issue Index
+# points to every complete finding and mandatory reference-research gate. JSON
+# remains available for machine consumers.
 # quality-policy.json may select rust-v1, python-v1, or typescript-v1. A mixed
 # repository should invoke this command once per checked-in language policy.
-exec smells check --staged --policy quality-policy.json --only-group source --format json
+exec smells check --staged --policy quality-policy.json --format table \
+    --report smells-report.json --log smells-findings.log

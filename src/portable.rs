@@ -35,6 +35,13 @@ mod rules;
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+struct SourceError {
+    message: String,
+    location: Location,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct FunctionFact {
     symbol: String,
     location: Location,
@@ -169,19 +176,45 @@ fn parse_source(
     source: &str,
     registry: &Registry,
     parsers: &mut ParserPool,
-) -> Result<Tree, String> {
-    let parser = parsers.parser(path, registry)?;
+) -> Result<Tree, SourceError> {
+    let at_start = |message| SourceError {
+        message,
+        location: Location {
+            path: path.to_string(),
+            line: 1,
+            column: 1,
+        },
+    };
+    let parser = parsers.parser(path, registry).map_err(at_start)?;
     let tree = if registry.language == "typescript" {
-        crate::typescript_compat::parse(parser, source, path)?
+        crate::typescript_compat::parse(parser, source, path).map_err(at_start)?
     } else {
         parser
             .parse(source, None)
-            .ok_or_else(|| format!("parser cancelled for {path}"))?
+            .ok_or_else(|| at_start(format!("parser cancelled for {path}")))?
     };
     if tree.root_node().has_error() {
-        return Err(format!("parse error in {path}"));
+        let point = first_syntax_error(tree.root_node())
+            .map(|node| node.start_position())
+            .unwrap_or_else(|| tree.root_node().start_position());
+        return Err(SourceError {
+            message: format!("parse error in {path}"),
+            location: Location {
+                path: path.to_string(),
+                line: point.row + 1,
+                column: point.column + 1,
+            },
+        });
     }
     Ok(tree)
+}
+
+fn first_syntax_error(node: Node<'_>) -> Option<Node<'_>> {
+    if node.is_error() || node.is_missing() {
+        return Some(node);
+    }
+    let mut cursor = node.walk();
+    node.children(&mut cursor).find_map(first_syntax_error)
 }
 
 pub fn check(input: &Input, registry: &Registry) -> Report {
@@ -206,7 +239,9 @@ pub fn check(input: &Input, registry: &Registry) -> Report {
     for mut analysis in analyses {
         facts.functions.append(&mut analysis.facts.functions);
         facts.classes.append(&mut analysis.facts.classes);
-        report.extend_errors(analysis.errors.drain(..));
+        for error in analysis.errors.drain(..) {
+            report.error_at(error.message, error.location);
+        }
     }
     rules::source_metrics(&facts, registry, input, &mut report);
     rules::patterns(&facts, &input.policy, &registry.language, &mut report);

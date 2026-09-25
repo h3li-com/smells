@@ -2,6 +2,26 @@
 
 All notable changes to Smells are recorded here. Release tags use `vMAJOR.MINOR.PATCH`.
 
+## 0.5.0 - 2026-09-25
+
+- Embed one versioned `when_to_ignore` record for each of the 23 canonical smells,
+  inherited by all 28 rules and available offline through policy, table, log, and
+  JSON interfaces.
+- Add strict source-local `smells: ignore[exact-rule-id] -- reason` directives for
+  the next declaration, with fail-closed validation and fully visible ignored
+  findings.
+- Introduce report schema 7 with compact measurements, matched findings, stable
+  finding IDs, normalized guidance, and suppression audit records.
+- Add the complete numbered Finding Log with an error/blocking/ignored/review
+  Issue Index and exact detail-line pointers, while keeping hook stdout compact.
+- Precompute alternative-interface features and charge pair budgets only for
+  candidates that survive deterministic exact filters.
+- Add offline cross-language suppression tests and an opt-in live freshness check
+  for attributed Refactoring.Guru guidance.
+- Report pair-budget failures against the exact incomplete rule with charged and
+  configured comparison counts, and retain its suppressions as
+  `unverified_due_to_incomplete_rule` instead of falsely declaring them unused.
+
 ## 0.4.0 - 2026-09-21
 
 - Run all 28 rules and report all 23 canonical smells by default without requiring

@@ -2,4 +2,7 @@
 set -eu
 
 repository_root=$(git rev-parse --show-toplevel)
+for variable in $(git rev-parse --local-env-vars); do
+    unset "$variable"
+done
 exec make -C "$repository_root" pre-commit

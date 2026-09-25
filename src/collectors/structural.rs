@@ -10,6 +10,8 @@ use std::{
     sync::OnceLock,
 };
 
+type SimilarityFeature = (String, u64);
+
 fn normalized_tokens(source: &str) -> BTreeMap<String, u64> {
     static TOKEN: OnceLock<Regex> = OnceLock::new();
     let token = TOKEN.get_or_init(|| {
@@ -52,72 +54,168 @@ fn token_similarity(first: &BTreeMap<String, u64>, second: &BTreeMap<String, u64
     })
 }
 
+fn class_interfaces(model: &SourceModel) -> Vec<BTreeSet<&str>> {
+    model
+        .classes
+        .iter()
+        .map(|class| {
+            class
+                .methods
+                .iter()
+                .map(|method| method.name.as_str())
+                .collect()
+        })
+        .collect()
+}
+
+fn class_token_maps(model: &SourceModel) -> Vec<BTreeMap<String, u64>> {
+    model
+        .classes
+        .iter()
+        .map(|class| {
+            let bodies = class
+                .methods
+                .iter()
+                .filter_map(|method| method.body.as_deref())
+                .collect::<Vec<_>>()
+                .join("\n");
+            normalized_tokens(&bodies)
+        })
+        .collect()
+}
+
+fn feature_frequencies(token_maps: &[BTreeMap<String, u64>]) -> BTreeMap<SimilarityFeature, usize> {
+    let mut frequencies = BTreeMap::new();
+    for tokens in token_maps {
+        for (token, count) in tokens {
+            for occurrence in 0..*count {
+                *frequencies.entry((token.clone(), occurrence)).or_default() += 1;
+            }
+        }
+    }
+    frequencies
+}
+
+fn similarity_prefixes(
+    interfaces: &[BTreeSet<&str>],
+    token_maps: &[BTreeMap<String, u64>],
+    token_counts: &[u64],
+    minimum: u64,
+    similarity: u64,
+) -> Vec<Vec<SimilarityFeature>> {
+    let frequencies = feature_frequencies(token_maps);
+    token_maps
+        .iter()
+        .enumerate()
+        .map(|(index, tokens)| {
+            if interfaces[index].is_empty() || token_counts[index] < minimum {
+                return Vec::new();
+            }
+            let mut features = tokens
+                .iter()
+                .flat_map(|(token, count)| {
+                    (0..*count).map(|occurrence| (token.clone(), occurrence))
+                })
+                .collect::<Vec<_>>();
+            features.sort_by_key(|feature| (frequencies[feature], feature.clone()));
+            let required = (similarity as u128 * features.len() as u128).div_ceil(10_000) as usize;
+            features.truncate((features.len() - required + 1).min(features.len()));
+            features
+        })
+        .collect()
+}
+
+fn candidate_pairs(prefixes: &[Vec<SimilarityFeature>]) -> BTreeSet<(usize, usize)> {
+    let mut postings = BTreeMap::<SimilarityFeature, Vec<usize>>::new();
+    let mut candidates = BTreeSet::new();
+    for (right, prefix) in prefixes.iter().enumerate() {
+        for feature in prefix {
+            for left in postings.get(feature).into_iter().flatten() {
+                candidates.insert((*left, right));
+            }
+            postings.entry(feature.clone()).or_default().push(right);
+        }
+    }
+    candidates
+}
+
+fn lengths_can_match(first: u64, second: u64, similarity: u64) -> bool {
+    let (smaller, larger) = if first <= second {
+        (first, second)
+    } else {
+        (second, first)
+    };
+    smaller as u128 * 10_000 >= similarity as u128 * larger as u128
+}
+
+fn interface_observation(
+    model: &SourceModel,
+    token_maps: &[BTreeMap<String, u64>],
+    token_counts: &[u64],
+    left: usize,
+    right: usize,
+) -> Option<Observation> {
+    let (intersection, union) = token_similarity(&token_maps[left], &token_maps[right]);
+    if union == 0 {
+        return None;
+    }
+    let first = &model.classes[left];
+    let second = &model.classes[right];
+    let mut candidate = observation(
+        first.symbol.clone(),
+        first.location.clone(),
+        [
+            ("first_tokens", token_counts[left]),
+            ("second_tokens", token_counts[right]),
+            ("intersection", intersection),
+            ("union", union),
+        ],
+        json!({
+            "collector": "authored_class_behavior_similarity_v1",
+            "normalization": "lexical token multiset; identifiers normalized",
+            "candidate_filter": "multiset_jaccard_prefix_and_length_v1",
+        }),
+    );
+    candidate.related_symbols.push(second.symbol.clone());
+    candidate.related_locations.push(second.location.clone());
+    Some(candidate)
+}
+
 pub(super) fn alternative_interfaces(
+    rule: &Rule,
     model: &SourceModel,
     input: &Input,
 ) -> Result<Vec<Observation>, String> {
+    let minimum = rule.parameters["minimum_tokens"];
+    let similarity = rule.parameters["minimum_similarity_basis_points"];
+    let interfaces = class_interfaces(model);
+    let token_maps = class_token_maps(model);
+    let token_counts = token_maps
+        .iter()
+        .map(|tokens| tokens.values().sum::<u64>())
+        .collect::<Vec<_>>();
+    let prefixes =
+        similarity_prefixes(&interfaces, &token_maps, &token_counts, minimum, similarity);
+
     let mut observations = Vec::new();
     let mut pairs = 0usize;
-    for (index, first) in model.classes.iter().enumerate() {
-        for second in model.classes.iter().skip(index + 1) {
-            pairs += 1;
-            if pairs > input.policy.limits.maximum_pairs {
-                return Err("maximum_pairs budget exceeded in built-in interface collector".into());
-            }
-            let first_interface = first
-                .methods
-                .iter()
-                .map(|method| method.name.as_str())
-                .collect::<BTreeSet<_>>();
-            let second_interface = second
-                .methods
-                .iter()
-                .map(|method| method.name.as_str())
-                .collect::<BTreeSet<_>>();
-            if first_interface == second_interface
-                || first.methods.is_empty()
-                || second.methods.is_empty()
-            {
-                continue;
-            }
-            let first_tokens = normalized_tokens(
-                &first
-                    .methods
-                    .iter()
-                    .filter_map(|method| method.body.as_deref())
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            );
-            let second_tokens = normalized_tokens(
-                &second
-                    .methods
-                    .iter()
-                    .filter_map(|method| method.body.as_deref())
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            );
-            let first_count = first_tokens.values().sum();
-            let second_count = second_tokens.values().sum();
-            let (intersection, union) = token_similarity(&first_tokens, &second_tokens);
-            if union == 0 {
-                continue;
-            }
-            let mut candidate = observation(
-                first.symbol.clone(),
-                first.location.clone(),
-                [
-                    ("first_tokens", first_count),
-                    ("second_tokens", second_count),
-                    ("intersection", intersection),
-                    ("union", union),
-                ],
-                json!({
-                    "collector": "authored_class_behavior_similarity_v1",
-                    "normalization": "lexical token multiset; identifiers normalized",
-                }),
-            );
-            candidate.related_symbols.push(second.symbol.clone());
-            candidate.related_locations.push(second.location.clone());
+    for (left, right) in candidate_pairs(&prefixes) {
+        if interfaces[left] == interfaces[right] {
+            continue;
+        }
+        if !lengths_can_match(token_counts[left], token_counts[right], similarity) {
+            continue;
+        }
+        pairs += 1;
+        if pairs > input.policy.limits.maximum_pairs {
+            return Err(format!(
+                "maximum_pairs budget exceeded: charged {pairs} exact comparisons; policy limit is {}",
+                input.policy.limits.maximum_pairs
+            ));
+        }
+        if let Some(candidate) =
+            interface_observation(model, &token_maps, &token_counts, left, right)
+        {
             observations.push(candidate);
         }
     }

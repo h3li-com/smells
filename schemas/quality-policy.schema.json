@@ -7,7 +7,7 @@
   "properties": {
     "schema_version": {"const": 2},
     "rule_pack": {"const": "rust-v1"},
-    "scanner_version": {"const": "0.4.0"},
+    "scanner_version": {"const": "0.5.0"},
     "scope": {"const": "authored_all_cfg"},
     "default_groups": {"type":"array","minItems":1,"uniqueItems":true,"items":{"enum":["all","source","evidence","bloaters","object-orientation-abusers","change-preventers","dispensables","couplers"]},"default":["all"]},
     "exclude_directories": {"type":"array","uniqueItems":true,"contains":{"const":".git"},"items":{"type":"string","minLength":1,"pattern":"^[^/\\\\]+$","not":{"enum":[".",".."]}}},

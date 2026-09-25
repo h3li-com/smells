@@ -5,7 +5,7 @@ use super::*;
 #[serde(deny_unknown_fields)]
 pub(super) struct SourceAnalysis {
     pub(super) facts: Facts,
-    pub(super) errors: Vec<String>,
+    pub(super) errors: Vec<SourceError>,
     stats: SourceStats,
 }
 
@@ -14,14 +14,14 @@ pub(super) struct SourceAnalysis {
 struct CacheEntry {
     key: String,
     analysis_sha256: String,
-    analysis: SourceAnalysis,
+    analysis: Box<serde_json::value::RawValue>,
 }
 
 #[derive(Serialize)]
 struct CacheEntryRef<'a> {
     key: &'a str,
     analysis_sha256: String,
-    analysis: &'a SourceAnalysis,
+    analysis: &'a serde_json::value::RawValue,
 }
 
 pub(super) struct CacheRoot {
@@ -66,13 +66,8 @@ fn fact_cache_relative_path(key: &str) -> PathBuf {
         .join(format!("{key}.json"))
 }
 
-fn analysis_digest(key: &str, analysis: &SourceAnalysis) -> Option<String> {
-    let bytes = serde_json::to_vec(analysis).ok()?;
-    Some(crate::input::digest(&[
-        b"portable-fact-payload-v1",
-        key.as_bytes(),
-        &bytes,
-    ]))
+fn analysis_digest(key: &str, bytes: &[u8]) -> String {
+    crate::input::digest(&[b"portable-fact-payload-v1", key.as_bytes(), bytes])
 }
 
 #[cfg(unix)]
@@ -242,10 +237,12 @@ pub(super) fn cached_analysis(
     key: &str,
 ) -> Option<SourceAnalysis> {
     let entry: CacheEntry = serde_json::from_reader(open_cached_file(root, relative)?).ok()?;
-    if entry.key != key || analysis_digest(key, &entry.analysis)? != entry.analysis_sha256 {
+    if entry.key != key
+        || analysis_digest(key, entry.analysis.get().as_bytes()) != entry.analysis_sha256
+    {
         return None;
     }
-    Some(entry.analysis)
+    serde_json::from_str(entry.analysis.get()).ok()
 }
 
 #[cfg(unix)]
@@ -314,13 +311,15 @@ pub(super) fn store_analysis(
     analysis: &SourceAnalysis,
 ) {
     static NEXT_TEMPORARY: AtomicUsize = AtomicUsize::new(0);
-    let Some(analysis_sha256) = analysis_digest(key, analysis) else {
-        return;
+    let analysis = match serde_json::value::to_raw_value(analysis) {
+        Ok(analysis) => analysis,
+        Err(_) => return,
     };
+    let analysis_sha256 = analysis_digest(key, analysis.get().as_bytes());
     let bytes = match serde_json::to_vec(&CacheEntryRef {
         key,
         analysis_sha256,
-        analysis,
+        analysis: &analysis,
     }) {
         Ok(bytes) => bytes,
         Err(_) => return,
@@ -342,7 +341,9 @@ pub(super) fn cached_or_analyze_source(
 ) -> SourceAnalysis {
     let key = fact_cache_key(path, source, registry, needs);
     let cache_relative = fact_cache_relative_path(&key);
-    if let Some(root) = cache_root()
+    let cacheable = !needs.tokens;
+    if cacheable
+        && let Some(root) = cache_root()
         && let Some(analysis) = cached_analysis(root, &cache_relative, &key)
     {
         metrics::add(Counter::FactCacheHits, 1);
@@ -351,7 +352,7 @@ pub(super) fn cached_or_analyze_source(
     }
     metrics::add(Counter::FactCacheMisses, 1);
     let analysis = analyze_source(path, source, registry, needs, parsers);
-    if let Some(root) = cache_root() {
+    if cacheable && let Some(root) = cache_root() {
         store_analysis(root, &cache_relative, &key, &analysis);
     }
     record_analysis_stats(&analysis, true);

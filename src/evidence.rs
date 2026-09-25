@@ -192,66 +192,72 @@ pub fn apply(
         if !input.policy.enabled(&rule.id) {
             continue;
         }
-        let built_in;
-        let (provider, complete, observations) =
-            if let Some(provider) = supplied.get(rule.id.as_str()) {
-                (
-                    json!(provider.provider),
-                    provider.complete,
-                    provider.observations.as_slice(),
-                )
-            } else {
-                built_in = match built_in_collectors.collect(rule) {
-                    Ok(observations) => observations,
-                    Err(error) => {
-                        report.rule_error(&rule.id, error);
-                        continue;
-                    }
-                };
-                (
-                    json!({
-                        "name": "smells-built-in",
-                        "version": env!("CARGO_PKG_VERSION"),
-                        "configuration_sha256": crate::input::digest(&[
-                            b"smells-built-in-collectors-v1",
-                            rule.id.as_bytes(),
-                        ]),
-                    }),
-                    true,
-                    built_in.as_slice(),
-                )
-            };
-        for observation in observations {
-            let evaluation = match evaluate(&rule.id, &observation.measurements, &input.policy) {
-                Ok(evaluation) => evaluation,
-                Err(error) => {
-                    report.rule_error(&rule.id, error);
-                    continue;
-                }
-            };
-            report.finding_with_relations(
-                &input.policy,
-                &rule.id,
-                &observation.symbol,
-                &observation.location,
-                evaluation.metric,
-                evaluation.observed,
-                evaluation.comparison,
-                evaluation.threshold,
-                evaluation.matched,
-                FindingRelations {
-                    evidence: json!({
-                        "provider": provider,
-                        "measurements": observation.measurements,
-                        "provider_evidence": observation.evidence,
-                        "complete": complete
-                    }),
-                    symbols: observation.related_symbols.clone(),
-                    locations: observation.related_locations.clone(),
-                },
-            );
+        if let Some(supplied) = supplied.get(rule.id.as_str()) {
+            let provider = json!(supplied.provider);
+            for observation in &supplied.observations {
+                apply_observation(
+                    rule,
+                    &provider,
+                    supplied.complete,
+                    observation,
+                    input,
+                    report,
+                );
+            }
+            continue;
+        }
+        let provider = json!({
+            "name": "smells-built-in",
+            "version": env!("CARGO_PKG_VERSION"),
+            "configuration_sha256": crate::input::digest(&[
+                b"smells-built-in-collectors-v1",
+                rule.id.as_bytes(),
+            ]),
+        });
+        if let Err(error) = built_in_collectors.collect_with(rule, |observation| {
+            apply_observation(rule, &provider, true, &observation, input, report);
+        }) {
+            report.rule_error(&rule.id, error);
         }
     }
+}
+
+fn apply_observation(
+    rule: &Rule,
+    provider: &Value,
+    complete: bool,
+    observation: &Observation,
+    input: &Input,
+    report: &mut Report,
+) {
+    let evaluation = match evaluate(&rule.id, &observation.measurements, &input.policy) {
+        Ok(evaluation) => evaluation,
+        Err(error) => {
+            report.rule_error(&rule.id, error);
+            return;
+        }
+    };
+    report.finding_with_relations(
+        &input.policy,
+        &rule.id,
+        &observation.symbol,
+        &observation.location,
+        evaluation.metric,
+        evaluation.observed,
+        evaluation.comparison,
+        evaluation.threshold,
+        evaluation.matched,
+        FindingRelations {
+            evidence: json!({
+                "provider": provider,
+                "measurements": observation.measurements,
+                "provider_evidence": observation.evidence,
+                "complete": complete
+            }),
+            symbols: observation.related_symbols.clone(),
+            locations: observation.related_locations.clone(),
+        },
+    );
 }
 
 #[cfg(test)]

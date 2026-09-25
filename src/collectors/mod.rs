@@ -59,14 +59,30 @@ impl<'a> BuiltInCollectors<'a> {
         }
     }
 
+    pub(crate) fn collect_with(
+        &self,
+        rule: &Rule,
+        mut emit: impl FnMut(Observation),
+    ) -> Result<(), String> {
+        let kind = RuleKind::from_id(&rule.id)?;
+        if matches!(kind, RuleKind::NavigationChains) {
+            return source::visit_navigation_chains(self.model(rule)?, self.input, emit);
+        }
+        for observation in self.collect(rule)? {
+            emit(observation);
+        }
+        Ok(())
+    }
+
     fn collect_source(&self, kind: RuleKind, rule: &Rule) -> Result<Vec<Observation>, String> {
+        if matches!(kind, RuleKind::NavigationChains) {
+            unreachable!("navigation chains stream observations");
+        }
+        let model = self.model(rule)?;
         match kind {
-            RuleKind::NavigationChains => source::navigation_chains(self.input),
-            RuleKind::ForeignAccesses => source::foreign_accesses(self.input),
-            RuleKind::DependencyContract => {
-                source::dependency_contract(rule, self.model(rule)?, self.input)
-            }
-            RuleKind::PrimitiveSlots => Ok(source::primitive_slots(rule, self.model(rule)?)),
+            RuleKind::ForeignAccesses => source::foreign_accesses(model, self.input),
+            RuleKind::DependencyContract => source::dependency_contract(rule, model, self.input),
+            RuleKind::PrimitiveSlots => Ok(source::primitive_slots(rule, model)),
             _ => unreachable!("collector domain and source dispatcher must agree"),
         }
     }
@@ -87,7 +103,7 @@ impl<'a> BuiltInCollectors<'a> {
     fn collect_class_shape(&self, kind: RuleKind, rule: &Rule) -> Result<Vec<Observation>, String> {
         match kind {
             RuleKind::AlternativeInterfaces => {
-                structural::alternative_interfaces(self.model(rule)?, self.input)
+                structural::alternative_interfaces(rule, self.model(rule)?, self.input)
             }
             RuleKind::ForwardingShare => Ok(structural::forwarding_share(rule, self.model(rule)?)),
             RuleKind::TemporaryFields => Ok(structural::temporary_fields(rule, self.model(rule)?)),

@@ -4,12 +4,15 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) const REFERENCE_RESEARCH_ACTION: &str =
     "perform_external_research_call_to_reference_url";
-pub(super) const REFERENCE_RESEARCH_REQUIRED_BEFORE: &str = "review_or_remediation";
+pub(super) const REFERENCE_RESEARCH_REQUIRED_BEFORE: &str = "review_remediation_or_suppression";
 pub(super) const REFERENCE_RESEARCH_UNAVAILABLE_ACTION: &str =
-    "report_reference_research_incomplete_and_do_not_review_or_remediate";
+    "report_reference_research_incomplete_and_do_not_review_remediate_or_suppress";
 
 pub(super) fn research_gated_review(reference_url: &str, review: &str) -> String {
-    review.replace("{reference_url}", reference_url)
+    review.replace("{reference_url}", reference_url).replace(
+        "before reviewing this finding or proposing or applying remediation.",
+        "before reviewing this finding, proposing or applying remediation, or adding a suppression.",
+    )
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -32,6 +35,8 @@ pub(super) struct Guidance {
 pub(super) struct RuleMetadata {
     pub(super) guidance: Guidance,
     pub(super) contract: String,
+    pub(super) guidance_ref: String,
+    pub(super) rule_version: u32,
 }
 
 #[derive(Debug, Deserialize)]
