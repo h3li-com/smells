@@ -1821,7 +1821,10 @@ fn rust_duplicate_budget_still_fails_closed_for_too_many_exact_candidates() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|error| error == "maximum_pairs budget exceeded")
+            .any(|error| {
+                error
+                    == "rule rust.duplicate_functions: maximum_pairs budget exceeded: charged 2 exact comparisons; policy limit is 1"
+            })
     );
 }
 

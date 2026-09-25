@@ -23,7 +23,7 @@ fn reference_jaccard_pairs(
     similarity: u64,
     maximum_pairs: usize,
     overlaps: &impl Fn(usize, usize) -> bool,
-) -> Result<Vec<SimilarPair>, &'static str> {
+) -> Result<Vec<SimilarPair>, String> {
     let fingerprints = token_lists
         .iter()
         .map(|tokens| {
@@ -54,7 +54,7 @@ fn reference_jaccard_pairs(
             }
             comparisons += 1;
             if comparisons > maximum_pairs {
-                return Err("maximum_pairs budget exceeded");
+                return Err(pair_budget_error(comparisons, maximum_pairs));
             }
             let left_counts = &fingerprints[left];
             let right_counts = &fingerprints[right];
@@ -75,6 +75,12 @@ fn reference_jaccard_pairs(
         }
     }
     Ok(matches)
+}
+
+fn pair_budget_error(charged: usize, maximum_pairs: usize) -> String {
+    format!(
+        "maximum_pairs budget exceeded: charged {charged} exact comparisons; policy limit is {maximum_pairs}"
+    )
 }
 
 #[cfg(test)]
@@ -380,14 +386,14 @@ impl JoinState {
         fingerprints: &[Fingerprint],
         similarity: u64,
         maximum_pairs: usize,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), String> {
         self.candidates.touched.sort_unstable();
         for index in 0..self.candidates.touched.len() {
             let left = self.candidates.touched[index];
             self.comparisons += 1;
             metrics::add(Counter::ExactComparisons, 1);
             if self.comparisons > maximum_pairs {
-                return Err("maximum_pairs budget exceeded");
+                return Err(pair_budget_error(self.comparisons, maximum_pairs));
             }
             if let Some((intersection, union)) =
                 exact_similarity(&fingerprints[left], &fingerprints[right], similarity)
@@ -422,7 +428,7 @@ pub fn exact_jaccard_pairs(
     similarity: u64,
     maximum_pairs: usize,
     overlaps: impl Fn(usize, usize) -> bool,
-) -> Result<Vec<SimilarPair>, &'static str> {
+) -> Result<Vec<SimilarPair>, String> {
     #[cfg(test)]
     if USE_REFERENCE_JOIN.with(std::cell::Cell::get) {
         return reference_jaccard_pairs(
@@ -736,7 +742,10 @@ mod tests {
             .collect::<Vec<_>>();
         let lists = vec![shared.clone(), shared.clone(), shared];
         match exact_jaccard_pairs(&lists, 4, 10_000, 1, |_, _| false) {
-            Err(error) => assert_eq!(error, "maximum_pairs budget exceeded"),
+            Err(error) => assert_eq!(
+                error,
+                "maximum_pairs budget exceeded: charged 2 exact comparisons; policy limit is 1"
+            ),
             Ok(_) => panic!("pair budget should fail closed"),
         }
         let pairs = exact_jaccard_pairs(&lists[..2], 4, 10_000, 1, |_, _| false).unwrap();

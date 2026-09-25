@@ -18,6 +18,9 @@ All notable changes to Smells are recorded here. Release tags use `vMAJOR.MINOR.
   candidates that survive deterministic exact filters.
 - Add offline cross-language suppression tests and an opt-in live freshness check
   for attributed Refactoring.Guru guidance.
+- Report pair-budget failures against the exact incomplete rule with charged and
+  configured comparison counts, and retain its suppressions as
+  `unverified_due_to_incomplete_rule` instead of falsely declaring them unused.
 
 ## 0.4.0 - 2026-09-21
 

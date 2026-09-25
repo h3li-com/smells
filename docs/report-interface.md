@@ -12,7 +12,7 @@ The top-level collections have distinct responsibilities:
 - `findings` contains matched measurements only. Each finding has `finding_id`, `measurement_index`, locations, full policy evaluation and diagnostic context, `guidance_ref`, policy status, and an optional suppression record. Repeated detector evidence resolves through its measurement; bounded source excerpts are rendered in the Finding Log instead of being duplicated in JSON.
 - `evidence_provider_catalog` stores each provider identity/configuration once. Measurement evidence uses `provider_ref`; its completed status and measured value are represented by the measurement itself instead of repeated inside every evidence object.
 - `guidance_catalog` contains exactly one immutable `when_to_ignore` record for each of the 23 smells. All 28 rules inherit one by `guidance_ref`; findings never duplicate the guidance text.
-- `suppressions` audits every syntactically valid directive and whether it was used. Invalid directives are reported in `errors` and make the scan incomplete.
+- `suppressions` audits every syntactically valid directive and whether it was `used`, `unused`, or `unverified_due_to_incomplete_rule`. Invalid directives are reported in `errors` and make the scan incomplete.
 
 Every guidance record contains `guidance_ref`, `smell_id`, version, provenance, source URL, checked date, and an ordered list of conditions. `refactoring_guru_verbatim` means the item text is an attributed excerpt from the linked page. `smells_authored` means Smells supplies the guidance because that page has no explicit “When to Ignore” section. The pack is embedded and versioned; ordinary scans never download it.
 
@@ -27,6 +27,8 @@ smells: ignore[exact-rule-id] -- non-empty reason
 Blank lines and language decorators/attributes may occur between the directive and declaration. One directive names exactly one rule. Multiple rules require separate directives. A directive cannot suppress a file, module, smell category, related evidence location, scanner error, or consumer-policy exception. For a multi-location finding, only a directive at the primary declaration can match.
 
 Directive-looking text inside Rust strings, Python strings, or TypeScript strings/templates is not a comment and is ignored by the directive parser. Malformed, unknown, duplicate, misplaced, and unused directives produce exit `2`. A reason is an untrusted claim: the agent must verify it from the reference, declaration, callers, and tests.
+
+If the targeted rule cannot complete, Smells cannot prove that its directive is unused. The directive remains visible with `state: "unverified_due_to_incomplete_rule"`; the rule error still makes the scan incomplete and unsuppressible. Once the rule completes on a later scan, the directive must resolve to `used` or fail as genuinely `unused`.
 
 An accepted finding remains in `findings` with `status: "ignored_match"`, `blocking: false`, and its full suppression record. It is counted in `summary.ignored_findings` and the relevant smell result. A scan whose only matches are accepted required findings exits `0` with `passed_with_ignored_findings`.
 
@@ -113,5 +115,7 @@ The log has no terminal-size truncation. Agents receive one path, start at the i
 7. Prefer behavior-preserving remediation. Add the exact local suppression only when the verified `when_to_ignore` guidance applies and the reason records the concrete exception.
 
 Exit codes are `0` for completed checks without unsuppressed required matches, `1` for blocking matches, and `2` for input/configuration/parser/budget/ownership/suppression/collector errors. Errors outrank violations.
+
+Bounded pair collectors report their exact boundary in the error text, for example `rule python.duplicate_functions: maximum_pairs budget exceeded: charged 250001 exact comparisons; policy limit is 250000`. This error is indexed under the affected rule, remains unsuppressible, and leaves its rule coverage incomplete rather than invalidating the measurement state of unrelated rules.
 
 Excerpts contain the focus line plus one line on either side. Each displayed line is limited to 320 Unicode scalar values and centered to keep the focus column visible. At most five related excerpts are embedded; `omitted_related_excerpts` tells the agent how many additional locations must be opened directly.

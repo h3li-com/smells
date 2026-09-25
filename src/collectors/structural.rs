@@ -208,7 +208,10 @@ pub(super) fn alternative_interfaces(
         }
         pairs += 1;
         if pairs > input.policy.limits.maximum_pairs {
-            return Err("maximum_pairs budget exceeded in built-in interface collector".into());
+            return Err(format!(
+                "maximum_pairs budget exceeded: charged {pairs} exact comparisons; policy limit is {}",
+                input.policy.limits.maximum_pairs
+            ));
         }
         if let Some(candidate) =
             interface_observation(model, &token_maps, &token_counts, left, right)

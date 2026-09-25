@@ -804,7 +804,11 @@ fn duplicates(facts: &Facts, policy: &Policy, report: &mut Report) {
     let pairs = match pairs {
         Ok(pairs) => pairs,
         Err(error) => {
-            report.error(error);
+            for rule_id in ["rust.duplicate_functions", "rust.alternative_interfaces"] {
+                if policy.enabled(rule_id) {
+                    report.rule_error(rule_id, error.clone());
+                }
+            }
             return;
         }
     };

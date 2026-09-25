@@ -26,7 +26,8 @@ human or coding-agent review grounded in Refactoring.Guru
 - The observed measurement, comparison, configured threshold, and match status.
 - Separate blocking violations and non-blocking review signals.
 - An explicit result for every canonical smell, including excluded, inapplicable, and incomplete states.
-- A mandatory Refactoring.Guru URL and research contract in every matched finding.
+- A mandatory Refactoring.Guru URL, embedded versioned `when_to_ignore` guidance, and research contract in every matched finding.
+- Strict source-local suppressions that remain visible and auditable instead of hiding accepted findings.
 - Stable JSON for Codex, Claude Code, Pi, CI jobs, hooks, and other automation.
 - Fail-closed exit codes when parsing, history, ownership, inputs, or analysis budgets are incomplete.
 
@@ -173,6 +174,40 @@ Each matched finding contains:
 `incomplete` means a prerequisite was unavailable. For example, selected history rules are incomplete outside a Git repository and force exit `2` instead of returning a false clean result.
 
 See the [report interface](docs/report-interface.md) before building a custom parser or integration.
+
+### `when_to_ignore` and source suppressions
+
+Every matched finding resolves and displays its rule pack's immutable `when_to_ignore` guidance. The guidance, provenance, source URL, checked date, and version are embedded in the installed rule pack, so scans stay offline and deterministic. Consumer policies can select rules and thresholds but cannot rewrite this guidance.
+
+Research the finding's exact URL and inspect its declaration, related locations, callers, and tests before deciding whether the guidance applies. If a match is justified, the only suppression form is a rule-specific source comment with a non-empty reason:
+
+```python
+# smells: ignore[python.function_arguments] -- stable external API
+
+@command
+def publish(a, b, c, d):
+    ...
+```
+
+```rust
+// smells: ignore[rust.function_arguments] -- compatibility boundary
+
+#[public_api]
+fn publish(a: i32, b: i32, c: i32, d: i32, e: i32, f: i32, g: i32, h: i32) {}
+```
+
+```typescript
+class Publisher {
+  // smells: ignore[typescript.function_arguments] -- stable external API
+
+  @publicApi
+  publish(a: number, b: number, c: number, d: number): void {}
+}
+```
+
+One directive names one exact rule and applies only to the next syntactic declaration; blank lines and decorators/attributes are allowed between them. Multiple rules need separate directives. A multi-location finding can be suppressed only at its primary declaration. Malformed, unknown, duplicate, misplaced, and genuinely unused directives return exit `2`.
+
+An accepted match remains in the Finding Log and JSON as `ignored_match`, including its reason and source location. A scan containing only accepted required findings exits `0` with `passed_with_ignored_findings`, never a clean verdict. If the targeted rule could not complete, the directive is retained as `unverified_due_to_incomplete_rule`; Smells does not falsely call it unused, and the incomplete scan still exits `2`.
 
 ## Use Smells with coding agents
 
@@ -373,6 +408,14 @@ Start with the [provider evidence guide](docs/provider-evidence.md) and [JSON Sc
 - Rust scans authored branches, including inactive `cfg` source; Python and TypeScript scan authored source text.
 - Built-in type, coverage, and architecture indicators do not claim compiler-level or runtime certainty.
 - The scanner reports evidence but never edits or automatically refactors source.
+
+Budget errors identify the incomplete rule and include both the charged work and policy limit directly in the Finding Log, for example:
+
+```text
+rule python.duplicate_functions: maximum_pairs budget exceeded: charged 250001 exact comparisons; policy limit is 250000
+```
+
+The result remains `incomplete_due_to_errors`; any suppression targeting that incomplete rule remains unverified rather than being misreported as unused.
 
 Run the project's compiler, type checker, tests, fresh coverage, and security tooling alongside Smells.
 

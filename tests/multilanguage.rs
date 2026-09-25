@@ -1522,6 +1522,38 @@ fn alternative_interface_budget_charges_only_surviving_exact_comparisons() {
 }
 
 #[test]
+fn alternative_interface_budget_error_reports_the_exact_boundary() {
+    for (language, file, source) in [
+        (
+            "python",
+            "app.py",
+            "class First:\n    def alpha(self, value):\n        return value + value + value + value + value + value + value + value + value + value + value + value\n\nclass Second:\n    def beta(self, value):\n        return value + value + value + value + value + value + value + value + value + value + value + value\n\nclass Third:\n    def gamma(self, value):\n        return value + value + value + value + value + value + value + value + value + value + value + value\n",
+        ),
+        (
+            "typescript",
+            "app.ts",
+            "class First { alpha(value: number): number { return value + value + value + value + value + value + value + value + value + value + value + value; } }\nclass Second { beta(value: number): number { return value + value + value + value + value + value + value + value + value + value + value + value; } }\nclass Third { gamma(value: number): number { return value + value + value + value + value + value + value + value + value + value + value + value; } }\n",
+        ),
+    ] {
+        let mut policy = portable_policy(language);
+        for selection in policy["rules"].as_object_mut().unwrap().values_mut() {
+            selection["mode"] = json!("off");
+        }
+        policy["rules"][format!("{language}.alternative_interfaces")]["mode"] = json!("report");
+        policy["limits"]["maximum_pairs"] = json!(1);
+        let workspace = Workspace::new(file, source, &policy);
+        let output = workspace.check_path();
+        assert_eq!(output.status.code(), Some(2), "{language}: {output:?}");
+        assert_eq!(
+            report(&output)["errors"],
+            json!([format!(
+                "rule {language}.alternative_interfaces: maximum_pairs budget exceeded: charged 2 exact comparisons; policy limit is 1"
+            )])
+        );
+    }
+}
+
+#[test]
 fn runtime_manifests_partition_monorepo_results_by_repository_implementation() {
     let workspace = Workspace::new(
         "scripts/root_task.py",
@@ -2350,7 +2382,10 @@ fn duplicate_budget_still_fails_closed_for_too_many_exact_candidates() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|error| error == "maximum_pairs budget exceeded")
+            .any(|error| {
+                error
+                    == "rule python.duplicate_functions: maximum_pairs budget exceeded: charged 2 exact comparisons; policy limit is 1"
+            })
     );
 }
 
@@ -2457,14 +2492,86 @@ fn duplicate_pair_budget_fails_closed_identically_across_all_language_packs() {
         let workspace = Workspace::new(file, &source, &duplicate_only_policy(language, 5_000, 1));
         let output = workspace.check_path();
         assert_eq!(output.status.code(), Some(2), "{language}");
-        assert!(
-            report(&output)["errors"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|error| error == "maximum_pairs budget exceeded"),
-            "{language} did not fail on the same exact-comparison budget"
+        assert_eq!(
+            report(&output)["errors"],
+            json!([format!(
+                "rule {language}.duplicate_functions: maximum_pairs budget exceeded: charged 2 exact comparisons; policy limit is 1"
+            )]),
+            "{language} did not explain the same exact-comparison boundary"
         );
+    }
+}
+
+#[test]
+fn incomplete_duplicate_rule_does_not_misreport_its_suppression_as_unused() {
+    let body = "value + value + value + value + value + value";
+    for (language, file, source) in [
+        (
+            "rust",
+            "lib.rs",
+            format!(
+                "// smells: ignore[rust.duplicate_functions] -- reviewed generated routine\nfn first(value:i32)->i32{{{body}}}\nfn second(value:i32)->i32{{{body}}}\nfn third(value:i32)->i32{{{body}}}\n"
+            ),
+        ),
+        (
+            "python",
+            "module.py",
+            format!(
+                "# smells: ignore[python.duplicate_functions] -- reviewed generated routine\ndef first(value):\n    return {body}\n\ndef second(value):\n    return {body}\n\ndef third(value):\n    return {body}\n"
+            ),
+        ),
+        (
+            "typescript",
+            "module.ts",
+            format!(
+                "// smells: ignore[typescript.duplicate_functions] -- reviewed generated routine\nfunction first(value: number): number {{ return {body}; }}\nfunction second(value: number): number {{ return {body}; }}\nfunction third(value: number): number {{ return {body}; }}\n"
+            ),
+        ),
+    ] {
+        let workspace = Workspace::new(file, &source, &duplicate_only_policy(language, 5_000, 1));
+        let output = workspace.check_path();
+        assert_eq!(output.status.code(), Some(2), "{language}");
+        let data = report(&output);
+        let expected_error = format!(
+            "rule {language}.duplicate_functions: maximum_pairs budget exceeded: charged 2 exact comparisons; policy limit is 1"
+        );
+        assert_eq!(
+            data["errors"],
+            json!([expected_error.clone()]),
+            "{language} added a misleading unused-suppression error"
+        );
+        assert_eq!(
+            data["suppressions"][0]["state"], "unverified_due_to_incomplete_rule",
+            "{language} must retain the directive without claiming it was used or stale"
+        );
+
+        let log_output = Command::new(env!("CARGO_BIN_EXE_smells"))
+            .args([
+                "check",
+                "--path",
+                ".",
+                "--policy",
+                "quality-policy.json",
+                "--format",
+                "table",
+                "--log",
+                "findings.log",
+            ])
+            .current_dir(&workspace.path)
+            .output()
+            .expect("run scanner with Finding Log");
+        assert_eq!(log_output.status.code(), Some(2), "{language}");
+        let finding_log =
+            fs::read_to_string(workspace.path.join("findings.log")).expect("read Finding Log");
+        assert!(
+            finding_log.contains(&format!("Rule: {language}.duplicate_functions")),
+            "{language}: {finding_log}"
+        );
+        assert!(
+            finding_log.contains(&format!("Error: {expected_error}")),
+            "{language}: {finding_log}"
+        );
+        assert!(!finding_log.contains("unused suppression"), "{language}");
     }
 }
 

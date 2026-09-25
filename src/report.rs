@@ -530,14 +530,22 @@ impl Report {
                 }
             }
             if !used {
-                let location = parsed_suppression.suppression.directive_location.clone();
-                self.error_at(
-                    format!(
-                        "unused suppression at {}:{}: {} did not match a finding on the next declaration",
-                        location.path, location.line, parsed_suppression.suppression.rule_id
-                    ),
-                    location,
-                );
+                if self
+                    .incomplete_rule_ids
+                    .contains(&parsed_suppression.suppression.rule_id)
+                {
+                    parsed_suppression.suppression.state =
+                        "unverified_due_to_incomplete_rule".into();
+                } else {
+                    let location = parsed_suppression.suppression.directive_location.clone();
+                    self.error_at(
+                        format!(
+                            "unused suppression at {}:{}: {} did not match a finding on the next declaration",
+                            location.path, location.line, parsed_suppression.suppression.rule_id
+                        ),
+                        location,
+                    );
+                }
             }
             self.suppressions.push(parsed_suppression.suppression);
         }
