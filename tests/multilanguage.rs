@@ -2575,6 +2575,30 @@ function broken( {
             .iter()
             .any(|error| error == "parse error in broken.ts")
     );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_smells"))
+        .args([
+            "check",
+            "--path",
+            ".",
+            "--policy",
+            "quality-policy.json",
+            "--format",
+            "table",
+            "--log",
+            "smells-findings.log",
+            "--report",
+            "smells-report.json",
+        ])
+        .current_dir(&workspace.path)
+        .output()
+        .expect("run scanner with finding log");
+    assert_eq!(output.status.code(), Some(2));
+    let log = fs::read_to_string(workspace.path.join("smells-findings.log")).unwrap();
+    assert!(
+        log.contains("E000001 | scanner_error | scanner | broken.ts:1:1 | detail line "),
+        "{log}"
+    );
 }
 
 #[test]

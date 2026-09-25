@@ -627,7 +627,14 @@ pub(super) fn parse_sources(input: &Input, report: &mut Report) -> BTreeMap<Stri
                 );
                 parsed.insert(path.clone(), file);
             }
-            Err(error) => report.error(format!("parse error in {path}: {error}")),
+            Err(error) => report.error_at(
+                format!("parse error in {path}: {error}"),
+                Location {
+                    path: path.clone(),
+                    line: 1,
+                    column: 1,
+                },
+            ),
         }
     }
     parsed

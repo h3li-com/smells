@@ -1007,6 +1007,10 @@ fn finding_log_indexes_source_local_scanner_errors_at_their_location() {
         "{log}"
     );
     assert!(log.contains("Primary location: src/lib.rs:1:4"), "{log}");
+    let saved: Value =
+        serde_json::from_slice(&fs::read(workspace.path.join("smells-report.json")).unwrap())
+            .unwrap();
+    assert!(saved["errors"][0].is_string());
 }
 
 #[test]

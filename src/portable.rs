@@ -203,10 +203,10 @@ pub fn check(input: &Input, registry: &Registry) -> Report {
         })
         .collect::<Vec<_>>();
     let mut facts = Facts::default();
-    for mut analysis in analyses {
+    for ((path, _), mut analysis) in sources.into_iter().zip(analyses) {
         facts.functions.append(&mut analysis.facts.functions);
         facts.classes.append(&mut analysis.facts.classes);
-        report.extend_errors(analysis.errors.drain(..));
+        report.extend_errors_at(path, analysis.errors.drain(..));
     }
     rules::source_metrics(&facts, registry, input, &mut report);
     rules::patterns(&facts, &input.policy, &registry.language, &mut report);

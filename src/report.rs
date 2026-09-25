@@ -40,6 +40,19 @@ struct ReportMetadata {
     implementation_sha256: String,
 }
 
+struct ReportError {
+    message: String,
+    rule_id: Option<String>,
+    location: Option<Location>,
+}
+
+fn serialize_report_errors<S>(errors: &[ReportError], serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.collect_seq(errors.iter().map(|error| &error.message))
+}
+
 #[derive(Serialize)]
 pub struct Report {
     #[serde(flatten)]
@@ -53,9 +66,8 @@ pub struct Report {
     coverage: Vec<Value>,
     #[serde(flatten)]
     evidence: ReportEvidence,
-    errors: Vec<String>,
-    #[serde(skip)]
-    error_locations: Vec<Option<Location>>,
+    #[serde(serialize_with = "serialize_report_errors")]
+    errors: Vec<ReportError>,
     #[serde(skip)]
     has_global_error: bool,
     #[serde(skip)]
@@ -302,7 +314,6 @@ impl Report {
                 findings: vec![],
             },
             errors: vec![],
-            error_locations: vec![],
             has_global_error: false,
             incomplete_rule_ids: BTreeSet::new(),
             implementation_scopes: implementations.to_vec(),
@@ -312,8 +323,11 @@ impl Report {
 
     pub fn rule_error(&mut self, rule_id: &str, error: String) {
         self.incomplete_rule_ids.insert(rule_id.to_string());
-        self.errors.push(format!("rule {rule_id}: {error}"));
-        self.error_locations.push(None);
+        self.errors.push(ReportError {
+            message: format!("rule {rule_id}: {error}"),
+            rule_id: Some(rule_id.to_string()),
+            location: None,
+        });
     }
 
     pub fn begin_scan(&mut self, input: &Input) {
@@ -327,19 +341,32 @@ impl Report {
 
     pub fn error(&mut self, error: impl Into<String>) {
         self.has_global_error = true;
-        self.errors.push(error.into());
-        self.error_locations.push(None);
+        self.errors.push(ReportError {
+            message: error.into(),
+            rule_id: None,
+            location: None,
+        });
     }
 
     pub fn error_at(&mut self, error: impl Into<String>, location: Location) {
         self.has_global_error = true;
-        self.errors.push(error.into());
-        self.error_locations.push(Some(location));
+        self.errors.push(ReportError {
+            message: error.into(),
+            rule_id: None,
+            location: Some(location),
+        });
     }
 
-    pub fn extend_errors(&mut self, errors: impl IntoIterator<Item = String>) {
+    pub fn extend_errors_at(&mut self, path: &str, errors: impl IntoIterator<Item = String>) {
         for error in errors {
-            self.error(error);
+            self.error_at(
+                error,
+                Location {
+                    path: path.to_string(),
+                    line: 1,
+                    column: 1,
+                },
+            );
         }
     }
 
@@ -596,13 +623,10 @@ impl Report {
         for (index, finding) in self.findings.iter_mut().enumerate() {
             finding.finding_id = format!("F{:06}", index + 1);
         }
-        let mut errors: Vec<_> = std::mem::take(&mut self.errors)
-            .into_iter()
-            .zip(std::mem::take(&mut self.error_locations))
-            .collect();
-        errors.sort_by(|left, right| left.0.cmp(&right.0));
-        errors.dedup_by(|left, right| left.0 == right.0);
-        (self.errors, self.error_locations) = errors.into_iter().unzip();
+        self.errors
+            .sort_by(|left, right| left.message.cmp(&right.message));
+        self.errors
+            .dedup_by(|left, right| left.message == right.message);
         self.scanned_files.sort();
         self.excluded_directories.sort();
         self.smell_results = build_smell_results(self, None);
@@ -973,11 +997,12 @@ pub fn write_finding_log(report: &Report, output: impl std::io::Write) -> std::i
 #[cfg(test)]
 mod tests {
     use super::{
-        Report, SmellState,
+        Location, Report, SmellState,
         model::{CoverageStatus, SmellStateInputs},
-        smell_state,
+        smell_state, write_finding_log,
     };
     use crate::input::History;
+    use serde_json::json;
 
     #[test]
     fn typed_result_states_match_the_report_schema_spellings() {
@@ -1110,5 +1135,47 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn finding_log_keeps_error_metadata_paired_while_json_errors_stay_strings() {
+        let registry = crate::policy::registry("rust-v1").unwrap();
+        let policy =
+            crate::policy::parse(include_str!("../examples/quality-policy.json"), &registry)
+                .unwrap();
+        let mut report = Report::new(
+            &registry,
+            &policy,
+            "working_tree",
+            &[],
+            &History {
+                available: true,
+                commits: Vec::new(),
+            },
+        );
+        report.rule_error("rust.function_arguments", "z failure".into());
+        report.error_at(
+            "a failure",
+            Location {
+                path: "src/lib.rs".into(),
+                line: 4,
+                column: 2,
+            },
+        );
+        report.finish();
+
+        let serialized = serde_json::to_value(&report).unwrap();
+        assert_eq!(
+            serialized["errors"],
+            json!(["a failure", "rule rust.function_arguments: z failure"])
+        );
+
+        let mut log = Vec::new();
+        write_finding_log(&report, &mut log).unwrap();
+        let log = String::from_utf8(log).unwrap();
+        assert!(log.contains("E000001 | scanner_error | scanner | src/lib.rs:4:2 | detail line "));
+        assert!(
+            log.contains("E000002 | scanner_error | rust.function_arguments | - | detail line ")
+        );
     }
 }
