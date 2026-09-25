@@ -980,6 +980,36 @@ fn hook_mode_saves_one_indexed_finding_log_and_keeps_stdout_compact() {
 }
 
 #[test]
+fn finding_log_indexes_source_local_scanner_errors_at_their_location() {
+    let workspace = Workspace::new(concat!(
+        "// smells: ignore[rust.function_arguments] --\n",
+        "fn publish(a:i32,b:i32,c:i32,d:i32,e:i32,f:i32,g:i32,h:i32) {}\n",
+    ));
+    let output = workspace.command(&[
+        "check",
+        "--path",
+        ".",
+        "--policy",
+        "quality-policy.json",
+        "--only-group",
+        "source",
+        "--format",
+        "table",
+        "--report",
+        "smells-report.json",
+        "--log",
+        "smells-findings.log",
+    ]);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let log = fs::read_to_string(workspace.path.join("smells-findings.log")).unwrap();
+    assert!(
+        log.contains("E000001 | scanner_error | scanner | src/lib.rs:1:4 | detail line "),
+        "{log}"
+    );
+    assert!(log.contains("Primary location: src/lib.rs:1:4"), "{log}");
+}
+
+#[test]
 fn next_declaration_suppression_covers_a_finding_inside_its_body() {
     let workspace = Workspace::new(
         "struct Root;\n// smells: ignore[rust.navigation_chains] -- fluent traversal is the public API\nfn read(root: Root) { let _ = root.first.second.third; }\n",

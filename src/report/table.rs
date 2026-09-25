@@ -213,14 +213,21 @@ fn print_source_excerpt(label: &str, excerpt: Option<&SourceExcerpt>) {
     }
 }
 
-fn error_log_entry(index: usize, error: &str) -> FindingLogEntry {
+fn error_location(location: Option<&Location>) -> String {
+    location.map_or_else(
+        || "-".into(),
+        |location| format!("{}:{}:{}", location.path, location.line, location.column),
+    )
+}
+
+fn error_log_entry(index: usize, error: &str, location: Option<&Location>) -> FindingLogEntry {
     let id = format!("E{:06}", index + 1);
     FindingLogEntry {
         detail: vec![
             format!("Error {id}"),
             "Status: scanner_error (unsuppressible)".into(),
             "Rule: scanner".into(),
-            "Primary location: -".into(),
+            format!("Primary location: {}", error_location(location)),
             format!("Error: {error}"),
             "Action: inspect this complete error and its source context; a scanner error cannot be suppressed.".into(),
             String::new(),
@@ -319,7 +326,7 @@ fn finding_log_entry(report: &Report, finding: &Finding, status: &'static str) -
 
 #[derive(Clone, Copy)]
 enum FindingLogTarget<'a> {
-    Error(usize, &'a str),
+    Error(usize, &'a str, Option<&'a Location>),
     Finding(&'a Finding, &'static str),
 }
 
@@ -327,8 +334,11 @@ fn finding_log_targets(report: &Report) -> Vec<FindingLogTarget<'_>> {
     let mut targets: Vec<_> = report
         .errors
         .iter()
+        .zip(&report.error_locations)
         .enumerate()
-        .map(|(index, error)| FindingLogTarget::Error(index, error.as_str()))
+        .map(|(index, (error, location))| {
+            FindingLogTarget::Error(index, error.as_str(), location.as_ref())
+        })
         .collect();
     for status in ["blocking", "ignored", "review"] {
         targets.extend(
@@ -349,7 +359,7 @@ fn finding_log_targets(report: &Report) -> Vec<FindingLogTarget<'_>> {
 
 fn log_entry(report: &Report, target: FindingLogTarget<'_>) -> FindingLogEntry {
     match target {
-        FindingLogTarget::Error(index, error) => error_log_entry(index, error),
+        FindingLogTarget::Error(index, error, location) => error_log_entry(index, error, location),
         FindingLogTarget::Finding(finding, status) => finding_log_entry(report, finding, status),
     }
 }
@@ -384,11 +394,12 @@ fn write_finding_log_index(
     for target in targets {
         let detail_line_count = log_entry(report, *target).detail.len();
         match target {
-            FindingLogTarget::Error(index, _) => {
+            FindingLogTarget::Error(index, _, location) => {
                 writeln!(
                     output,
-                    "E{:06} | scanner_error | scanner | - | detail line {}",
+                    "E{:06} | scanner_error | scanner | {} | detail line {}",
                     index + 1,
+                    error_location(*location),
                     detail_line
                 )?;
             }

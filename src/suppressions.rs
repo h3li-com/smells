@@ -9,7 +9,12 @@ use tree_sitter::{Node, Parser};
 
 pub struct ParsedSuppressions {
     pub directives: Vec<ParsedSuppression>,
-    pub errors: Vec<String>,
+    pub errors: Vec<ParsedSuppressionError>,
+}
+
+pub struct ParsedSuppressionError {
+    pub message: String,
+    pub location: Location,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -60,12 +65,16 @@ impl SuppressionLanguage {
         comment && trimmed.contains("smells:")
     }
 
-    fn permitted_gap_line(self, line: &str) -> bool {
+    fn permitted_gap_line(
+        self,
+        line: &str,
+        line_number: usize,
+        annotation_lines: &BTreeSet<usize>,
+    ) -> bool {
         let trimmed = line.trim();
         trimmed.is_empty()
             || self.is_comment_with_smells(line)
-            || (self == Self::Rust && trimmed.starts_with("#["))
-            || (self != Self::Rust && trimmed.starts_with('@'))
+            || annotation_lines.contains(&line_number)
     }
 }
 
@@ -164,6 +173,7 @@ fn next_declaration(
     lines: &[&str],
     directive_line: usize,
     language: SuppressionLanguage,
+    annotation_lines: &BTreeSet<usize>,
 ) -> Option<(usize, usize)> {
     let declaration = language.declaration_pattern();
     for (offset, line) in lines.iter().enumerate().skip(directive_line) {
@@ -171,7 +181,7 @@ fn next_declaration(
         if declaration.is_match(trimmed) {
             return Some((offset + 1, line.len() - trimmed.len() + 1));
         }
-        if !language.permitted_gap_line(line) {
+        if !language.permitted_gap_line(line, offset + 1, annotation_lines) {
             return None;
         }
     }
@@ -180,7 +190,9 @@ fn next_declaration(
 
 fn tree_sitter_declaration(kind: &str, language: SuppressionLanguage) -> bool {
     match language {
-        SuppressionLanguage::Python => matches!(kind, "function_definition" | "class_definition"),
+        SuppressionLanguage::Python => {
+            matches!(kind, "function_definition" | "class_definition" | "lambda")
+        }
         SuppressionLanguage::TypeScript => matches!(
             kind,
             "function_declaration"
@@ -195,97 +207,118 @@ fn tree_sitter_declaration(kind: &str, language: SuppressionLanguage) -> bool {
                 | "method_signature"
                 | "abstract_method_signature"
                 | "function_signature"
+                | "arrow_function"
+                | "function_expression"
+                | "generator_function"
         ),
         SuppressionLanguage::Rust => false,
     }
 }
 
-fn collect_tree_sitter_declarations(
+#[derive(Default)]
+struct SourceSyntax {
+    spans: Vec<DeclarationSpan>,
+    annotation_lines: BTreeSet<usize>,
+}
+
+fn collect_tree_sitter_syntax(
     node: Node<'_>,
     language: SuppressionLanguage,
-    spans: &mut Vec<DeclarationSpan>,
+    syntax: &mut SourceSyntax,
 ) {
     if tree_sitter_declaration(node.kind(), language) {
-        spans.push(DeclarationSpan {
+        syntax.spans.push(DeclarationSpan {
             start_line: node.start_position().row + 1,
             start_column: node.start_position().column + 1,
             end_line: node.end_position().row + 1,
             end_column: node.end_position().column + 1,
         });
     }
+    if node.kind() == "decorator" {
+        syntax
+            .annotation_lines
+            .extend((node.start_position().row + 1)..=(node.end_position().row + 1));
+    }
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        collect_tree_sitter_declarations(child, language, spans);
+        collect_tree_sitter_syntax(child, language, syntax);
     }
 }
 
 #[derive(Default)]
 struct RustDeclarations {
-    spans: Vec<DeclarationSpan>,
+    syntax: SourceSyntax,
 }
 
 impl RustDeclarations {
-    fn push(&mut self, declaration: proc_macro2::Span, whole: proc_macro2::Span) {
+    fn push(
+        &mut self,
+        declaration: proc_macro2::Span,
+        whole: proc_macro2::Span,
+        attributes: &[syn::Attribute],
+    ) {
         let start = declaration.start();
         let end = whole.end();
-        self.spans.push(DeclarationSpan {
+        self.syntax.spans.push(DeclarationSpan {
             start_line: start.line,
             start_column: start.column + 1,
             end_line: end.line,
             end_column: end.column + 1,
         });
+        for attribute in attributes {
+            let span = attribute.span();
+            self.syntax
+                .annotation_lines
+                .extend(span.start().line..=span.end().line);
+        }
     }
 }
 
 impl<'ast> Visit<'ast> for RustDeclarations {
     fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
-        self.push(node.sig.span(), node.span());
+        self.push(node.sig.span(), node.span(), &node.attrs);
         syn::visit::visit_item_fn(self, node);
     }
 
     fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
-        self.push(node.sig.span(), node.span());
+        self.push(node.sig.span(), node.span(), &node.attrs);
         syn::visit::visit_impl_item_fn(self, node);
     }
 
     fn visit_trait_item_fn(&mut self, node: &'ast syn::TraitItemFn) {
-        self.push(node.sig.span(), node.span());
+        self.push(node.sig.span(), node.span(), &node.attrs);
         syn::visit::visit_trait_item_fn(self, node);
     }
 
     fn visit_item_struct(&mut self, node: &'ast syn::ItemStruct) {
-        self.push(node.struct_token.span(), node.span());
+        self.push(node.struct_token.span(), node.span(), &node.attrs);
         syn::visit::visit_item_struct(self, node);
     }
 
     fn visit_item_enum(&mut self, node: &'ast syn::ItemEnum) {
-        self.push(node.enum_token.span(), node.span());
+        self.push(node.enum_token.span(), node.span(), &node.attrs);
         syn::visit::visit_item_enum(self, node);
     }
 
     fn visit_item_trait(&mut self, node: &'ast syn::ItemTrait) {
-        self.push(node.trait_token.span(), node.span());
+        self.push(node.trait_token.span(), node.span(), &node.attrs);
         syn::visit::visit_item_trait(self, node);
     }
 
     fn visit_item_type(&mut self, node: &'ast syn::ItemType) {
-        self.push(node.type_token.span(), node.span());
+        self.push(node.type_token.span(), node.span(), &node.attrs);
         syn::visit::visit_item_type(self, node);
     }
 }
 
-fn declaration_spans(
-    path: &str,
-    source: &str,
-    language: SuppressionLanguage,
-) -> Vec<DeclarationSpan> {
+fn source_syntax(path: &str, source: &str, language: SuppressionLanguage) -> SourceSyntax {
     if language == SuppressionLanguage::Rust {
         let Ok(file) = syn::parse_file(source) else {
-            return Vec::new();
+            return SourceSyntax::default();
         };
         let mut declarations = RustDeclarations::default();
         declarations.visit_file(&file);
-        return declarations.spans;
+        return declarations.syntax;
     }
 
     let grammar = if language == SuppressionLanguage::Python {
@@ -299,11 +332,11 @@ fn declaration_spans(
     parser
         .set_language(&grammar)
         .expect("embedded suppression grammar must load");
-    let mut spans = Vec::new();
+    let mut syntax = SourceSyntax::default();
     if let Some(tree) = parser.parse(source, None) {
-        collect_tree_sitter_declarations(tree.root_node(), language, &mut spans);
+        collect_tree_sitter_syntax(tree.root_node(), language, &mut syntax);
     }
-    spans
+    syntax
 }
 
 fn target_span(spans: &[DeclarationSpan], line: usize, column: usize) -> Option<DeclarationSpan> {
@@ -312,6 +345,22 @@ fn target_span(spans: &[DeclarationSpan], line: usize, column: usize) -> Option<
         .copied()
         .filter(|span| span.start_line == line && span.start_column >= column)
         .min_by_key(|span| span.start_column)
+}
+
+fn suppression_error(
+    path: &str,
+    line: usize,
+    column: usize,
+    message: String,
+) -> ParsedSuppressionError {
+    ParsedSuppressionError {
+        message,
+        location: Location {
+            path: path.into(),
+            line,
+            column,
+        },
+    }
 }
 
 pub fn parse(files: &BTreeMap<String, String>, registry: &Registry) -> ParsedSuppressions {
@@ -328,48 +377,70 @@ pub fn parse(files: &BTreeMap<String, String>, registry: &Registry) -> ParsedSup
         if comment_lines.is_empty() {
             continue;
         }
-        let declaration_spans = declaration_spans(path, source, language);
+        let syntax = source_syntax(path, source, language);
         for (offset, line) in lines.iter().enumerate() {
             if !comment_lines.contains(&(offset + 1)) || !language.is_comment_with_smells(line) {
                 continue;
             }
             let line_number = offset + 1;
+            let directive_column = line.find("smells:").map_or(1, |column| column + 1);
             let Some(captures) = directive.captures(line) else {
-                errors.push(format!(
-                    "invalid suppression at {path}:{line_number}: expected `smells: ignore[exact-rule-id] -- non-empty reason`"
+                errors.push(suppression_error(
+                    path,
+                    line_number,
+                    directive_column,
+                    format!(
+                        "invalid suppression at {path}:{line_number}: expected `smells: ignore[exact-rule-id] -- non-empty reason`"
+                    ),
                 ));
                 continue;
             };
             let rule_id = captures[1].to_string();
             let reason = captures[2].to_string();
             if !known_rules.contains(rule_id.as_str()) {
-                errors.push(format!(
-                    "unknown suppression rule at {path}:{line_number}: {rule_id}"
+                errors.push(suppression_error(
+                    path,
+                    line_number,
+                    directive_column,
+                    format!("unknown suppression rule at {path}:{line_number}: {rule_id}"),
                 ));
                 continue;
             }
             let Some((target_line, target_column)) =
-                next_declaration(&lines, line_number, language)
+                next_declaration(&lines, line_number, language, &syntax.annotation_lines)
             else {
-                errors.push(format!(
-                    "misplaced suppression at {path}:{line_number}: no next declaration"
+                errors.push(suppression_error(
+                    path,
+                    line_number,
+                    directive_column,
+                    format!("misplaced suppression at {path}:{line_number}: no next declaration"),
                 ));
                 continue;
             };
-            let Some(target_span) = target_span(&declaration_spans, target_line, target_column)
-            else {
-                errors.push(format!(
-                    "misplaced suppression at {path}:{line_number}: next declaration could not be resolved"
+            let Some(target_span) = target_span(&syntax.spans, target_line, target_column) else {
+                errors.push(suppression_error(
+                    path,
+                    line_number,
+                    directive_column,
+                    format!(
+                        "misplaced suppression at {path}:{line_number}: next declaration could not be resolved"
+                    ),
                 ));
                 continue;
             };
             if !targets.insert((path.clone(), target_line, rule_id.clone())) {
-                errors.push(format!(
-                    "duplicate suppression at {path}:{line_number}: {rule_id} already targets the next declaration"
+                errors.push(suppression_error(
+                    path,
+                    line_number,
+                    directive_column,
+                    format!(
+                        "duplicate suppression at {path}:{line_number}: {rule_id} already targets the next declaration"
+                    ),
                 ));
                 continue;
             }
-            let nested_spans = declaration_spans
+            let nested_spans = syntax
+                .spans
                 .iter()
                 .copied()
                 .filter(|span| {
@@ -385,7 +456,7 @@ pub fn parse(files: &BTreeMap<String, String>, registry: &Registry) -> ParsedSup
                     directive_location: Location {
                         path: path.clone(),
                         line: line_number,
-                        column: line.find("smells:").map_or(1, |column| column + 1),
+                        column: directive_column,
                     },
                     target_location: Location {
                         path: path.clone(),

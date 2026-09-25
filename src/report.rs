@@ -55,6 +55,8 @@ pub struct Report {
     evidence: ReportEvidence,
     errors: Vec<String>,
     #[serde(skip)]
+    error_locations: Vec<Option<Location>>,
+    #[serde(skip)]
     has_global_error: bool,
     #[serde(skip)]
     incomplete_rule_ids: BTreeSet<String>,
@@ -300,6 +302,7 @@ impl Report {
                 findings: vec![],
             },
             errors: vec![],
+            error_locations: vec![],
             has_global_error: false,
             incomplete_rule_ids: BTreeSet::new(),
             implementation_scopes: implementations.to_vec(),
@@ -310,6 +313,7 @@ impl Report {
     pub fn rule_error(&mut self, rule_id: &str, error: String) {
         self.incomplete_rule_ids.insert(rule_id.to_string());
         self.errors.push(format!("rule {rule_id}: {error}"));
+        self.error_locations.push(None);
     }
 
     pub fn begin_scan(&mut self, input: &Input) {
@@ -324,6 +328,13 @@ impl Report {
     pub fn error(&mut self, error: impl Into<String>) {
         self.has_global_error = true;
         self.errors.push(error.into());
+        self.error_locations.push(None);
+    }
+
+    pub fn error_at(&mut self, error: impl Into<String>, location: Location) {
+        self.has_global_error = true;
+        self.errors.push(error.into());
+        self.error_locations.push(Some(location));
     }
 
     pub fn extend_errors(&mut self, errors: impl IntoIterator<Item = String>) {
@@ -491,7 +502,7 @@ impl Report {
 
     pub fn apply_suppressions(&mut self, parsed: crate::suppressions::ParsedSuppressions) {
         for error in parsed.errors {
-            self.error(error);
+            self.error_at(error.message, error.location);
         }
         for mut parsed_suppression in parsed.directives {
             let mut used = false;
@@ -505,12 +516,14 @@ impl Report {
                 }
             }
             if !used {
-                self.error(format!(
-                    "unused suppression at {}:{}: {} did not match a finding on the next declaration",
-                    parsed_suppression.suppression.directive_location.path,
-                    parsed_suppression.suppression.directive_location.line,
-                    parsed_suppression.suppression.rule_id
-                ));
+                let location = parsed_suppression.suppression.directive_location.clone();
+                self.error_at(
+                    format!(
+                        "unused suppression at {}:{}: {} did not match a finding on the next declaration",
+                        location.path, location.line, parsed_suppression.suppression.rule_id
+                    ),
+                    location,
+                );
             }
             self.suppressions.push(parsed_suppression.suppression);
         }
@@ -583,8 +596,13 @@ impl Report {
         for (index, finding) in self.findings.iter_mut().enumerate() {
             finding.finding_id = format!("F{:06}", index + 1);
         }
-        self.errors.sort();
-        self.errors.dedup();
+        let mut errors: Vec<_> = std::mem::take(&mut self.errors)
+            .into_iter()
+            .zip(std::mem::take(&mut self.error_locations))
+            .collect();
+        errors.sort_by(|left, right| left.0.cmp(&right.0));
+        errors.dedup_by(|left, right| left.0 == right.0);
+        (self.errors, self.error_locations) = errors.into_iter().unzip();
         self.scanned_files.sort();
         self.excluded_directories.sort();
         self.smell_results = build_smell_results(self, None);

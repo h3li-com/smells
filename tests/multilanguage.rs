@@ -1286,6 +1286,85 @@ fn suppression_belongs_to_the_target_declaration_not_nested_declarations() {
 }
 
 #[test]
+fn suppression_does_not_leak_into_nested_anonymous_callables() {
+    for (language, file, source) in [
+        (
+            "python",
+            "app.py",
+            "# smells: ignore[python.function_arguments] -- outer API is stable\ndef outer(a, b, c, d):\n    inner = lambda a, b, c, d: 0\n    return inner\n",
+        ),
+        (
+            "typescript",
+            "app.ts",
+            "// smells: ignore[typescript.function_arguments] -- outer API is stable\nfunction outer(a: number, b: number, c: number, d: number): void {\n  const inner = (a: number, b: number, c: number, d: number): number => 0;\n}\n",
+        ),
+    ] {
+        let workspace = Workspace::new(file, source, &portable_policy(language));
+        let output = workspace.check_path_source_only();
+        assert_eq!(output.status.code(), Some(1), "{language}: {output:?}");
+        let data = report(&output);
+        let rule_id = format!("{language}.function_arguments");
+        let argument_findings: Vec<_> = data["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|finding| finding["rule_id"] == rule_id)
+            .collect();
+        assert_eq!(
+            argument_findings.len(),
+            2,
+            "{language}: {argument_findings:?}"
+        );
+        assert_eq!(
+            argument_findings[0]["status"], "ignored_match",
+            "{language}"
+        );
+        assert_eq!(argument_findings[1]["status"], "violation", "{language}");
+        assert_eq!(
+            argument_findings[1]["suppression"],
+            Value::Null,
+            "{language}"
+        );
+    }
+}
+
+#[test]
+fn multiline_decorators_and_attributes_can_precede_the_target_declaration() {
+    for (language, file, source) in [
+        (
+            "rust",
+            "src/lib.rs",
+            "// smells: ignore[rust.function_arguments] -- stable external API\n#[\n    allow(dead_code)\n]\nfn publish(a:i32,b:i32,c:i32,d:i32,e:i32,f:i32,g:i32,h:i32) {}\n",
+        ),
+        (
+            "python",
+            "app.py",
+            "# smells: ignore[python.function_arguments] -- stable external API\n@command(\n    \"publish\",\n)\ndef publish(a, b, c, d): pass\n",
+        ),
+        (
+            "typescript",
+            "app.ts",
+            "class Publisher {\n  // smells: ignore[typescript.function_arguments] -- stable external API\n  @command(\n    \"publish\",\n  )\n  publish(a: number, b: number, c: number, d: number): void {}\n}\n",
+        ),
+    ] {
+        let mut policy = if language == "rust" {
+            serde_json::from_str(include_str!("../examples/quality-policy.json")).unwrap()
+        } else {
+            portable_policy(language)
+        };
+        if language == "rust" {
+            policy["rules"]["rust.primitive_slots"]["mode"] = json!("off");
+        }
+        let workspace = Workspace::new(file, source, &policy);
+        let output = workspace.check_path_source_only();
+        assert_eq!(output.status.code(), Some(0), "{language}: {output:?}");
+        let data = report(&output);
+        assert_eq!(data["summary"]["ignored_findings"], 1, "{language}");
+        assert_eq!(data["suppressions"][0]["state"], "used", "{language}");
+    }
+}
+
+#[test]
 fn directive_text_inside_strings_never_creates_a_suppression() {
     for (language, file, source) in [
         (
