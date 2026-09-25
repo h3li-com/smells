@@ -1,18 +1,17 @@
 name: Publish crates.io from release
 
 on:
-  workflow_call:
-    inputs:
-      tag:
-        description: Existing immutable release tag, for example v0.5.0
-        required: true
-        type: string
   workflow_dispatch:
     inputs:
       tag:
         description: Existing immutable release tag, for example v0.5.0
         required: true
         type: string
+      source_run_id:
+        description: Owner-dispatched Release run that requested this publication
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -27,6 +26,7 @@ jobs:
     runs-on: ubuntu-24.04
     environment: release
     permissions:
+      actions: read
       contents: read
       id-token: write
     steps:
@@ -40,8 +40,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
         run: |
-          ./scripts/verify-registry-release.sh "$RELEASE_TAG" \
+          ./scripts/verify-registry-release.sh \
+            "$RELEASE_TAG" "$SOURCE_RUN_ID" \
             >> "$GITHUB_OUTPUT"
 
       - name: Use the exact released source

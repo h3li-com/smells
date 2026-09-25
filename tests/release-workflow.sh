@@ -9,14 +9,25 @@ github_packages_workflow="$repository_root/.github/workflows/publish-github-pack
 pypi_workflow="$repository_root/.github/workflows/publish-pypi.yml"
 npm_workflow="$repository_root/.github/workflows/publish-npm.yml"
 crates_recovery_workflow="$repository_root/.github/workflows/publish-crates.yml"
+registry_dispatcher="$repository_root/scripts/dispatch-registry-publications.sh"
 registry_release_verifier="$repository_root/scripts/verify-registry-release.sh"
 
-grep -F 'uses: ./.github/workflows/publish-pypi.yml' "$workflow" >/dev/null
-grep -F 'uses: ./.github/workflows/publish-npm.yml' "$workflow" >/dev/null
+if grep -F 'uses: ./.github/workflows/publish-pypi.yml' "$workflow" >/dev/null ||
+    grep -F 'uses: ./.github/workflows/publish-npm.yml' "$workflow" >/dev/null ||
+    grep -F 'uses: ./.github/workflows/publish-crates.yml' "$workflow" >/dev/null; then
+    printf 'release workflow calls an external Trusted Publisher as a reusable workflow\n' >&2
+    exit 1
+fi
+grep -F 'publish-external-registries:' "$workflow" >/dev/null
+grep -F 'actions: write' "$workflow" >/dev/null
+grep -F './scripts/dispatch-registry-publications.sh "$RELEASE_TAG"' \
+    "$workflow" >/dev/null
 grep -F 'publish-github-packages:' "$workflow" >/dev/null
 grep -F 'uses: ./.github/workflows/publish-github-packages.yml' "$workflow" >/dev/null
-grep -F 'uses: ./.github/workflows/publish-crates.yml' "$workflow" >/dev/null
 grep -F 'packages: write' "$workflow" >/dev/null
+grep -F 'EXTERNAL_REGISTRIES_RESULT: ${{ needs.publish-external-registries.result }}' \
+    "$workflow" >/dev/null
+grep -F 'test "$EXTERNAL_REGISTRIES_RESULT" = success' "$workflow" >/dev/null
 grep -F 'GITHUB_PACKAGES_RESULT: ${{ needs.publish-github-packages.result }}' \
     "$workflow" >/dev/null
 grep -F 'test "$GITHUB_PACKAGES_RESULT" = success' "$workflow" >/dev/null
@@ -28,7 +39,6 @@ if grep -F 'secrets.CARGO_REGISTRY_TOKEN' "$workflow" >/dev/null; then
     printf 'release workflow still accepts a long-lived crates.io token\n' >&2
     exit 1
 fi
-grep -F 'id-token: write' "$workflow" >/dev/null
 
 grep -F 'workflow_call:' "$github_packages_workflow" >/dev/null
 grep -F 'workflow_dispatch:' "$github_packages_workflow" >/dev/null
@@ -45,12 +55,19 @@ grep -F 'node npm/publish-packages.mjs' \
 for registry_workflow in \
     "$pypi_workflow" \
     "$npm_workflow" \
-    "$github_packages_workflow" \
     "$crates_recovery_workflow"; do
-    grep -F 'workflow_call:' "$registry_workflow" >/dev/null
+    if grep -F 'workflow_call:' "$registry_workflow" >/dev/null; then
+        printf 'external Trusted Publisher still exposes workflow_call: %s\n' \
+            "$registry_workflow" >&2
+        exit 1
+    fi
     grep -F 'workflow_dispatch:' "$registry_workflow" >/dev/null
+    grep -F 'source_run_id:' "$registry_workflow" >/dev/null
     grep -F '    environment: release' "$registry_workflow" >/dev/null
-    grep -F './scripts/verify-registry-release.sh "$RELEASE_TAG"' \
+    grep -F 'actions: read' "$registry_workflow" >/dev/null
+    grep -F './scripts/verify-registry-release.sh \' \
+        "$registry_workflow" >/dev/null
+    grep -F '"$RELEASE_TAG" "$SOURCE_RUN_ID" \' \
         "$registry_workflow" >/dev/null
     grep -F 'git checkout --detach "${{ steps.release.outputs.commit }}"' \
         "$registry_workflow" >/dev/null
@@ -59,6 +76,23 @@ for registry_workflow in \
     grep -F 'gh release verify-asset "$RELEASE_TAG"' \
         "$registry_workflow" >/dev/null
 done
+
+grep -F 'workflow_call:' "$github_packages_workflow" >/dev/null
+grep -F 'workflow_dispatch:' "$github_packages_workflow" >/dev/null
+grep -F '    environment: release' "$github_packages_workflow" >/dev/null
+grep -F './scripts/verify-registry-release.sh "$RELEASE_TAG"' \
+    "$github_packages_workflow" >/dev/null
+grep -F 'git checkout --detach "${{ steps.release.outputs.commit }}"' \
+    "$github_packages_workflow" >/dev/null
+grep -F 'gh release verify "$RELEASE_TAG"' \
+    "$github_packages_workflow" >/dev/null
+grep -F 'gh release verify-asset "$RELEASE_TAG"' \
+    "$github_packages_workflow" >/dev/null
+
+grep -F 'dispatch_workflow publish-pypi.yml' "$registry_dispatcher" >/dev/null
+grep -F 'dispatch_workflow publish-npm.yml' "$registry_dispatcher" >/dev/null
+grep -F 'dispatch_workflow publish-crates.yml' "$registry_dispatcher" >/dev/null
+grep -F 'gh run watch "$run_id"' "$registry_dispatcher" >/dev/null
 
 grep -F 'test "$(printf '\''%s'\'' "$release" | jq -r .isImmutable)" = true' \
     "$registry_release_verifier" >/dev/null

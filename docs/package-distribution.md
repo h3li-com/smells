@@ -135,11 +135,16 @@ publication job creates one immutable GitHub Release containing:
 - the crates.io source archive;
 - aggregate checksums and CycloneDX/SPDX SBOMs.
 
-Only after the signed GitHub Release succeeds do independent reusable workflows
-publish to PyPI, npmjs.com, GitHub Packages, and crates.io. Every publisher uses the
-protected `release` environment, rechecks the release actor and immutable release,
-and installs the exact version back from its registry. The same workflows can be
-dispatched independently to recover a partial registry failure without rebuilding or
-mutating release assets. The crates.io job also requires its newly built archive to
-be byte-identical to the attested `.crate` asset and uses that asset's digest for
-registry verification.
+Only after the signed GitHub Release succeeds does the release workflow dispatch the
+top-level PyPI, npmjs.com, and crates.io workflows and wait for their results. These
+external Trusted Publishers cannot be reusable workflows because their OIDC
+identities are bound to the top-level workflow filename. Each child validates the
+active owner-dispatched `Release` run ID, commit, branch, and repository before it
+requests credentials. GitHub Packages remains reusable because it uses the
+repository's short-lived `GITHUB_TOKEN` instead of an external Trusted Publisher.
+Every publisher uses the protected `release` environment, validates the immutable
+release, and installs the exact version back from its registry. The same workflows
+can be dispatched directly by the owner to recover a partial registry failure
+without rebuilding or mutating release assets. The crates.io job also requires its
+newly built archive to be byte-identical to the attested `.crate` asset and uses that
+asset's digest for registry verification.

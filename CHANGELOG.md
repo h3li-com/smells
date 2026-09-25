@@ -2,6 +2,12 @@
 
 All notable changes to Smells are recorded here. Release tags use `vMAJOR.MINOR.PATCH`.
 
+## Unreleased
+
+- Preserve each external registry's Trusted Publisher identity by dispatching PyPI,
+  npmjs.com, and crates.io as top-level workflows, while validating the originating
+  owner-approved Release run and waiting for every publication result.
+
 ## 0.5.0 - 2026-09-25
 
 - Embed one versioned `when_to_ignore` record for each of the 23 canonical smells,

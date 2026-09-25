@@ -413,25 +413,31 @@ jobs:
           done
           exit 1
 
-  publish-pypi:
-    name: publish to PyPI
-    needs: publish
-    uses: ./.github/workflows/publish-pypi.yml
-    with:
-      tag: ${{ inputs.tag }}
+  publish-external-registries:
+    name: publish external registries
+    needs: [validate, publish]
+    runs-on: ubuntu-24.04
     permissions:
+      actions: write
       contents: read
-      id-token: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
+          persist-credentials: false
 
-  publish-npm:
-    name: publish to npm
-    needs: publish
-    uses: ./.github/workflows/publish-npm.yml
-    with:
-      tag: ${{ inputs.tag }}
-    permissions:
-      contents: read
-      id-token: write
+      - name: Revalidate the release actor before registry dispatch
+        run: |
+          ./scripts/verify-release-actor.sh \
+            "$GITHUB_REPOSITORY_OWNER" \
+            "$GITHUB_ACTOR" \
+            "$GITHUB_TRIGGERING_ACTOR"
+
+      - name: Dispatch and require top-level Trusted Publisher workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: ./scripts/dispatch-registry-publications.sh "$RELEASE_TAG"
 
   publish-github-packages:
     name: publish npm mirror to GitHub Packages
@@ -443,30 +449,16 @@ jobs:
       contents: read
       packages: write
 
-  publish-crates:
-    name: publish to crates.io
-    needs: publish
-    uses: ./.github/workflows/publish-crates.yml
-    with:
-      tag: ${{ inputs.tag }}
-    permissions:
-      contents: read
-      id-token: write
-
   registries-required:
     name: registries required
     if: always()
-    needs: [publish-pypi, publish-npm, publish-github-packages, publish-crates]
+    needs: [publish-external-registries, publish-github-packages]
     runs-on: ubuntu-24.04
     steps:
       - name: Require every registry publication
         env:
-          CRATES_RESULT: ${{ needs.publish-crates.result }}
+          EXTERNAL_REGISTRIES_RESULT: ${{ needs.publish-external-registries.result }}
           GITHUB_PACKAGES_RESULT: ${{ needs.publish-github-packages.result }}
-          NPM_RESULT: ${{ needs.publish-npm.result }}
-          PYPI_RESULT: ${{ needs.publish-pypi.result }}
         run: |
-          test "$CRATES_RESULT" = success
+          test "$EXTERNAL_REGISTRIES_RESULT" = success
           test "$GITHUB_PACKAGES_RESULT" = success
-          test "$NPM_RESULT" = success
-          test "$PYPI_RESULT" = success

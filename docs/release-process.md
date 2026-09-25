@@ -68,23 +68,27 @@ After the version PR is merged into `main`:
    Only after every step succeeds does the workflow create the tag and immutable
    GitHub Release at the exact tested commit. GitHub then produces a cryptographically
    signed release attestation binding the tag, commit, and asset digests.
-7. Independent reusable workflows publish the already-tested wheels to PyPI, the six
-   npm packages to both npmjs.com and GitHub Packages, and the source package to
-   crates.io. Every publisher declares the protected `release` environment and
-   validates the immutable release before requesting registry credentials. Before
-   `cargo publish`, the crates.io job downloads the attested `.crate` from the GitHub
-   Release, verifies it against `sha256.sum`, rebuilds locally, and requires the two
-   archives to be byte-identical. Each job revalidates the owner actor, then installs
-   the exact published version before it passes. The final registry gate requires all
-   four publication jobs.
+7. The release workflow dispatches three independent top-level workflows to publish
+   the already-tested wheels to PyPI, the six npm packages to npmjs.com, and the
+   source package to crates.io. External Trusted Publisher identities are bound to
+   these top-level workflow filenames, so they must not be invoked through
+   `workflow_call`. The release passes its run ID to each publisher, and each child
+   verifies that it came from the active owner-dispatched `Release` run on `main` at
+   the immutable release commit. The parent waits for all three outcomes. The GitHub
+   Packages mirror remains a reusable workflow because it authenticates with
+   `GITHUB_TOKEN`, not an external OIDC publisher. Before `cargo publish`, the
+   crates.io job downloads the attested `.crate` from the GitHub Release, verifies it
+   against `sha256.sum`, rebuilds locally, and requires the two archives to be
+   byte-identical. Every publisher installs the exact published version before it
+   passes, and the final registry gate requires all four publication paths.
 
 If a registry fails after the immutable release exists, the owner dispatches the
-matching **Publish … from release** workflow on `main` with the same tag. The PyPI,
-npm, GitHub Packages, and crates.io recovery entry points are the same reusable
-workflows called by `release.yml`; they reject non-owner actors,
-mutable/draft/prerelease releases, release commits outside `main`, mismatched
-versions, and digest conflicts. They publish directly from the signed GitHub Release
-assets and are safe to rerun.
+matching **Publish … from release** workflow on `main` with the same tag. A manual
+external-registry recovery omits the source run ID and instead validates the owner
+actor directly. Automated release dispatches require the source run ID and validate
+the active parent `Release` run. Both paths reject mutable/draft/prerelease releases,
+release commits outside `main`, mismatched versions, and digest conflicts. They
+publish directly from the signed GitHub Release assets and are safe to rerun.
 
 For the first npmjs.com release only, npm cannot configure OIDC until each package
 exists. The initial npm job therefore fails closed after the immutable GitHub Release

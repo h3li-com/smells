@@ -34,17 +34,18 @@ release-check:
 		scripts/package-npm.sh scripts/smoke-test-npm.sh \
 		scripts/publish-crate.sh scripts/bootstrap-npm-release.sh \
 		scripts/configure-main-protection.sh scripts/verify-release-actor.sh \
-		scripts/verify-registry-release.sh \
+		scripts/verify-registry-release.sh scripts/dispatch-registry-publications.sh \
 		scripts/benchmark-release-gate.sh \
 		scripts/collect-release-artifacts.sh tests/release-artifacts.sh \
 		tests/npm-packages.sh tests/npm-publisher.sh tests/npm-bootstrap.sh \
-		tests/crate-package.sh \
+		tests/crate-package.sh tests/registry-publication.sh \
 		tests/release-workflow.sh
 	@sh tests/release-artifacts.sh
 	@sh tests/npm-packages.sh
 	@sh tests/npm-publisher.sh
 	@sh tests/npm-bootstrap.sh
 	@sh tests/crate-package.sh
+	@sh tests/registry-publication.sh
 	@sh tests/release-workflow.sh
 	@node --check npm/smells.js
 	@node --check npm/build-package.mjs
