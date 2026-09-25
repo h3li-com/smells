@@ -1014,6 +1014,33 @@ fn finding_log_indexes_source_local_scanner_errors_at_their_location() {
 }
 
 #[test]
+fn finding_log_uses_the_rust_parser_failure_span() {
+    let workspace = Workspace::new("fn valid() {}\n\nfn broken( {\n");
+    let output = workspace.command(&[
+        "check",
+        "--path",
+        ".",
+        "--policy",
+        "quality-policy.json",
+        "--only-group",
+        "source",
+        "--format",
+        "table",
+        "--log",
+        "smells-findings.log",
+        "--report",
+        "smells-report.json",
+    ]);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let log = fs::read_to_string(workspace.path.join("smells-findings.log")).unwrap();
+    assert!(
+        log.contains("E000001 | scanner_error | scanner | src/lib.rs:3:"),
+        "{log}"
+    );
+    assert!(!log.contains("src/lib.rs:1:1"), "{log}");
+}
+
+#[test]
 fn next_declaration_suppression_covers_a_finding_inside_its_body() {
     let workspace = Workspace::new(
         "struct Root;\n// smells: ignore[rust.navigation_chains] -- fluent traversal is the public API\nfn read(root: Root) { let _ = root.first.second.third; }\n",

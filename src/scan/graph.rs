@@ -627,14 +627,10 @@ pub(super) fn parse_sources(input: &Input, report: &mut Report) -> BTreeMap<Stri
                 );
                 parsed.insert(path.clone(), file);
             }
-            Err(error) => report.error_at(
-                format!("parse error in {path}: {error}"),
-                Location {
-                    path: path.clone(),
-                    line: 1,
-                    column: 1,
-                },
-            ),
+            Err(error) => {
+                let error_location = location(path, error.span());
+                report.error_at(format!("parse error in {path}: {error}"), error_location);
+            }
         }
     }
     parsed

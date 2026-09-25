@@ -2596,9 +2596,10 @@ function broken( {
     assert_eq!(output.status.code(), Some(2));
     let log = fs::read_to_string(workspace.path.join("smells-findings.log")).unwrap();
     assert!(
-        log.contains("E000001 | scanner_error | scanner | broken.ts:1:1 | detail line "),
+        log.contains("E000001 | scanner_error | scanner | broken.ts:4:"),
         "{log}"
     );
+    assert!(!log.contains("broken.ts:1:1"), "{log}");
 }
 
 #[test]

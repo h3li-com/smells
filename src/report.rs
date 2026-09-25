@@ -357,19 +357,6 @@ impl Report {
         });
     }
 
-    pub fn extend_errors_at(&mut self, path: &str, errors: impl IntoIterator<Item = String>) {
-        for error in errors {
-            self.error_at(
-                error,
-                Location {
-                    path: path.to_string(),
-                    line: 1,
-                    column: 1,
-                },
-            );
-        }
-    }
-
     pub fn has_errors(&self) -> bool {
         !self.errors.is_empty()
     }

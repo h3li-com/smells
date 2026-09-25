@@ -5,7 +5,7 @@ use super::*;
 #[serde(deny_unknown_fields)]
 pub(super) struct SourceAnalysis {
     pub(super) facts: Facts,
-    pub(super) errors: Vec<String>,
+    pub(super) errors: Vec<SourceError>,
     stats: SourceStats,
 }
 
