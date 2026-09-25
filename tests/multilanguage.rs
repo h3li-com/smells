@@ -61,16 +61,19 @@ impl Workspace {
     }
 
     fn check_path_table(&self) -> Output {
+        self.check_path_table_with(&[])
+    }
+
+    fn check_path_source_table(&self) -> Output {
+        self.check_path_table_with(&["--only-group", "source"])
+    }
+
+    fn check_path_table_with(&self, selection: &[&str]) -> Output {
+        let mut arguments = vec!["check", "--path", ".", "--policy", "quality-policy.json"];
+        arguments.extend_from_slice(selection);
+        arguments.extend_from_slice(&["--format", "table"]);
         Command::new(env!("CARGO_BIN_EXE_smells"))
-            .args([
-                "check",
-                "--path",
-                ".",
-                "--policy",
-                "quality-policy.json",
-                "--format",
-                "table",
-            ])
+            .args(arguments)
             .current_dir(&self.path)
             .output()
             .expect("run scanner table")
@@ -1209,6 +1212,76 @@ fn source_suppressions_are_rule_specific_audited_and_consistent_across_languages
         assert_eq!(finding["suppression"]["reason"], "stable external API");
         assert_eq!(finding["guidance_ref"], "long-parameter-list@1");
         assert_eq!(data["suppressions"][0]["state"], "used");
+
+        let table = workspace.check_path_source_table();
+        assert_eq!(table.status.code(), Some(0), "{language}: {table:?}");
+        let stdout = String::from_utf8(table.stdout).unwrap();
+        assert!(
+            stdout.contains("ignored findings: 1"),
+            "{language}: {stdout}"
+        );
+        assert!(
+            stdout.contains("Matches | Blocking | Ignored | Review | Coverage"),
+            "{language}: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn suppression_belongs_to_the_target_declaration_not_nested_declarations() {
+    for (language, file, source) in [
+        (
+            "rust",
+            "src/lib.rs",
+            "// smells: ignore[rust.function_arguments] -- outer API is stable\nfn outer(a:i32,b:i32,c:i32,d:i32,e:i32,f:i32,g:i32,h:i32) {\n    fn inner(a:i32,b:i32,c:i32,d:i32,e:i32,f:i32,g:i32,h:i32) {}\n}\n",
+        ),
+        (
+            "python",
+            "app.py",
+            "# smells: ignore[python.function_arguments] -- outer API is stable\ndef outer(a, b, c, d):\n    def inner(a, b, c, d): pass\n",
+        ),
+        (
+            "typescript",
+            "app.ts",
+            "// smells: ignore[typescript.function_arguments] -- outer API is stable\nfunction outer(a: number, b: number, c: number, d: number): void {\n  function inner(a: number, b: number, c: number, d: number): void {}\n}\n",
+        ),
+    ] {
+        let mut policy = if language == "rust" {
+            serde_json::from_str(include_str!("../examples/quality-policy.json")).unwrap()
+        } else {
+            portable_policy(language)
+        };
+        if language == "rust" {
+            policy["rules"]["rust.primitive_slots"]["mode"] = json!("off");
+        }
+        let workspace = Workspace::new(file, source, &policy);
+        let output = workspace.check_path_source_only();
+        assert_eq!(output.status.code(), Some(1), "{language}: {output:?}");
+        let data = report(&output);
+        let rule_id = format!("{language}.function_arguments");
+        let argument_findings: Vec<_> = data["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|finding| finding["rule_id"] == rule_id)
+            .collect();
+        assert_eq!(
+            argument_findings.len(),
+            2,
+            "{language}: {argument_findings:?}"
+        );
+        assert_eq!(
+            argument_findings[0]["status"], "ignored_match",
+            "{language}"
+        );
+        assert_eq!(argument_findings[1]["status"], "violation", "{language}");
+        assert_eq!(
+            argument_findings[1]["suppression"],
+            Value::Null,
+            "{language}"
+        );
+        assert_eq!(data["summary"]["ignored_findings"], 1, "{language}");
+        assert_eq!(data["summary"]["blocking_findings"], 1, "{language}");
     }
 }
 

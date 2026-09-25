@@ -42,15 +42,18 @@ fn print_implementation_header(implementation: &ImplementationResult, language: 
 }
 
 fn print_smell_results(implementation: &ImplementationResult) {
-    println!("Smell pattern | Pattern ID | Result | Matches | Blocking | Review | Coverage");
+    println!(
+        "Smell pattern | Pattern ID | Result | Matches | Blocking | Ignored | Review | Coverage"
+    );
     for result in &implementation.smell_results {
         println!(
-            "{} | {} | {} | {} | {} | {} | {}",
+            "{} | {} | {} | {} | {} | {} | {} | {}",
             result.smell,
             result.smell_id,
             result.state,
             result.matched_findings,
             result.blocking_findings,
+            result.ignored_findings,
             result.review_signals,
             result.coverage_status,
         );
@@ -351,24 +354,6 @@ fn log_entry(report: &Report, target: FindingLogTarget<'_>) -> FindingLogEntry {
     }
 }
 
-fn finding_detail_line_count(report: &Report, finding: &Finding) -> usize {
-    let guidance_items = report
-        .guidance_catalog
-        .iter()
-        .find(|guidance| guidance.guidance_ref == finding.guidance_ref)
-        .expect("finding guidance reference must resolve")
-        .items
-        .len();
-    let excerpt_lines = finding
-        .source_excerpt
-        .as_ref()
-        .map_or(0, |excerpt| excerpt.lines.len());
-    22 + finding.related_locations.len()
-        + guidance_items
-        + usize::from(finding.suppression.is_some())
-        + excerpt_lines
-}
-
 fn write_finding_log_header(report: &Report, output: &mut impl Write) -> io::Result<()> {
     writeln!(output, "Smells Finding Log")?;
     writeln!(
@@ -397,6 +382,7 @@ fn write_finding_log_index(
 ) -> io::Result<()> {
     let mut detail_line = targets.len() + 7;
     for target in targets {
+        let detail_line_count = log_entry(report, *target).detail.len();
         match target {
             FindingLogTarget::Error(index, _) => {
                 writeln!(
@@ -405,7 +391,6 @@ fn write_finding_log_index(
                     index + 1,
                     detail_line
                 )?;
-                detail_line += 7;
             }
             FindingLogTarget::Finding(finding, status) => {
                 writeln!(
@@ -419,9 +404,9 @@ fn write_finding_log_index(
                     finding.location.column,
                     detail_line
                 )?;
-                detail_line += finding_detail_line_count(report, finding);
             }
         }
+        detail_line += detail_line_count;
     }
     writeln!(output)?;
     Ok(())
@@ -458,7 +443,7 @@ impl Report {
             self.metadata.language,
         );
         println!(
-            "Scan summary | verdict: {} | implementations: {} | matched patterns: {}/{} | blocking patterns: {} | review patterns: {} | matched findings: {} | blocking findings: {} | review signals: {} | errors: {}",
+            "Scan summary | verdict: {} | implementations: {} | matched patterns: {}/{} | blocking patterns: {} | review patterns: {} | matched findings: {} | blocking findings: {} | ignored findings: {} | review signals: {} | errors: {}",
             self.summary.verdict,
             self.summary.implementations,
             self.summary.matched_smell_patterns,
@@ -467,6 +452,7 @@ impl Report {
             self.summary.review_smell_patterns,
             self.summary.matched_findings,
             self.summary.blocking_findings,
+            self.summary.ignored_findings,
             self.summary.review_signals,
             self.summary.error_count,
         );

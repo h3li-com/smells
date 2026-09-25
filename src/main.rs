@@ -521,8 +521,6 @@ fn emit_report(report: &report::Report, options: &CheckOptions) -> Result<usize,
         } else {
             print_report(report, options.format.as_deref())?
         };
-    let json_bytes = saved_json_bytes.unwrap_or(stdout_json_bytes);
-    metrics::write(json_bytes)?;
     Ok(saved_json_bytes.unwrap_or(stdout_json_bytes))
 }
 

@@ -493,30 +493,26 @@ impl Report {
         for error in parsed.errors {
             self.error(error);
         }
-        for mut suppression in parsed.directives {
+        for mut parsed_suppression in parsed.directives {
             let mut used = false;
             for finding in &mut self.findings {
-                if finding.rule_id == suppression.rule_id
-                    && finding.location.path == suppression.target_location.path
-                    && finding.location.line >= suppression.target_location.line
-                    && finding.location.line <= suppression.target_end_line
-                {
+                if parsed_suppression.owns(&finding.rule_id, &finding.location) {
                     used = true;
                     finding.status = "ignored_match".into();
                     finding.blocking = false;
-                    suppression.state = "used".into();
-                    finding.suppression = Some(suppression.clone());
+                    parsed_suppression.suppression.state = "used".into();
+                    finding.suppression = Some(parsed_suppression.suppression.clone());
                 }
             }
             if !used {
                 self.error(format!(
                     "unused suppression at {}:{}: {} did not match a finding on the next declaration",
-                    suppression.directive_location.path,
-                    suppression.directive_location.line,
-                    suppression.rule_id
+                    parsed_suppression.suppression.directive_location.path,
+                    parsed_suppression.suppression.directive_location.line,
+                    parsed_suppression.suppression.rule_id
                 ));
             }
-            self.suppressions.push(suppression);
+            self.suppressions.push(parsed_suppression.suppression);
         }
     }
 

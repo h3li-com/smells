@@ -419,12 +419,11 @@ make benchmark-release-gate
 `scripts/benchmark-release-gate.sh` checks cold/warm runs with one, four, and
 default Rayon workers. It requires exactly 1,397 Python and 875 TypeScript files,
 report sizes no larger than 138,500,000 and 49,375,000 bytes respectively, and
-peak RSS no larger than 750,000,000 and 400,000,000 bytes. The default bounded
-worker pool carries the release runtime targets of 10 seconds for Python and 5
-seconds for TypeScript; one/four-worker diagnostic ceilings detect regressions
-without requiring intentionally serial Python execution to match the parallel
-release target. The gate also runs the deterministic alternative-interface pair
-budget regression first.
+peak RSS no larger than 750,000,000 and 400,000,000 bytes. Every cold/warm and
+one/four/default-worker case must meet the 10-second Python and 5-second
+TypeScript runtime ceilings. Every measured run is also compared byte-for-byte
+with the first report for its language. The gate runs the deterministic
+alternative-interface pair-budget regression first.
 
 The v0.5.0 reference measurements in the Codex sandbox were 135,253,915 bytes,
 a 9.10-second Python cold/default median with peak samples below 750 MB, and a

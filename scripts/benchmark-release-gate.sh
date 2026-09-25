@@ -95,6 +95,16 @@ run_case() {
         metrics="$benchmark_directory/$label-metrics-$run.json"
         timing="$benchmark_directory/$label-time-$run"
         run_scanner "$threads" "$cache" "$metrics" "$report" "$root" "$policy" "$timing"
+        reference_report="$benchmark_directory/$language-reference-report.json"
+        if [ -e "$reference_report" ]; then
+            if ! cmp -s "$reference_report" "$report"; then
+                printf '%s run %s produced report bytes that differ from the reference run\n' \
+                    "$label" "$run" >&2
+                exit 1
+            fi
+        else
+            cp "$report" "$reference_report"
+        fi
         awk '$1 == "real" { print $2 }' "$timing" >>"$timings"
         jq -r '.peak_resident_bytes' "$metrics" >>"$rss_values"
         files=$(jq -r '.files' "$metrics")
@@ -130,13 +140,8 @@ run_case() {
 
 for cache_mode in cold warm; do
     for threads in 1 4 default; do
-        case "$threads" in
-            1) python_seconds=15 ;;
-            4) python_seconds=12 ;;
-            default) python_seconds=10 ;;
-        esac
         run_case python "$SMELLS_PYTHON_ROOT" "$python_policy" \
-            1397 138500000 750000000 "$python_seconds" "$cache_mode" "$threads"
+            1397 138500000 750000000 10 "$cache_mode" "$threads"
         run_case typescript "$SMELLS_TYPESCRIPT_ROOT" "$typescript_policy" \
             875 49375000 400000000 5 "$cache_mode" "$threads"
     done

@@ -4,43 +4,104 @@ use crate::{
 };
 use regex::Regex;
 use std::collections::{BTreeMap, BTreeSet};
+use syn::{spanned::Spanned, visit::Visit};
 use tree_sitter::{Node, Parser};
 
 pub struct ParsedSuppressions {
-    pub directives: Vec<Suppression>,
+    pub directives: Vec<ParsedSuppression>,
     pub errors: Vec<String>,
 }
 
-fn declaration_pattern(language: &str) -> Regex {
-    let pattern = match language {
-        "rust" => {
-            r#"^(?:(?:pub(?:\([^)]*\))?|async|unsafe|const|extern(?:\s+"[^"]+")?)\s+)*(?:fn|struct|enum|trait|impl|type|mod|const|static)\b"#
-        }
-        "python" => r"^(?:async\s+)?(?:def|class)\s+[A-Za-z_]",
-        "typescript" => {
-            r"^(?:(?:export|default|declare|abstract|public|private|protected|static|readonly|async|get|set|override)\s+)*(?:(?:class|function|interface|type|enum|namespace)\s+[A-Za-z_$]|(?:constructor|[A-Za-z_$][A-Za-z0-9_$]*)\s*(?:<[^>]+>)?\s*\()"
-        }
-        _ => unreachable!("validated language"),
-    };
-    Regex::new(pattern).expect("declaration regex")
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SuppressionLanguage {
+    Rust,
+    Python,
+    TypeScript,
 }
 
-fn directive_pattern(language: &str) -> Regex {
-    let marker = if language == "python" { r"\#" } else { r"//" };
-    Regex::new(&format!(
-        r"^\s*{marker}\s*smells:\s*ignore\[([a-z][a-z0-9_-]*\.[a-z][a-z0-9_-]*)\]\s+--\s+(\S(?:.*\S)?)\s*$"
-    ))
-    .expect("directive regex")
+impl SuppressionLanguage {
+    fn parse(language: &str) -> Self {
+        match language {
+            "rust" => Self::Rust,
+            "python" => Self::Python,
+            "typescript" => Self::TypeScript,
+            _ => unreachable!("validated language"),
+        }
+    }
+
+    fn declaration_pattern(self) -> Regex {
+        let pattern = match self {
+            Self::Rust => {
+                r#"^(?:(?:pub(?:\([^)]*\))?|async|unsafe|const|extern(?:\s+"[^"]+")?)\s+)*(?:fn|struct|enum|trait|type)\b"#
+            }
+            Self::Python => r"^(?:async\s+)?(?:def|class)\s+[A-Za-z_]",
+            Self::TypeScript => {
+                r"^(?:(?:export|default|declare|abstract|public|private|protected|static|readonly|async|get|set|override)\s+)*(?:(?:class|function|interface|type|enum|namespace)\s+[A-Za-z_$]|(?:constructor|[A-Za-z_$][A-Za-z0-9_$]*)\s*(?:<[^>]+>)?\s*\()"
+            }
+        };
+        Regex::new(pattern).expect("declaration regex")
+    }
+
+    fn directive_pattern(self) -> Regex {
+        let marker = if self == Self::Python { r"\#" } else { r"//" };
+        Regex::new(&format!(
+            r"^\s*{marker}\s*smells:\s*ignore\[([a-z][a-z0-9_-]*\.[a-z][a-z0-9_-]*)\]\s+--\s+(\S(?:.*\S)?)\s*$"
+        ))
+        .expect("directive regex")
+    }
+
+    fn is_comment_with_smells(self, line: &str) -> bool {
+        let trimmed = line.trim_start();
+        let comment = if self == Self::Python {
+            trimmed.starts_with('#')
+        } else {
+            trimmed.starts_with("//")
+        };
+        comment && trimmed.contains("smells:")
+    }
+
+    fn permitted_gap_line(self, line: &str) -> bool {
+        let trimmed = line.trim();
+        trimmed.is_empty()
+            || self.is_comment_with_smells(line)
+            || (self == Self::Rust && trimmed.starts_with("#["))
+            || (self != Self::Rust && trimmed.starts_with('@'))
+    }
 }
 
-fn is_comment_with_smells(line: &str, language: &str) -> bool {
-    let trimmed = line.trim_start();
-    let comment = if language == "python" {
-        trimmed.starts_with('#')
-    } else {
-        trimmed.starts_with("//")
-    };
-    comment && trimmed.contains("smells:")
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct DeclarationSpan {
+    start_line: usize,
+    start_column: usize,
+    end_line: usize,
+    end_column: usize,
+}
+
+impl DeclarationSpan {
+    fn contains_position(self, line: usize, column: usize) -> bool {
+        let position = (line, column);
+        position >= (self.start_line, self.start_column)
+            && position < (self.end_line, self.end_column)
+    }
+
+    fn contains(self, location: &Location) -> bool {
+        self.contains_position(location.line, location.column)
+    }
+}
+
+pub struct ParsedSuppression {
+    pub suppression: Suppression,
+    target_span: DeclarationSpan,
+    nested_spans: Vec<DeclarationSpan>,
+}
+
+impl ParsedSuppression {
+    pub fn owns(&self, rule_id: &str, location: &Location) -> bool {
+        self.suppression.rule_id == rule_id
+            && self.suppression.target_location.path == location.path
+            && self.target_span.contains(location)
+            && !self.nested_spans.iter().any(|span| span.contains(location))
+    }
 }
 
 fn comment_nodes(node: Node<'_>, lines: &mut BTreeSet<usize>) {
@@ -54,11 +115,15 @@ fn comment_nodes(node: Node<'_>, lines: &mut BTreeSet<usize>) {
     }
 }
 
-fn actual_comment_lines(path: &str, source: &str, language: &str) -> BTreeSet<usize> {
+fn actual_comment_lines(
+    path: &str,
+    source: &str,
+    language: SuppressionLanguage,
+) -> BTreeSet<usize> {
     if !source.contains("smells:") {
         return BTreeSet::new();
     }
-    if language == "rust" {
+    if language == SuppressionLanguage::Rust {
         let mut lines = BTreeSet::new();
         let mut offset = 0;
         let mut line = 1;
@@ -77,7 +142,7 @@ fn actual_comment_lines(path: &str, source: &str, language: &str) -> BTreeSet<us
         return lines;
     }
 
-    let grammar = if language == "python" {
+    let grammar = if language == SuppressionLanguage::Python {
         tree_sitter_python::LANGUAGE.into()
     } else if path.ends_with(".tsx") {
         tree_sitter_typescript::LANGUAGE_TSX.into()
@@ -95,99 +160,177 @@ fn actual_comment_lines(path: &str, source: &str, language: &str) -> BTreeSet<us
     lines
 }
 
-fn permitted_gap_line(line: &str, language: &str) -> bool {
-    let trimmed = line.trim();
-    trimmed.is_empty()
-        || is_comment_with_smells(line, language)
-        || (language == "rust" && trimmed.starts_with("#["))
-        || (language != "rust" && trimmed.starts_with('@'))
-}
-
 fn next_declaration(
     lines: &[&str],
     directive_line: usize,
-    language: &str,
+    language: SuppressionLanguage,
 ) -> Option<(usize, usize)> {
-    let declaration = declaration_pattern(language);
+    let declaration = language.declaration_pattern();
     for (offset, line) in lines.iter().enumerate().skip(directive_line) {
         let trimmed = line.trim_start();
         if declaration.is_match(trimmed) {
             return Some((offset + 1, line.len() - trimmed.len() + 1));
         }
-        if !permitted_gap_line(line, language) {
+        if !language.permitted_gap_line(line) {
             return None;
         }
     }
     None
 }
 
-fn python_declaration_end_line(lines: &[&str], start_line: usize) -> usize {
-    let indentation = lines[start_line - 1].len() - lines[start_line - 1].trim_start().len();
-    let mut end = start_line;
-    for (offset, line) in lines.iter().enumerate().skip(start_line) {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        let current = line.len() - line.trim_start().len();
-        if current <= indentation {
-            break;
-        }
-        end = offset + 1;
-    }
-    end
-}
-
-fn update_brace_depth(line: &str, opened: &mut bool, depth: &mut isize) {
-    for character in line.chars() {
-        match character {
-            '{' => {
-                *opened = true;
-                *depth += 1;
-            }
-            '}' if *opened => *depth -= 1,
-            _ => {}
-        }
+fn tree_sitter_declaration(kind: &str, language: SuppressionLanguage) -> bool {
+    match language {
+        SuppressionLanguage::Python => matches!(kind, "function_definition" | "class_definition"),
+        SuppressionLanguage::TypeScript => matches!(
+            kind,
+            "function_declaration"
+                | "generator_function_declaration"
+                | "class_declaration"
+                | "abstract_class_declaration"
+                | "interface_declaration"
+                | "type_alias_declaration"
+                | "enum_declaration"
+                | "internal_module"
+                | "method_definition"
+                | "method_signature"
+                | "abstract_method_signature"
+                | "function_signature"
+        ),
+        SuppressionLanguage::Rust => false,
     }
 }
 
-fn braced_declaration_end_line(lines: &[&str], start_line: usize) -> usize {
-    let mut depth = 0isize;
-    let mut opened = false;
-    for (offset, line) in lines.iter().enumerate().skip(start_line - 1) {
-        update_brace_depth(line, &mut opened, &mut depth);
-        if opened && depth <= 0 {
-            return offset + 1;
-        }
-        if !opened && line.contains(';') {
-            return offset + 1;
-        }
+fn collect_tree_sitter_declarations(
+    node: Node<'_>,
+    language: SuppressionLanguage,
+    spans: &mut Vec<DeclarationSpan>,
+) {
+    if tree_sitter_declaration(node.kind(), language) {
+        spans.push(DeclarationSpan {
+            start_line: node.start_position().row + 1,
+            start_column: node.start_position().column + 1,
+            end_line: node.end_position().row + 1,
+            end_column: node.end_position().column + 1,
+        });
     }
-    start_line
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_tree_sitter_declarations(child, language, spans);
+    }
 }
 
-fn declaration_end_line(lines: &[&str], start_line: usize, language: &str) -> usize {
-    if language == "python" {
-        python_declaration_end_line(lines, start_line)
+#[derive(Default)]
+struct RustDeclarations {
+    spans: Vec<DeclarationSpan>,
+}
+
+impl RustDeclarations {
+    fn push(&mut self, declaration: proc_macro2::Span, whole: proc_macro2::Span) {
+        let start = declaration.start();
+        let end = whole.end();
+        self.spans.push(DeclarationSpan {
+            start_line: start.line,
+            start_column: start.column + 1,
+            end_line: end.line,
+            end_column: end.column + 1,
+        });
+    }
+}
+
+impl<'ast> Visit<'ast> for RustDeclarations {
+    fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+        self.push(node.sig.span(), node.span());
+        syn::visit::visit_item_fn(self, node);
+    }
+
+    fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+        self.push(node.sig.span(), node.span());
+        syn::visit::visit_impl_item_fn(self, node);
+    }
+
+    fn visit_trait_item_fn(&mut self, node: &'ast syn::TraitItemFn) {
+        self.push(node.sig.span(), node.span());
+        syn::visit::visit_trait_item_fn(self, node);
+    }
+
+    fn visit_item_struct(&mut self, node: &'ast syn::ItemStruct) {
+        self.push(node.struct_token.span(), node.span());
+        syn::visit::visit_item_struct(self, node);
+    }
+
+    fn visit_item_enum(&mut self, node: &'ast syn::ItemEnum) {
+        self.push(node.enum_token.span(), node.span());
+        syn::visit::visit_item_enum(self, node);
+    }
+
+    fn visit_item_trait(&mut self, node: &'ast syn::ItemTrait) {
+        self.push(node.trait_token.span(), node.span());
+        syn::visit::visit_item_trait(self, node);
+    }
+
+    fn visit_item_type(&mut self, node: &'ast syn::ItemType) {
+        self.push(node.type_token.span(), node.span());
+        syn::visit::visit_item_type(self, node);
+    }
+}
+
+fn declaration_spans(
+    path: &str,
+    source: &str,
+    language: SuppressionLanguage,
+) -> Vec<DeclarationSpan> {
+    if language == SuppressionLanguage::Rust {
+        let Ok(file) = syn::parse_file(source) else {
+            return Vec::new();
+        };
+        let mut declarations = RustDeclarations::default();
+        declarations.visit_file(&file);
+        return declarations.spans;
+    }
+
+    let grammar = if language == SuppressionLanguage::Python {
+        tree_sitter_python::LANGUAGE.into()
+    } else if path.ends_with(".tsx") {
+        tree_sitter_typescript::LANGUAGE_TSX.into()
     } else {
-        braced_declaration_end_line(lines, start_line)
+        tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()
+    };
+    let mut parser = Parser::new();
+    parser
+        .set_language(&grammar)
+        .expect("embedded suppression grammar must load");
+    let mut spans = Vec::new();
+    if let Some(tree) = parser.parse(source, None) {
+        collect_tree_sitter_declarations(tree.root_node(), language, &mut spans);
     }
+    spans
+}
+
+fn target_span(spans: &[DeclarationSpan], line: usize, column: usize) -> Option<DeclarationSpan> {
+    spans
+        .iter()
+        .copied()
+        .filter(|span| span.start_line == line && span.start_column >= column)
+        .min_by_key(|span| span.start_column)
 }
 
 pub fn parse(files: &BTreeMap<String, String>, registry: &Registry) -> ParsedSuppressions {
+    let language = SuppressionLanguage::parse(&registry.language);
     let known_rules: BTreeSet<_> = registry.rules.iter().map(|rule| rule.id.as_str()).collect();
-    let directive = directive_pattern(&registry.language);
+    let directive = language.directive_pattern();
     let mut directives = Vec::new();
     let mut errors = Vec::new();
     let mut targets = BTreeSet::new();
 
     for (path, source) in files {
         let lines: Vec<_> = source.lines().collect();
-        let comment_lines = actual_comment_lines(path, source, &registry.language);
+        let comment_lines = actual_comment_lines(path, source, language);
+        if comment_lines.is_empty() {
+            continue;
+        }
+        let declaration_spans = declaration_spans(path, source, language);
         for (offset, line) in lines.iter().enumerate() {
-            if !comment_lines.contains(&(offset + 1))
-                || !is_comment_with_smells(line, &registry.language)
-            {
+            if !comment_lines.contains(&(offset + 1)) || !language.is_comment_with_smells(line) {
                 continue;
             }
             let line_number = offset + 1;
@@ -206,10 +349,17 @@ pub fn parse(files: &BTreeMap<String, String>, registry: &Registry) -> ParsedSup
                 continue;
             }
             let Some((target_line, target_column)) =
-                next_declaration(&lines, line_number, &registry.language)
+                next_declaration(&lines, line_number, language)
             else {
                 errors.push(format!(
                     "misplaced suppression at {path}:{line_number}: no next declaration"
+                ));
+                continue;
+            };
+            let Some(target_span) = target_span(&declaration_spans, target_line, target_column)
+            else {
+                errors.push(format!(
+                    "misplaced suppression at {path}:{line_number}: next declaration could not be resolved"
                 ));
                 continue;
             };
@@ -219,22 +369,34 @@ pub fn parse(files: &BTreeMap<String, String>, registry: &Registry) -> ParsedSup
                 ));
                 continue;
             }
-            directives.push(Suppression {
-                suppression_id: format!("S{:06}", directives.len() + 1),
-                rule_id,
-                reason,
-                directive_location: Location {
-                    path: path.clone(),
-                    line: line_number,
-                    column: line.find("smells:").map_or(1, |column| column + 1),
+            let nested_spans = declaration_spans
+                .iter()
+                .copied()
+                .filter(|span| {
+                    *span != target_span
+                        && target_span.contains_position(span.start_line, span.start_column)
+                })
+                .collect();
+            directives.push(ParsedSuppression {
+                suppression: Suppression {
+                    suppression_id: format!("S{:06}", directives.len() + 1),
+                    rule_id,
+                    reason,
+                    directive_location: Location {
+                        path: path.clone(),
+                        line: line_number,
+                        column: line.find("smells:").map_or(1, |column| column + 1),
+                    },
+                    target_location: Location {
+                        path: path.clone(),
+                        line: target_line,
+                        column: target_column,
+                    },
+                    target_end_line: target_span.end_line,
+                    state: "unused".into(),
                 },
-                target_location: Location {
-                    path: path.clone(),
-                    line: target_line,
-                    column: target_column,
-                },
-                target_end_line: declaration_end_line(&lines, target_line, &registry.language),
-                state: "unused".into(),
+                target_span,
+                nested_spans,
             });
         }
     }
