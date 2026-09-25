@@ -1,6 +1,6 @@
 use crate::policy::Mode;
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde::{Deserialize, Serialize, ser::SerializeStruct};
+use serde_json::{Value, value::RawValue};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -12,26 +12,106 @@ pub struct Location {
 
 #[derive(Debug, Serialize)]
 pub struct Finding {
+    #[serde(flatten)]
+    pub identity: FindingIdentity,
+    pub symbol: String,
+    pub location: Location,
+    pub related_symbols: Vec<String>,
+    pub related_locations: Vec<Location>,
+    #[serde(skip_serializing)]
+    pub source_excerpt: Option<SourceExcerpt>,
+    #[serde(skip_serializing)]
+    pub related_source_excerpts: Vec<SourceExcerpt>,
+    #[serde(skip_serializing)]
+    pub omitted_related_excerpts: usize,
+    pub evaluation: Evaluation,
+    pub diagnostic: Diagnostic,
+    pub status: String,
+    pub blocking: bool,
+    pub suppression: Option<Suppression>,
+    #[serde(skip_serializing)]
+    pub evidence: Value,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FindingIdentity {
+    pub finding_id: String,
+    pub measurement_index: usize,
     pub rule_id: String,
     pub rule_version: u32,
+    pub guidance_ref: String,
     pub smell_id: String,
     pub smell: String,
     pub category: String,
     pub pattern_type: String,
     pub certainty: String,
     pub policy_mode: Mode,
+}
+
+impl std::ops::Deref for Finding {
+    type Target = FindingIdentity;
+
+    fn deref(&self) -> &Self::Target {
+        &self.identity
+    }
+}
+
+impl std::ops::DerefMut for Finding {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.identity
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct Suppression {
+    pub suppression_id: String,
+    pub rule_id: String,
+    pub reason: String,
+    pub directive_location: Location,
+    pub target_location: Location,
+    pub target_end_line: usize,
+    pub state: String,
+}
+
+#[derive(Debug)]
+pub struct Measurement {
+    pub rule_id: String,
     pub symbol: String,
     pub location: Location,
     pub related_symbols: Vec<String>,
     pub related_locations: Vec<Location>,
-    pub source_excerpt: Option<SourceExcerpt>,
-    pub related_source_excerpts: Vec<SourceExcerpt>,
-    pub omitted_related_excerpts: usize,
-    pub evaluation: Evaluation,
-    pub diagnostic: Diagnostic,
-    pub status: String,
-    pub blocking: bool,
-    pub evidence: Value,
+    pub observed: Value,
+    pub matched: bool,
+    pub evidence: Box<RawValue>,
+}
+
+#[derive(Serialize)]
+struct CompactEvaluation<'a> {
+    observed: &'a Value,
+    matched: bool,
+}
+
+impl Serialize for Measurement {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut state = serializer.serialize_struct("Measurement", 7)?;
+        state.serialize_field("rule_id", &self.rule_id)?;
+        state.serialize_field("symbol", &self.symbol)?;
+        state.serialize_field("location", &self.location)?;
+        state.serialize_field("related_symbols", &self.related_symbols)?;
+        state.serialize_field("related_locations", &self.related_locations)?;
+        state.serialize_field(
+            "evaluation",
+            &CompactEvaluation {
+                observed: &self.observed,
+                matched: self.matched,
+            },
+        )?;
+        state.serialize_field("evidence", &self.evidence)?;
+        state.end()
+    }
 }
 
 pub struct FindingRelations {
@@ -120,16 +200,18 @@ pub struct ReportSummary {
     pub review_smell_patterns: usize,
     pub error_smell_patterns: usize,
     pub matched_smell_ids: Vec<String>,
+    pub total_measurements: usize,
     pub total_findings: usize,
     pub matched_findings: usize,
     pub blocking_findings: usize,
+    pub ignored_findings: usize,
     pub review_signals: usize,
     pub within_pattern_limits: usize,
     pub matched_rule_ids: Vec<String>,
     pub error_count: usize,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct SmellResult {
     pub smell_id: String,
     pub smell: String,
@@ -140,9 +222,10 @@ pub struct SmellResult {
     pub state: SmellState,
     pub interpretation: &'static str,
     pub coverage_status: CoverageStatus,
-    pub evaluated_findings: usize,
+    pub evaluated_measurements: usize,
     pub matched_findings: usize,
     pub blocking_findings: usize,
+    pub ignored_findings: usize,
     pub review_signals: usize,
     pub within_pattern_limits: usize,
     pub affected_files: usize,
@@ -154,7 +237,7 @@ pub struct SmellResult {
     pub matched_finding_indices: Vec<usize>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct RuleStatusIds {
     pub pending_rule_ids: Vec<String>,
     pub disabled_rule_ids: Vec<String>,
@@ -166,6 +249,7 @@ pub struct RuleStatusIds {
 #[serde(rename_all = "snake_case")]
 pub enum SmellState {
     BlockingMatch,
+    IgnoredMatch,
     ReviewMatch,
     CheckedNoMatchInMeasuredScope,
     Pending,
@@ -179,6 +263,7 @@ impl SmellState {
     pub(super) fn as_str(self) -> &'static str {
         match self {
             Self::BlockingMatch => "blocking_match",
+            Self::IgnoredMatch => "ignored_match",
             Self::ReviewMatch => "review_match",
             Self::CheckedNoMatchInMeasuredScope => "checked_no_match_in_measured_scope",
             Self::Pending => "pending",
@@ -197,6 +282,9 @@ impl SmellState {
             Self::Error => "Measurement is incomplete; do not infer that this smell is absent.",
             Self::BlockingMatch => {
                 "One or more required deterministic rules matched this smell pattern."
+            }
+            Self::IgnoredMatch => {
+                "One or more deterministic matches were explicitly accepted by audited source-local suppressions."
             }
             Self::ReviewMatch => {
                 "One or more report-only deterministic rules matched; semantic review is required before deciding whether to refactor."
@@ -274,6 +362,7 @@ fn measured_coverage(measured: bool, pending: bool, excluded: bool) -> CoverageS
 
 fn measured_state(
     blocking_findings: usize,
+    ignored_findings: usize,
     review_signals: usize,
     measured: bool,
     pending: bool,
@@ -283,6 +372,8 @@ fn measured_state(
         SmellState::BlockingMatch
     } else if review_signals > 0 {
         SmellState::ReviewMatch
+    } else if ignored_findings > 0 {
+        SmellState::IgnoredMatch
     } else if measured {
         SmellState::CheckedNoMatchInMeasuredScope
     } else if pending {
@@ -294,22 +385,25 @@ fn measured_state(
     }
 }
 
-pub(super) fn smell_state(
-    applicable: bool,
-    incomplete: bool,
-    blocking_findings: usize,
-    review_signals: usize,
-    measured: bool,
-    pending: bool,
-    excluded: bool,
-) -> SmellStatus {
-    if !applicable {
+pub(super) struct SmellStateInputs {
+    pub(super) applicable: bool,
+    pub(super) incomplete: bool,
+    pub(super) blocking_findings: usize,
+    pub(super) ignored_findings: usize,
+    pub(super) review_signals: usize,
+    pub(super) measured: bool,
+    pub(super) pending: bool,
+    pub(super) excluded: bool,
+}
+
+pub(super) fn smell_state(inputs: SmellStateInputs) -> SmellStatus {
+    if !inputs.applicable {
         return SmellStatus {
             state: SmellState::NotApplicable,
             coverage: CoverageStatus::NotApplicable,
         };
     }
-    if incomplete {
+    if inputs.incomplete {
         return SmellStatus {
             state: SmellState::Error,
             coverage: CoverageStatus::Incomplete,
@@ -317,13 +411,14 @@ pub(super) fn smell_state(
     }
     SmellStatus {
         state: measured_state(
-            blocking_findings,
-            review_signals,
-            measured,
-            pending,
-            excluded,
+            inputs.blocking_findings,
+            inputs.ignored_findings,
+            inputs.review_signals,
+            inputs.measured,
+            inputs.pending,
+            inputs.excluded,
         ),
-        coverage: measured_coverage(measured, pending, excluded),
+        coverage: measured_coverage(inputs.measured, inputs.pending, inputs.excluded),
     }
 }
 
@@ -333,6 +428,7 @@ pub struct ImplementationSummary {
     pub total_smell_patterns: usize,
     pub matched_smell_patterns: usize,
     pub blocking_smell_patterns: usize,
+    pub ignored_smell_patterns: usize,
     pub review_smell_patterns: usize,
     pub error_smell_patterns: usize,
     pub matched_smell_ids: Vec<String>,
@@ -351,7 +447,7 @@ pub struct ImplementationResult {
     pub smell_results: Vec<SmellResult>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Evaluation {
     pub metric: String,
     pub observed: Value,

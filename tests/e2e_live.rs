@@ -91,12 +91,13 @@ fn failing_hook_exposes_a_reference_that_can_be_researched_live() {
         String::from_utf8_lossy(&hook.stderr)
     );
 
-    let report: Value = serde_json::from_slice(&hook.stdout).unwrap_or_else(|error| {
-        panic!(
-            "hook must expose machine-readable JSON ({error}):\n{}",
-            String::from_utf8_lossy(&hook.stdout)
-        )
-    });
+    let summary = String::from_utf8(hook.stdout).expect("hook summary is UTF-8");
+    assert!(summary.contains("Finding Log: smells-findings.log"));
+    assert!(summary.contains("Start at the Issue Index"));
+    let report: Value = serde_json::from_slice(
+        &fs::read(repository.path.join("smells-report.json")).expect("saved Evidence Report"),
+    )
+    .expect("saved report is JSON");
     assert_eq!(report["summary"]["verdict"], "blocked_by_required_patterns");
     let finding = report["findings"]
         .as_array()
@@ -122,7 +123,7 @@ fn failing_hook_exposes_a_reference_that_can_be_researched_live() {
     );
     assert_eq!(
         diagnostic["reference_check"]["required_before"],
-        "review_or_remediation"
+        "review_remediation_or_suppression"
     );
     assert!(
         diagnostic["review"]
@@ -161,4 +162,79 @@ fn failing_hook_exposes_a_reference_that_can_be_researched_live() {
         page.contains("Signs and Symptoms"),
         "reference page does not contain its smell guidance"
     );
+}
+
+fn visible_page_text(html: &str) -> String {
+    let mut visible = String::with_capacity(html.len());
+    let mut in_tag = false;
+    for character in html.chars() {
+        match character {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => visible.push(character),
+            _ => {}
+        }
+    }
+    for (entity, replacement) in [
+        ("&rsquo;", "’"),
+        ("&#8217;", "’"),
+        ("&#x27;", "'"),
+        ("&#39;", "'"),
+        ("&quot;", "\""),
+        ("&amp;", "&"),
+        ("&nbsp;", " "),
+    ] {
+        visible = visible.replace(entity, replacement);
+    }
+    visible.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[test]
+#[ignore = "requires live network; run with: cargo test --locked --test e2e_live -- --ignored --nocapture"]
+fn embedded_refactoring_guru_when_to_ignore_quotes_are_fresh() {
+    let catalog: Value = serde_json::from_str(include_str!("../rules/when-to-ignore-v1.json"))
+        .expect("embedded guidance catalog parses");
+    let records = catalog["records"].as_array().unwrap();
+    let verbatim = records
+        .iter()
+        .filter(|record| record["provenance"] == "refactoring_guru_verbatim")
+        .collect::<Vec<_>>();
+    assert_eq!(verbatim.len(), 13);
+    for record in verbatim {
+        let url = record["source_url"].as_str().unwrap();
+        let response = Command::new("curl")
+            .args([
+                "--fail",
+                "--silent",
+                "--show-error",
+                "--location",
+                "--connect-timeout",
+                "10",
+                "--max-time",
+                "30",
+                "--user-agent",
+                "smells-guidance-freshness/0.5.0",
+                url,
+            ])
+            .output()
+            .expect("curl is required for the opt-in freshness audit");
+        assert!(
+            response.status.success(),
+            "failed to fetch {url}: {}",
+            String::from_utf8_lossy(&response.stderr)
+        );
+        let page = visible_page_text(&String::from_utf8(response.stdout).unwrap());
+        for item in record["items"].as_array().unwrap() {
+            let item = item
+                .as_str()
+                .unwrap()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(
+                page.contains(&item),
+                "embedded quote changed at {url}: {item:?}"
+            );
+        }
+    }
 }

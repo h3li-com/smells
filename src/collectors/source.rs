@@ -1,7 +1,6 @@
 use super::{
     common::{location_at, observation, primitive_type, simple_names},
     model::SourceModel,
-    syntax::code_only,
 };
 use crate::{evidence::Observation, input::Input, policy::Rule, report::Location};
 use regex::Regex;
@@ -35,10 +34,16 @@ fn private_member_access() -> &'static Regex {
     })
 }
 
-pub(super) fn navigation_chains(input: &Input) -> Result<Vec<Observation>, String> {
-    let mut observations = Vec::new();
-    for (path, source) in &input.files {
-        let code = code_only(path, source)?;
+pub(super) fn visit_navigation_chains(
+    model: &SourceModel,
+    input: &Input,
+    mut emit: impl FnMut(Observation),
+) -> Result<(), String> {
+    for path in input.files.keys() {
+        let code = model
+            .code_by_path
+            .get(path)
+            .ok_or_else(|| format!("missing authored code for {path}"))?;
         for (line_index, line) in code.lines().enumerate() {
             for candidate in navigation_expression().find_iter(line) {
                 let transitions = candidate
@@ -46,7 +51,7 @@ pub(super) fn navigation_chains(input: &Input) -> Result<Vec<Observation>, Strin
                     .bytes()
                     .filter(|byte| *byte == b'.')
                     .count();
-                observations.push(Observation {
+                emit(Observation {
                     symbol: format!("{path}::navigation@{}", line_index + 1),
                     location: Location {
                         path: path.clone(),
@@ -64,14 +69,20 @@ pub(super) fn navigation_chains(input: &Input) -> Result<Vec<Observation>, Strin
             }
         }
     }
-    Ok(observations)
+    Ok(())
 }
 
-pub(super) fn foreign_accesses(input: &Input) -> Result<Vec<Observation>, String> {
+pub(super) fn foreign_accesses(
+    model: &SourceModel,
+    input: &Input,
+) -> Result<Vec<Observation>, String> {
     let mut observations = Vec::new();
     for (path, source) in &input.files {
-        let code = code_only(path, source)?;
-        let accesses = member_access().captures_iter(&code).collect::<Vec<_>>();
+        let code = model
+            .code_by_path
+            .get(path)
+            .ok_or_else(|| format!("missing authored code for {path}"))?;
+        let accesses = member_access().captures_iter(code).collect::<Vec<_>>();
         if accesses.is_empty() {
             continue;
         }
@@ -138,7 +149,10 @@ fn rust_dependency_contract(
         .collect::<BTreeSet<_>>();
     let mut observations = Vec::new();
     for (path, source) in &input.files {
-        let code = code_only(path, source)?;
+        let code = model
+            .code_by_path
+            .get(path)
+            .ok_or_else(|| format!("missing authored code for {path}"))?;
         let mut matches = Vec::new();
         for (receiver, field) in &private_fields {
             let access = Regex::new(&format!(
@@ -147,7 +161,7 @@ fn rust_dependency_contract(
                 regex::escape(field)
             ))
             .expect("escaped Rust private-field expression");
-            matches.extend(access.find_iter(&code).map(|found| found.start()));
+            matches.extend(access.find_iter(code).map(|found| found.start()));
         }
         matches.sort_unstable();
         let Some(first) = matches.first() else {
@@ -177,9 +191,12 @@ pub(super) fn dependency_contract(
     }
     let mut observations = Vec::new();
     for (path, source) in &input.files {
-        let code = code_only(path, source)?;
+        let code = model
+            .code_by_path
+            .get(path)
+            .ok_or_else(|| format!("missing authored code for {path}"))?;
         let accesses = private_member_access()
-            .captures_iter(&code)
+            .captures_iter(code)
             .filter(|capture| !matches!(&capture[1], "self" | "cls" | "this" | "Self" | "super"))
             .collect::<Vec<_>>();
         let Some(first) = accesses.first() else {

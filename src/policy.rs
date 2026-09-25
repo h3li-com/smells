@@ -10,6 +10,8 @@ pub struct Registry {
     pub catalog: Catalog,
     pub smells: Vec<Smell>,
     pub rules: Vec<Rule>,
+    #[serde(skip)]
+    pub guidance_catalog: Vec<WhenToIgnore>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -18,6 +20,7 @@ pub struct Catalog {
     pub source: String,
     pub checked_on: String,
     pub item_count: usize,
+    pub guidance_pack: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -28,6 +31,26 @@ pub struct Smell {
     pub category: String,
     pub applicability: String,
     pub rules: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WhenToIgnore {
+    pub guidance_ref: String,
+    pub smell_id: String,
+    pub version: u32,
+    pub provenance: String,
+    pub source_url: String,
+    pub checked_on: String,
+    pub items: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GuidanceCatalog {
+    schema_version: u32,
+    catalog_id: String,
+    records: Vec<WhenToIgnore>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -159,6 +182,7 @@ fn validate_catalog(registry: &Registry, rule_pack: &str) -> Result<(), String> 
         || registry.catalog.source != "https://refactoring.guru/refactoring/smells"
         || registry.catalog.checked_on != "2026-09-19"
         || registry.catalog.item_count != 23
+        || registry.catalog.guidance_pack != "when-to-ignore-v1"
         || registry.smells.len() != registry.catalog.item_count
     {
         return Err(format!("invalid embedded {rule_pack} catalog"));
@@ -314,15 +338,77 @@ fn validate_rules(registry: &Registry) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_guidance_coverage(
+    registry: &Registry,
+    catalog: &GuidanceCatalog,
+) -> Result<(), String> {
+    let smell_ids: BTreeSet<_> = registry
+        .smells
+        .iter()
+        .map(|smell| smell.id.as_str())
+        .collect();
+    let guidance_ids: BTreeSet<_> = catalog
+        .records
+        .iter()
+        .map(|guidance| guidance.smell_id.as_str())
+        .collect();
+    if catalog.records.len() != smell_ids.len() || guidance_ids != smell_ids {
+        return Err("when-to-ignore guidance must cover every smell exactly once".into());
+    }
+    Ok(())
+}
+
+fn valid_guidance_identity(guidance: &WhenToIgnore) -> bool {
+    guidance.version == 1
+        && guidance.guidance_ref == format!("{}@1", guidance.smell_id)
+        && guidance.source_url == format!("https://refactoring.guru/smells/{}", guidance.smell_id)
+}
+
+fn valid_guidance_content(guidance: &WhenToIgnore) -> bool {
+    matches!(
+        guidance.provenance.as_str(),
+        "refactoring_guru_verbatim" | "smells_authored"
+    ) && guidance.checked_on == "2026-09-25"
+        && !guidance.items.is_empty()
+        && guidance.items.iter().all(|item| !item.trim().is_empty())
+}
+
+fn validate_guidance(guidance: &WhenToIgnore) -> Result<(), String> {
+    if valid_guidance_identity(guidance) && valid_guidance_content(guidance) {
+        return Ok(());
+    }
+    Err(format!(
+        "invalid when-to-ignore guidance: {}",
+        guidance.smell_id
+    ))
+}
+
+fn embedded_guidance_catalog(registry: &Registry) -> Result<Vec<WhenToIgnore>, String> {
+    let catalog: GuidanceCatalog =
+        serde_json::from_str(include_str!("../rules/when-to-ignore-v1.json"))
+            .map_err(|error| format!("invalid embedded when-to-ignore catalog: {error}"))?;
+    if catalog.schema_version != 1 || catalog.catalog_id != "when-to-ignore-v1" {
+        return Err("invalid embedded when-to-ignore catalog header".into());
+    }
+    validate_guidance_coverage(registry, &catalog)?;
+
+    for guidance in &catalog.records {
+        validate_guidance(guidance)?;
+    }
+
+    Ok(catalog.records)
+}
+
 pub fn registry(rule_pack: &str) -> Result<Registry, String> {
     let source = registry_json(rule_pack)?;
-    let registry: Registry =
+    let mut registry: Registry =
         serde_json::from_str(source).map_err(|e| format!("invalid embedded registry: {e}"))?;
     validate_catalog(&registry, rule_pack)?;
     validate_smell_catalog(&registry)?;
     validate_smell_mappings(&registry)?;
     validate_applicability(&registry)?;
     validate_rules(&registry)?;
+    registry.guidance_catalog = embedded_guidance_catalog(&registry)?;
     Ok(registry)
 }
 

@@ -10,6 +10,7 @@ mod report;
 mod rule_runtime;
 mod scan;
 mod similarity;
+mod suppressions;
 mod typescript_compat;
 
 use std::{
@@ -19,7 +20,7 @@ use std::{
     process::ExitCode,
 };
 
-const USAGE: &str = "smells --version\nsmells check (--path DIR | --staged) --policy FILE [--evidence FILE] [--format table|json] [--report FILE] [policy group selectors]\nsmells policy show --policy FILE [--format table|json] [policy group selectors]\nsmells contracts validate --policy FILE\nsmells rules [--rule-pack rust-v1|python-v1|typescript-v1]\n\npolicy group selectors: --group NAME | --only-group NAME | --all-groups | --no-default-groups | --no-group NAME";
+const USAGE: &str = "smells --version\nsmells check (--path DIR | --staged) --policy FILE [--evidence FILE] [--format table|json] [--report FILE] [--log FILE] [policy group selectors]\nsmells policy show --policy FILE [--format table|json] [policy group selectors]\nsmells contracts validate --policy FILE\nsmells rules [--rule-pack rust-v1|python-v1|typescript-v1]\n\npolicy group selectors: --group NAME | --only-group NAME | --all-groups | --no-default-groups | --no-group NAME";
 
 enum Command {
     Help,
@@ -35,6 +36,7 @@ struct CheckOptions {
     policy_path: PathBuf,
     evidence_path: Option<PathBuf>,
     report_path: Option<PathBuf>,
+    log_path: Option<PathBuf>,
     format: Option<String>,
     staged: bool,
     selection: policy::SelectionOptions,
@@ -52,6 +54,7 @@ struct PendingOptions {
     policy_path: Option<PathBuf>,
     evidence_path: Option<PathBuf>,
     report_path: Option<PathBuf>,
+    log_path: Option<PathBuf>,
     format: Option<String>,
     staged: bool,
     selection: policy::SelectionOptions,
@@ -82,6 +85,12 @@ fn set_option(
         ),
         "--report" => set_once(
             &mut options.report_path,
+            PathBuf::from(value),
+            !contracts,
+            flag,
+        ),
+        "--log" => set_once(
+            &mut options.log_path,
             PathBuf::from(value),
             !contracts,
             flag,
@@ -158,6 +167,7 @@ fn finish_operation(options: PendingOptions, contracts: bool) -> Result<Command,
         policy_path,
         evidence_path: options.evidence_path,
         report_path: options.report_path,
+        log_path: options.log_path,
         format: options.format,
         staged: options.staged,
         selection: options.selection,
@@ -305,18 +315,24 @@ fn validate_contracts(policy_path: &PathBuf) -> Result<u8, String> {
     Ok(0)
 }
 
-fn show_policy(options: ShowOptions) -> Result<u8, String> {
-    let text = fs::read_to_string(&options.policy_path)
-        .map_err(|error| format!("cannot read policy: {error}"))?;
-    let registry = policy::registry_for_policy(&text)?;
-    let policy = policy::parse_with_selection(&text, &registry, &options.selection)?;
-    let rules: Vec<_> = registry
+fn resolved_policy_rules(
+    registry: &policy::Registry,
+    policy: &policy::Policy,
+) -> Vec<serde_json::Value> {
+    registry
         .rules
         .iter()
         .map(|rule| {
+            let when_to_ignore = registry
+                .guidance_catalog
+                .iter()
+                .find(|guidance| guidance.smell_id == rule.smell)
+                .expect("validated guidance catalog must cover every rule smell");
             serde_json::json!({
                 "rule_id": rule.id,
                 "smell_id": rule.smell,
+                "guidance_ref": when_to_ignore.guidance_ref,
+                "when_to_ignore": when_to_ignore,
                 "kind": rule.kind,
                 "mode": policy.rules[&rule.id].mode,
                 "selected": policy.selected(&rule.id),
@@ -326,51 +342,95 @@ fn show_policy(options: ShowOptions) -> Result<u8, String> {
                 "parameters": policy.rules[&rule.id].parameters,
             })
         })
-        .collect();
-    if options.format.as_deref() == Some("json") {
+        .collect()
+}
+
+fn print_policy_json(
+    options: &ShowOptions,
+    registry: &policy::Registry,
+    policy: &policy::Policy,
+    rules: &[serde_json::Value],
+) -> Result<(), String> {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "status": "resolved_policy",
+            "policy_path": options.policy_path,
+            "policy_schema_version": policy.schema_version,
+            "rule_pack": registry.rule_pack,
+            "language": registry.language,
+            "scanner_version": policy.scanner_version,
+            "selection": policy.resolved,
+            "guidance_catalog": registry.guidance_catalog,
+            "rules": rules,
+        }))
+        .map_err(|error| error.to_string())?
+    );
+    Ok(())
+}
+
+fn print_policy_table(
+    options: &ShowOptions,
+    registry: &policy::Registry,
+    policy: &policy::Policy,
+    rules: &[serde_json::Value],
+) {
+    println!(
+        "Resolved policy: {} ({} / {})",
+        options.policy_path.display(),
+        registry.rule_pack,
+        registry.language
+    );
+    println!(
+        "Active rules: {}/{} | defaults: {}",
+        policy.resolved.active_rule_ids.len(),
+        registry.rules.len(),
+        policy.resolved.default_groups.join(",")
+    );
+    println!("Rule | Mode | Selected | Groups");
+    for rule in rules {
         println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "status": "resolved_policy",
-                "policy_path": options.policy_path,
-                "policy_schema_version": policy.schema_version,
-                "rule_pack": registry.rule_pack,
-                "language": registry.language,
-                "scanner_version": policy.scanner_version,
-                "selection": policy.resolved,
-                "rules": rules,
-            }))
-            .map_err(|error| error.to_string())?
+            "{} | {} | {} | {}",
+            rule["rule_id"].as_str().unwrap(),
+            rule["mode"].as_str().unwrap(),
+            rule["selected"].as_bool().unwrap(),
+            rule["groups"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|group| group.as_str().unwrap())
+                .collect::<Vec<_>>()
+                .join(",")
         );
-    } else {
+        println!("  Guidance: {}", rule["guidance_ref"].as_str().unwrap());
         println!(
-            "Resolved policy: {} ({} / {})",
-            options.policy_path.display(),
-            registry.rule_pack,
-            registry.language
+            "  Source: {} ({}, checked {})",
+            rule["when_to_ignore"]["source_url"].as_str().unwrap(),
+            rule["when_to_ignore"]["provenance"].as_str().unwrap(),
+            rule["when_to_ignore"]["checked_on"].as_str().unwrap()
         );
-        println!(
-            "Active rules: {}/{} | defaults: {}",
-            policy.resolved.active_rule_ids.len(),
-            registry.rules.len(),
-            policy.resolved.default_groups.join(",")
-        );
-        println!("Rule | Mode | Selected | Groups");
-        for rule in rules {
-            println!(
-                "{} | {} | {} | {}",
-                rule["rule_id"].as_str().unwrap(),
-                rule["mode"].as_str().unwrap(),
-                rule["selected"].as_bool().unwrap(),
-                rule["groups"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|group| group.as_str().unwrap())
-                    .collect::<Vec<_>>()
-                    .join(",")
-            );
+        println!("  When to ignore:");
+        for (index, item) in rule["when_to_ignore"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .enumerate()
+        {
+            println!("    {}. {}", index + 1, item.as_str().unwrap());
         }
+    }
+}
+
+fn show_policy(options: ShowOptions) -> Result<u8, String> {
+    let text = fs::read_to_string(&options.policy_path)
+        .map_err(|error| format!("cannot read policy: {error}"))?;
+    let registry = policy::registry_for_policy(&text)?;
+    let policy = policy::parse_with_selection(&text, &registry, &options.selection)?;
+    let rules = resolved_policy_rules(&registry, &policy);
+    if options.format.as_deref() == Some("json") {
+        print_policy_json(&options, &registry, &policy, &rules)?;
+    } else {
+        print_policy_table(&options, &registry, &policy, &rules);
     }
     Ok(0)
 }
@@ -419,12 +479,12 @@ fn load_evidence(
     Ok((Some(bundle), evidence::digest(bytes)))
 }
 
-fn check(options: CheckOptions) -> Result<u8, String> {
-    metrics::reset();
-    let (captured, evidence_bytes) = capture(&options)?;
-    metrics::add(metrics::Counter::Files, captured.input.files.len());
-    let (evidence, evidence_sha256) = load_evidence(evidence_bytes.as_deref(), &captured)?;
-    let mut report = scan(&captured)?;
+fn build_report(
+    captured: &input::CapturedInput,
+    evidence_bytes: Option<&[u8]>,
+) -> Result<report::Report, String> {
+    let (evidence, evidence_sha256) = load_evidence(evidence_bytes, captured)?;
+    let mut report = scan(captured)?;
     report.set_provider_evidence_digest(evidence_sha256);
     evidence::apply(
         evidence.as_ref(),
@@ -432,17 +492,68 @@ fn check(options: CheckOptions) -> Result<u8, String> {
         &captured.registry,
         &mut report,
     );
+    report.apply_suppressions(suppressions::parse(
+        &captured.input.files,
+        &captured.registry,
+    ));
     report.attach_sources(&captured.input.files);
     report.finish();
+    Ok(report)
+}
+
+fn emit_report(report: &report::Report, options: &CheckOptions) -> Result<usize, String> {
     let saved_json_bytes = options
         .report_path
         .as_deref()
-        .map(|path| write_json_report(&report, path))
+        .map(|path| write_json_report(report, path))
         .transpose()?;
-    let stdout_json_bytes = print_report(&report, options.format.as_deref())?;
+    if let Some(path) = options.log_path.as_deref() {
+        write_finding_log(report, path)?;
+    }
+    let stdout_json_bytes =
+        if options.format.as_deref() != Some("json") && options.log_path.is_some() {
+            print_hook_summary(
+                report,
+                options.log_path.as_deref().unwrap(),
+                options.report_path.as_deref(),
+            );
+            0
+        } else {
+            print_report(report, options.format.as_deref())?
+        };
     let json_bytes = saved_json_bytes.unwrap_or(stdout_json_bytes);
     metrics::write(json_bytes)?;
+    Ok(saved_json_bytes.unwrap_or(stdout_json_bytes))
+}
+
+fn check(options: CheckOptions) -> Result<u8, String> {
+    metrics::reset();
+    let (captured, evidence_bytes) = capture(&options)?;
+    metrics::add(metrics::Counter::Files, captured.input.files.len());
+    let report = build_report(&captured, evidence_bytes.as_deref())?;
+    metrics::write(emit_report(&report, &options)?)?;
     Ok(report.exit())
+}
+
+fn print_hook_summary(
+    report: &report::Report,
+    log_path: &std::path::Path,
+    report_path: Option<&std::path::Path>,
+) {
+    println!(
+        "Scan summary | verdict: {} | findings: {} | blocking: {} | ignored: {} | review: {} | errors: {}",
+        report.summary.verdict,
+        report.summary.matched_findings,
+        report.summary.blocking_findings,
+        report.summary.ignored_findings,
+        report.summary.review_signals,
+        report.summary.error_count,
+    );
+    println!("Finding Log: {}", log_path.display());
+    println!("Start at the Issue Index, then read every referenced detail.");
+    if let Some(path) = report_path {
+        println!("JSON Evidence Report: {}", path.display());
+    }
 }
 
 struct CountingWriter<W> {
@@ -469,7 +580,7 @@ fn print_report(report: &report::Report, format: Option<&str>) -> Result<usize, 
             inner: stdout.lock(),
             bytes: 0,
         };
-        serde_json::to_writer_pretty(&mut output, report).map_err(|error| error.to_string())?;
+        serde_json::to_writer(&mut output, report).map_err(|error| error.to_string())?;
         writeln!(output).map_err(|error| error.to_string())?;
         Ok(output.bytes)
     } else {
@@ -485,7 +596,7 @@ fn write_json_report(report: &report::Report, path: &std::path::Path) -> Result<
         inner: io::BufWriter::new(file),
         bytes: 0,
     };
-    serde_json::to_writer_pretty(&mut output, report)
+    serde_json::to_writer(&mut output, report)
         .map_err(|error| format!("cannot write report {}: {error}", path.display()))?;
     writeln!(output)
         .map_err(|error| format!("cannot finish report {}: {error}", path.display()))?;
@@ -493,6 +604,15 @@ fn write_json_report(report: &report::Report, path: &std::path::Path) -> Result<
         .flush()
         .map_err(|error| format!("cannot flush report {}: {error}", path.display()))?;
     Ok(output.bytes)
+}
+
+fn write_finding_log(report: &report::Report, path: &std::path::Path) -> Result<(), String> {
+    let file = fs::File::create(path)
+        .map_err(|error| format!("cannot create finding log {}: {error}", path.display()))?;
+    let mut output = io::BufWriter::new(file);
+    report::write_finding_log(report, &mut output)
+        .and_then(|()| output.flush())
+        .map_err(|error| format!("cannot write finding log {}: {error}", path.display()))
 }
 
 fn run() -> Result<u8, String> {

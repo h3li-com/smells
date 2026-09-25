@@ -1,6 +1,6 @@
 SHELL := /bin/sh
 
-.PHONY: build check-tools crap-gate fmt gitleaks install-hooks osv-scan \
+.PHONY: benchmark-release-gate build check-tools crap-gate fmt gitleaks install-hooks osv-scan \
 	pre-commit pre-commit-push pre-push release-check self-smell-check test
 
 # Both Git hooks deliberately run the same fail-closed gate. This makes a manual
@@ -8,6 +8,10 @@ SHELL := /bin/sh
 pre-commit: pre-commit-push
 
 pre-push: pre-commit-push
+
+benchmark-release-gate:
+	cargo test --locked --test multilanguage alternative_interface_budget_charges_only_surviving_exact_comparisons -- --exact
+	@./scripts/benchmark-release-gate.sh
 
 pre-commit-push: check-tools fmt build test release-check self-smell-check crap-gate gitleaks osv-scan
 
@@ -31,6 +35,7 @@ release-check:
 		scripts/publish-crate.sh scripts/bootstrap-npm-release.sh \
 		scripts/configure-main-protection.sh scripts/verify-release-actor.sh \
 		scripts/verify-registry-release.sh \
+		scripts/benchmark-release-gate.sh \
 		scripts/collect-release-artifacts.sh tests/release-artifacts.sh \
 		tests/npm-packages.sh tests/npm-publisher.sh tests/npm-bootstrap.sh \
 		tests/crate-package.sh \

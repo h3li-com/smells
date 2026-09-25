@@ -332,7 +332,7 @@ Benchmark each language on:
 4. short and long functions;
 5. similarity thresholds from 5,000 through 9,500 basis points;
 6. cold and warm file caches;
-7. one thread and the default bounded worker count.
+7. one, four, and the default bounded worker count.
 
 Use medians from multiple release-build runs. Keep deterministic algorithmic tests for
 candidate counts and `maximum_pairs`; do not make normal CI depend on wall-clock limits.
@@ -400,13 +400,39 @@ implemented. `SMELLS_METRICS_FILE` keeps diagnostic data outside production repo
 `scripts/benchmark-scan.sh` captures metrics schema v2 per run, while
 `scripts/benchmark-matrix.sh` covers generated no-clone, clone-heavy, short, and long
 corpora at 5,000, 6,000, 7,000,
-8,200, 9,000, and 9,500 basis points with cold/warm caches and one/default worker counts.
+8,200, 9,000, and 9,500 basis points with cold/warm caches and one/four/default worker counts.
 Warm cases prime the timing and metrics caches before all measured samples; cold cases
 use a distinct empty cache for every sample.
 The no-clone corpus uses all 24 permutations of three distinct operators, and the runner proves the
 label before timing by requiring zero duplicate findings at 5,000 basis points.
 Optional real-project environment variables add the three live corpora without baking
 machine-specific paths into the repository.
+
+Schema 7 adds an opt-in release gate for the two pinned reference corpora:
+
+```sh
+SMELLS_PYTHON_ROOT=/path/to/ai-unify-be \
+SMELLS_TYPESCRIPT_ROOT=/path/to/ai-unify-fe \
+make benchmark-release-gate
+```
+
+`scripts/benchmark-release-gate.sh` checks cold/warm runs with one, four, and
+default Rayon workers. It requires exactly 1,397 Python and 875 TypeScript files,
+report sizes no larger than 138,500,000 and 49,375,000 bytes respectively, and
+peak RSS no larger than 750,000,000 and 400,000,000 bytes. The default bounded
+worker pool carries the release runtime targets of 10 seconds for Python and 5
+seconds for TypeScript; one/four-worker diagnostic ceilings detect regressions
+without requiring intentionally serial Python execution to match the parallel
+release target. The gate also runs the deterministic alternative-interface pair
+budget regression first.
+
+The v0.5.0 reference measurements in the Codex sandbox were 135,253,915 bytes,
+a 9.10-second Python cold/default median with peak samples below 750 MB, and a
+41,079,181-byte, 2.18-second TypeScript cold/default scan at about 301 MB peak
+RSS. Token-heavy full-policy scans deliberately bypass the persisted JSON fact
+cache because decoding millions of cached token strings was slower and used more
+memory than deterministic reparsing; the warm matrix still exercises operating
+system file caches and must not regress relative to the explicit ceilings.
 
 ## Correctness and determinism gates
 

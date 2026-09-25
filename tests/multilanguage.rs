@@ -336,7 +336,7 @@ fn portable_policy(language: &str) -> Value {
     json!({
         "schema_version": 2,
         "rule_pack": format!("{language}-v1"),
-        "scanner_version": "0.4.0",
+        "scanner_version": "0.5.0",
         "scope": "authored_source",
         "exclude_directories": [".git", "target", "node_modules", ".venv", "__pycache__"],
         "limits": {
@@ -356,6 +356,14 @@ fn report(output: &Output) -> Value {
             String::from_utf8_lossy(&output.stderr)
         )
     })
+}
+
+fn measurements(report: &Value) -> impl Iterator<Item = &Value> {
+    report["measurements"].as_array().unwrap().iter()
+}
+
+fn finding_measurement<'a>(report: &'a Value, finding: &Value) -> &'a Value {
+    &report["measurements"][finding["measurement_index"].as_u64().unwrap() as usize]
 }
 
 fn require_maximum(policy: &mut Value, rule: &str, maximum: u64) {
@@ -594,7 +602,12 @@ fn default_python_scan_detects_message_chains_without_external_evidence() {
         .expect("built-in message-chain finding");
     assert_eq!(finding["evaluation"]["observed"], 3);
     assert_eq!(finding["evaluation"]["matched"], true);
-    assert_eq!(finding["evidence"]["provider"]["name"], "smells-built-in");
+    let measurement = finding_measurement(&data, finding);
+    let provider_ref = measurement["evidence"]["provider_ref"].as_u64().unwrap() as usize;
+    assert_eq!(
+        data["evidence_provider_catalog"][provider_ref]["name"],
+        "smells-built-in"
+    );
 }
 
 #[test]
@@ -1009,10 +1022,7 @@ fn typescript_structural_collectors_ignore_non_code_text_and_bodyless_signatures
             finding["rule_id"] != rule || finding["evaluation"]["matched"] == false
         }));
     }
-    let concrete_crap = data["findings"]
-        .as_array()
-        .unwrap()
-        .iter()
+    let concrete_crap = measurements(&data)
         .find(|finding| {
             finding["rule_id"] == "typescript.function_crap"
                 && finding["symbol"]
@@ -1082,10 +1092,7 @@ fn python_structural_collectors_ignore_literal_and_comment_text() {
     let output = workspace.check_path();
     assert_eq!(output.status.code(), Some(0), "{output:?}");
     let data = report(&output);
-    let crap = data["findings"]
-        .as_array()
-        .unwrap()
-        .iter()
+    let crap = measurements(&data)
         .find(|finding| {
             finding["rule_id"] == "python.function_crap"
                 && finding["symbol"]
@@ -1143,7 +1150,222 @@ fn python_policy_scans_a_full_directory_through_the_public_cli() {
         assert_eq!(finding["evaluation"]["threshold"], threshold);
         assert_eq!(finding["evaluation"]["matched"], true);
         assert_eq!(finding["blocking"], true);
-        assert!(finding["source_excerpt"] != Value::Null);
+        assert!(finding.get("source_excerpt").is_none());
+        assert_eq!(
+            finding_measurement(&data, finding)["location"],
+            finding["location"]
+        );
+    }
+}
+
+#[test]
+fn source_suppressions_are_rule_specific_audited_and_consistent_across_languages() {
+    for (language, file, source) in [
+        (
+            "rust",
+            "src/lib.rs",
+            "// smells: ignore[rust.function_arguments] -- stable external API\n\n#[inline]\nfn publish(a:i32,b:i32,c:i32,d:i32,e:i32,f:i32,g:i32,h:i32) {}\n",
+        ),
+        (
+            "python",
+            "app.py",
+            "# smells: ignore[python.function_arguments] -- stable external API\n\n@command\ndef publish(a, b, c, d):\n    pass\n",
+        ),
+        (
+            "typescript",
+            "app.ts",
+            "class Publisher {\n  // smells: ignore[typescript.function_arguments] -- stable external API\n\n  @command\n  publish(a: number, b: number, c: number, d: number): void {}\n}\n",
+        ),
+    ] {
+        let mut policy = if language == "rust" {
+            serde_json::from_str(include_str!("../examples/quality-policy.json")).unwrap()
+        } else {
+            portable_policy(language)
+        };
+        if language == "rust" {
+            policy["rules"]["rust.primitive_slots"]["mode"] = json!("off");
+        } else if language == "typescript" {
+            policy["rules"]["typescript.lazy_class"]["mode"] = json!("off");
+        }
+        let workspace = Workspace::new(file, source, &policy);
+        let output = workspace.check_path_source_only();
+        assert_eq!(output.status.code(), Some(0), "{language}: {output:?}");
+        let data = report(&output);
+        assert_eq!(
+            data["summary"]["verdict"], "passed_with_ignored_findings",
+            "{language}: {}",
+            data["summary"]
+        );
+        assert_eq!(data["summary"]["ignored_findings"], 1);
+        let rule_id = format!("{language}.function_arguments");
+        let finding = data["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|finding| finding["rule_id"] == rule_id)
+            .expect("ignored match remains visible");
+        assert_eq!(finding["status"], "ignored_match");
+        assert_eq!(finding["blocking"], false);
+        assert_eq!(finding["suppression"]["reason"], "stable external API");
+        assert_eq!(finding["guidance_ref"], "long-parameter-list@1");
+        assert_eq!(data["suppressions"][0]["state"], "used");
+    }
+}
+
+#[test]
+fn directive_text_inside_strings_never_creates_a_suppression() {
+    for (language, file, source) in [
+        (
+            "rust",
+            "src/lib.rs",
+            "const NOTE: &str = r#\"// smells: ignore[rust.function_arguments] -- not a comment\"#;\nfn publish(a:i32,b:i32,c:i32,d:i32,e:i32,f:i32,g:i32,h:i32) {}\n",
+        ),
+        (
+            "python",
+            "app.py",
+            "NOTE = '''# smells: ignore[python.function_arguments] -- not a comment'''\ndef publish(a, b, c, d):\n    pass\n",
+        ),
+        (
+            "typescript",
+            "app.ts",
+            "const note = `// smells: ignore[typescript.function_arguments] -- not a comment`;\nfunction publish(a: number, b: number, c: number, d: number): void {}\n",
+        ),
+    ] {
+        let mut policy = if language == "rust" {
+            serde_json::from_str(include_str!("../examples/quality-policy.json")).unwrap()
+        } else {
+            portable_policy(language)
+        };
+        if language == "rust" {
+            policy["rules"]["rust.primitive_slots"]["mode"] = json!("off");
+        }
+        let workspace = Workspace::new(file, source, &policy);
+        let output = workspace.check_path_source_only();
+        assert_eq!(output.status.code(), Some(1), "{language}: {output:?}");
+        let data = report(&output);
+        assert_eq!(data["suppressions"], json!([]), "{language}");
+        let rule_id = format!("{language}.function_arguments");
+        let finding = data["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|finding| finding["rule_id"] == rule_id)
+            .expect("unsuppressed argument finding");
+        assert_eq!(finding["status"], "violation", "{language}");
+        assert_eq!(finding["suppression"], Value::Null, "{language}");
+    }
+}
+
+#[test]
+fn malformed_unknown_misplaced_and_unused_suppressions_invalidate_the_scan() {
+    for (expected, source) in [
+        (
+            "invalid suppression",
+            "// smells: ignore[rust.function_arguments] --\nfn publish(a:i32,b:i32,c:i32,d:i32,e:i32,f:i32,g:i32,h:i32) {}\n",
+        ),
+        (
+            "unknown suppression rule",
+            "// smells: ignore[rust.not_a_rule] -- legacy API\nfn publish(a:i32,b:i32,c:i32,d:i32,e:i32,f:i32,g:i32,h:i32) {}\n",
+        ),
+        (
+            "misplaced suppression",
+            "fn outer() {\n    // smells: ignore[rust.function_arguments] -- not a declaration\n    let value = 1;\n    let _ = value;\n}\n",
+        ),
+        (
+            "unused suppression",
+            "// smells: ignore[rust.function_arguments] -- short API\nfn publish(a:i32) {}\n",
+        ),
+    ] {
+        let policy: Value =
+            serde_json::from_str(include_str!("../examples/quality-policy.json")).unwrap();
+        let workspace = Workspace::new("src/lib.rs", source, &policy);
+        let output = workspace.check_path_source_only();
+        assert_eq!(output.status.code(), Some(2), "{expected}: {output:?}");
+        let data = report(&output);
+        assert_eq!(data["summary"]["verdict"], "incomplete_due_to_errors");
+        assert!(
+            data["errors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|error| error.as_str().unwrap().contains(expected)),
+            "missing {expected}: {}",
+            data["errors"]
+        );
+    }
+}
+
+#[test]
+fn a_related_location_cannot_suppress_a_multi_location_finding() {
+    let source = "fn first(a:i32,b:i32,c:i32)->i32 { let one=a+1; let two=b+one; let three=c+two; three*2 }\n\
+// smells: ignore[rust.duplicate_functions] -- second copy is intentional\n\
+fn second(a:i32,b:i32,c:i32)->i32 { let one=a+1; let two=b+one; let three=c+two; three*2 }\n";
+    let mut policy: Value =
+        serde_json::from_str(include_str!("../examples/quality-policy.json")).unwrap();
+    policy["rules"]["rust.duplicate_functions"]["mode"] = json!("required");
+    let workspace = Workspace::new("src/lib.rs", source, &policy);
+    let output = workspace.check_path_source_only();
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let data = report(&output);
+    assert!(
+        data["errors"][0]
+            .as_str()
+            .unwrap()
+            .contains("unused suppression")
+    );
+    let duplicate = data["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| finding["rule_id"] == "rust.duplicate_functions")
+        .expect("duplicate finding");
+    assert_eq!(duplicate["location"]["line"], 1);
+    assert_eq!(duplicate["related_locations"][0]["line"], 3);
+    assert_eq!(duplicate["status"], "violation");
+    assert_eq!(duplicate["suppression"], Value::Null);
+}
+
+#[test]
+fn alternative_interface_budget_charges_only_surviving_exact_comparisons() {
+    for (language, file, source) in [
+        (
+            "python",
+            "app.py",
+            (0..300)
+                .map(|index| {
+                    format!(
+                        "class C{index}:\n    def method_{index}(self):\n        return {index}\n"
+                    )
+                })
+                .collect::<String>(),
+        ),
+        (
+            "typescript",
+            "app.ts",
+            (0..300)
+                .map(|index| {
+                    format!("class C{index} {{ method_{index}(): number {{ return {index}; }} }}\n")
+                })
+                .collect::<String>(),
+        ),
+    ] {
+        let mut policy = portable_policy(language);
+        policy["rules"][format!("{language}.alternative_interfaces")]["mode"] = json!("report");
+        policy["limits"]["maximum_pairs"] = json!(5);
+        let workspace = Workspace::new(file, &source, &policy);
+        let output = workspace.check_path();
+        assert_ne!(output.status.code(), Some(2), "{language}: {output:?}");
+        let data = report(&output);
+        assert!(data["errors"].as_array().unwrap().is_empty(), "{language}");
+        assert!(
+            data["measurements"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|measurement| {
+                    measurement["rule_id"] != format!("{language}.alternative_interfaces")
+                })
+        );
     }
 }
 
@@ -1167,7 +1389,7 @@ fn runtime_manifests_partition_monorepo_results_by_repository_implementation() {
     let output = workspace.check_path();
     assert_eq!(output.status.code(), Some(0));
     let data = report(&output);
-    assert_eq!(data["report_schema_version"], 6);
+    assert_eq!(data["report_schema_version"], 7);
     assert_eq!(
         data["implementation_results"]
             .as_array()
@@ -1290,7 +1512,11 @@ fn python_class_metrics_combine_declared_state_and_owned_methods() {
         assert_eq!(finding["evaluation"]["threshold"], threshold);
         assert_eq!(finding["evaluation"]["matched"], true);
         assert_eq!(finding["blocking"], true);
-        assert!(finding["source_excerpt"] != Value::Null);
+        assert!(finding.get("source_excerpt").is_none());
+        assert_eq!(
+            finding_measurement(&data, finding)["location"],
+            finding["location"]
+        );
     }
     let result = smell_result(&data, "large-class");
     assert_eq!(result["state"], "blocking_match");
@@ -1391,17 +1617,11 @@ fn typescript_abstract_method_signatures_count_as_class_operations() {
         String::from_utf8_lossy(&output.stdout)
     );
     let data = report(&output);
-    let methods = data["findings"]
-        .as_array()
-        .unwrap()
-        .iter()
+    let methods = measurements(&data)
         .find(|finding| finding["rule_id"] == "typescript.class_methods")
         .unwrap();
     assert_eq!(methods["evaluation"]["observed"], 1);
-    let data_class = data["findings"]
-        .as_array()
-        .unwrap()
-        .iter()
+    let data_class = measurements(&data)
         .find(|finding| finding["rule_id"] == "typescript.data_class")
         .unwrap();
     assert_eq!(data_class["evaluation"]["observed"]["operations"], 1);
@@ -1460,9 +1680,10 @@ class Service {
             && finding["evaluation"]["observed"] == 3
     }));
     assert!(findings.iter().all(|finding| {
+        let measurement = finding_measurement(&data, finding);
         finding["symbol"] != "objectMethod"
             && finding["related_symbol"] != "objectMethod"
-            && finding["evidence"]["supporting_symbols"]
+            && measurement["evidence"]["supporting_symbols"]
                 .as_array()
                 .is_none_or(|symbols| symbols.iter().all(|symbol| symbol != "objectMethod"))
     }));
@@ -1670,7 +1891,11 @@ def third(x, y, z):
             .find(|finding| finding["rule_id"] == rule && finding["evaluation"]["matched"] == true)
             .unwrap_or_else(|| panic!("missing matched {rule}"));
         assert_eq!(finding["blocking"], true);
-        assert!(finding["source_excerpt"] != Value::Null);
+        assert!(finding.get("source_excerpt").is_none());
+        assert_eq!(
+            finding_measurement(&data, finding)["location"],
+            finding["location"]
+        );
         assert!(
             finding["diagnostic"]["reference_url"]
                 .as_str()
@@ -1758,7 +1983,11 @@ function third(x: number, y: number, z: number) {
             .find(|finding| finding["rule_id"] == rule && finding["evaluation"]["matched"] == true)
             .unwrap_or_else(|| panic!("missing matched {rule}"));
         assert_eq!(finding["blocking"], true);
-        assert!(finding["source_excerpt"] != Value::Null);
+        assert!(finding.get("source_excerpt").is_none());
+        assert_eq!(
+            finding_measurement(&data, finding)["location"],
+            finding["location"]
+        );
         assert!(
             finding["diagnostic"]["reference_url"]
                 .as_str()
@@ -1833,10 +2062,7 @@ function second(alpha: number, beta: number, gamma: number) {
         let output = workspace.check_path();
         assert!(matches!(output.status.code(), Some(0 | 1)), "{language}");
         let data = report(&output);
-        let emitted = data["findings"]
-            .as_array()
-            .unwrap()
-            .iter()
+        let emitted = measurements(&data)
             .map(|finding| finding["rule_id"].as_str().unwrap())
             .collect::<std::collections::BTreeSet<_>>();
         for suffix in [
@@ -1881,10 +2107,7 @@ fn mixed_signature_comments_are_not_comment_only_lines() {
         let output = workspace.check_path();
         assert_eq!(output.status.code(), Some(0));
         let data = report(&output);
-        let finding = data["findings"]
-            .as_array()
-            .unwrap()
-            .iter()
+        let finding = measurements(&data)
             .find(|finding| finding["rule_id"] == format!("{language}.comment_share"))
             .expect("comment measurement");
         assert_eq!(finding["evaluation"]["observed"]["comment_lines"], 1);
@@ -2054,9 +2277,10 @@ fn duplicate_boundaries_and_evidence_are_equal_across_all_language_packs() {
                 let finding = finding.unwrap_or_else(|| {
                     panic!("missing {language} duplicate at threshold {threshold}")
                 });
+                let measurement = finding_measurement(&data, finding);
                 observations.push((
                     finding["evaluation"]["observed"].clone(),
-                    finding["evidence"]["token_counts"].clone(),
+                    measurement["evidence"]["token_counts"].clone(),
                 ));
             } else {
                 assert!(
@@ -2094,10 +2318,12 @@ fn duplicate_pair_budget_fails_closed_identically_across_all_language_packs() {
 
 #[test]
 fn portable_metrics_distinguish_tree_nodes_from_rust_lexer_tokens() {
+    let mut policy = portable_policy("python");
+    policy["rules"]["python.duplicate_functions"]["mode"] = json!("off");
     let workspace = Workspace::new(
         "module.py",
         "def measured(value):\n    return value + 1\n",
-        &portable_policy("python"),
+        &policy,
     );
     let metrics_path = workspace.path.join("metrics.json");
     let cache_path = workspace.path.join("cache");
@@ -2456,10 +2682,7 @@ fn rust_relation_collectors_resolve_qualified_same_named_traits() {
         String::from_utf8_lossy(&output.stdout)
     );
     let data = report(&output);
-    let finding = data["findings"]
-        .as_array()
-        .unwrap()
-        .iter()
+    let finding = measurements(&data)
         .find(|finding| finding["rule_id"] == "rust.port_conformance")
         .expect("port conformance measurement");
     assert_eq!(finding["evaluation"]["observed"], 0);
@@ -2538,10 +2761,7 @@ fn python_parameter_separators_are_not_arguments() {
         String::from_utf8_lossy(&output.stderr)
     );
     let data = report(&output);
-    let finding = data["findings"]
-        .as_array()
-        .unwrap()
-        .iter()
+    let finding = measurements(&data)
         .find(|finding| finding["rule_id"] == "python.function_arguments")
         .expect("Python argument measurement");
     assert_eq!(finding["evaluation"]["observed"], 3);
@@ -2607,7 +2827,7 @@ fn complete_provider_evidence_is_pinned_and_evaluated_by_the_scanner() {
         .to_string();
     let evidence = json!({
         "schema_version": 1,
-        "scanner_version": "0.4.0",
+        "scanner_version": "0.5.0",
         "rule_pack": "python-v1",
         "input_sha256": input_sha256,
         "providers": [{
@@ -2651,11 +2871,8 @@ fn complete_provider_evidence_is_pinned_and_evaluated_by_the_scanner() {
     assert_eq!(finding["evaluation"]["matched"], true);
     assert_eq!(finding["evaluation"]["observed"]["inherited_members"], 5);
     assert_eq!(finding["blocking"], true);
-    assert_eq!(finding["source_excerpt"]["focus_line"], 1);
-    assert_eq!(
-        finding["source_excerpt"]["lines"][0]["text"],
-        "class Child:"
-    );
+    assert!(finding.get("source_excerpt").is_none());
+    assert_eq!(finding_measurement(&data, finding)["location"]["line"], 1);
 }
 
 #[test]
@@ -2680,7 +2897,7 @@ fn staged_provider_evidence_cannot_be_replaced_by_unstaged_bytes() {
         .to_string();
     let evidence = json!({
         "schema_version": 1,
-        "scanner_version": "0.4.0",
+        "scanner_version": "0.5.0",
         "rule_pack": "typescript-v1",
         "input_sha256": input_sha256,
         "providers": [{

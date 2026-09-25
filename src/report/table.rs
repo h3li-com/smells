@@ -1,5 +1,13 @@
-use super::{Finding, ImplementationResult, Location, Report, SourceExcerpt};
+use super::{
+    Finding, ImplementationResult, Location, Report, SourceExcerpt, finding_in_source_files,
+    path_in_source_files,
+};
 use crate::input::Implementation;
+use std::io::{self, Write};
+
+struct FindingLogEntry {
+    detail: Vec<String>,
+}
 
 fn print_implementation_header(implementation: &ImplementationResult, language: &str) {
     let implementation_types = implementation.implementation_types.join(",");
@@ -63,8 +71,7 @@ fn print_matched_findings(
         .iter()
         .enumerate()
         .filter(|(_, finding)| {
-            finding.evaluation.matched
-                && Report::finding_in_source_files(finding, &scope.source_files)
+            finding.evaluation.matched && finding_in_source_files(finding, &scope.source_files)
         })
         .collect();
     for (index, finding) in &matched_findings {
@@ -77,7 +84,7 @@ fn print_matched_findings(
         );
     }
     for (index, finding) in &matched_findings {
-        print_actionable_finding(*index, finding);
+        print_actionable_finding(report, *index, finding);
     }
 }
 
@@ -119,7 +126,7 @@ fn push_table_evidence<'a>(
     symbols: &mut Vec<&'a str>,
     locations: &mut Vec<String>,
 ) {
-    if Report::path_in_source_files(&location.path, Some(&scope.source_files)) {
+    if path_in_source_files(&location.path, Some(&scope.source_files)) {
         symbols.push(symbol);
         locations.push(format!(
             "{}:{}:{}",
@@ -128,7 +135,7 @@ fn push_table_evidence<'a>(
     }
 }
 
-fn print_actionable_finding(index: usize, finding: &Finding) {
+fn print_actionable_finding(report: &Report, index: usize, finding: &Finding) {
     println!(
         "Actionable finding {index} | {} | {} | pattern_type={} | certainty={} | status={}",
         finding.smell, finding.rule_id, finding.pattern_type, finding.certainty, finding.status
@@ -165,6 +172,23 @@ fn print_actionable_finding(index: usize, finding: &Finding) {
     println!("  Contract: {}", finding.diagnostic.contract);
     println!("  Reference URL: {}", finding.diagnostic.reference_url);
     println!("  Review guidance: {}", finding.diagnostic.review);
+    let guidance = report
+        .guidance_catalog
+        .iter()
+        .find(|guidance| guidance.guidance_ref == finding.guidance_ref)
+        .expect("finding guidance reference must resolve");
+    println!("  When to ignore [{}]:", guidance.guidance_ref);
+    println!(
+        "    provenance={} | source={} | checked={}",
+        guidance.provenance, guidance.source_url, guidance.checked_on
+    );
+    for (index, item) in guidance.items.iter().enumerate() {
+        println!("    {}. {item}", index + 1);
+    }
+    println!(
+        "  Suppression form: smells: ignore[{}] -- <non-empty reason>",
+        finding.rule_id
+    );
 }
 
 fn print_source_excerpt(label: &str, excerpt: Option<&SourceExcerpt>) {
@@ -184,6 +208,244 @@ fn print_source_excerpt(label: &str, excerpt: Option<&SourceExcerpt>) {
         };
         println!("    {marker} {:>6} | {}", line.line, line.text);
     }
+}
+
+fn error_log_entry(index: usize, error: &str) -> FindingLogEntry {
+    let id = format!("E{:06}", index + 1);
+    FindingLogEntry {
+        detail: vec![
+            format!("Error {id}"),
+            "Status: scanner_error (unsuppressible)".into(),
+            "Rule: scanner".into(),
+            "Primary location: -".into(),
+            format!("Error: {error}"),
+            "Action: inspect this complete error and its source context; a scanner error cannot be suppressed.".into(),
+            String::new(),
+        ],
+    }
+}
+
+fn finding_log_entry(report: &Report, finding: &Finding, status: &'static str) -> FindingLogEntry {
+    let guidance = report
+        .guidance_catalog
+        .iter()
+        .find(|guidance| guidance.guidance_ref == finding.guidance_ref)
+        .expect("finding guidance reference must resolve");
+    let mut detail = vec![
+        format!("Finding {}", finding.finding_id),
+        format!("Status: {status}"),
+        format!("Rule: {} v{}", finding.rule_id, finding.rule_version),
+        format!("Policy mode: {:?}", finding.policy_mode).to_lowercase(),
+        format!(
+            "Primary location: {}:{}:{} | symbol: {}",
+            finding.location.path, finding.location.line, finding.location.column, finding.symbol
+        ),
+    ];
+    for (index, (symbol, location)) in finding
+        .related_symbols
+        .iter()
+        .zip(&finding.related_locations)
+        .enumerate()
+    {
+        detail.push(format!(
+            "Related location {}: {}:{}:{} | symbol: {}",
+            index + 1,
+            location.path,
+            location.line,
+            location.column,
+            symbol
+        ));
+    }
+    detail.extend([
+        format!(
+            "Policy evaluation: {} = {}; matches when {} {}",
+            finding.evaluation.metric,
+            finding.evaluation.observed,
+            finding.evaluation.match_condition,
+            finding.evaluation.threshold
+        ),
+        format!("Why it matched: {}", finding.diagnostic.explanation),
+        format!("Evidence: {}", finding.evidence),
+        format!("Signal: {}", finding.diagnostic.signal),
+        format!("Why it matters: {}", finding.diagnostic.why_it_matters),
+        format!("Remediation: {}", finding.diagnostic.remediation),
+        format!("Contract: {}", finding.diagnostic.contract),
+        format!("Reference URL: {}", finding.diagnostic.reference_url),
+        format!("Review guidance: {}", finding.diagnostic.review),
+        format!("When to ignore [{}]", guidance.guidance_ref),
+        format!("Provenance: {}", guidance.provenance),
+        format!("Guidance source: {}", guidance.source_url),
+        format!("Guidance checked: {}", guidance.checked_on),
+    ]);
+    for (index, item) in guidance.items.iter().enumerate() {
+        detail.push(format!("  {}. {item}", index + 1));
+    }
+    detail.push(format!(
+        "Suppression form: smells: ignore[{}] -- <non-empty reason>",
+        finding.rule_id
+    ));
+    if let Some(suppression) = &finding.suppression {
+        detail.push(format!(
+            "Accepted suppression: {}:{}:{} | reason: {}",
+            suppression.directive_location.path,
+            suppression.directive_location.line,
+            suppression.directive_location.column,
+            suppression.reason
+        ));
+    }
+    detail.push("Agent requirement: inspect the complete finding, reference, source, callers, and tests before proposing remediation or adding a suppression; never suppress merely to pass the hook.".into());
+    if let Some(excerpt) = &finding.source_excerpt {
+        detail.push(format!(
+            "Source excerpt: {}:{}:{}",
+            excerpt.path, excerpt.focus_line, excerpt.focus_column
+        ));
+        for line in &excerpt.lines {
+            let marker = if line.line == excerpt.focus_line {
+                ">"
+            } else {
+                " "
+            };
+            detail.push(format!("  {marker} {:>6} | {}", line.line, line.text));
+        }
+    } else {
+        detail.push("Source excerpt: unavailable".into());
+    }
+    detail.push(String::new());
+    FindingLogEntry { detail }
+}
+
+#[derive(Clone, Copy)]
+enum FindingLogTarget<'a> {
+    Error(usize, &'a str),
+    Finding(&'a Finding, &'static str),
+}
+
+fn finding_log_targets(report: &Report) -> Vec<FindingLogTarget<'_>> {
+    let mut targets: Vec<_> = report
+        .errors
+        .iter()
+        .enumerate()
+        .map(|(index, error)| FindingLogTarget::Error(index, error.as_str()))
+        .collect();
+    for status in ["blocking", "ignored", "review"] {
+        targets.extend(
+            report
+                .findings
+                .iter()
+                .filter(|finding| match status {
+                    "blocking" => finding.blocking,
+                    "ignored" => finding.status == "ignored_match",
+                    "review" => finding.status == "indicator",
+                    _ => false,
+                })
+                .map(|finding| FindingLogTarget::Finding(finding, status)),
+        );
+    }
+    targets
+}
+
+fn log_entry(report: &Report, target: FindingLogTarget<'_>) -> FindingLogEntry {
+    match target {
+        FindingLogTarget::Error(index, error) => error_log_entry(index, error),
+        FindingLogTarget::Finding(finding, status) => finding_log_entry(report, finding, status),
+    }
+}
+
+fn finding_detail_line_count(report: &Report, finding: &Finding) -> usize {
+    let guidance_items = report
+        .guidance_catalog
+        .iter()
+        .find(|guidance| guidance.guidance_ref == finding.guidance_ref)
+        .expect("finding guidance reference must resolve")
+        .items
+        .len();
+    let excerpt_lines = finding
+        .source_excerpt
+        .as_ref()
+        .map_or(0, |excerpt| excerpt.lines.len());
+    22 + finding.related_locations.len()
+        + guidance_items
+        + usize::from(finding.suppression.is_some())
+        + excerpt_lines
+}
+
+fn write_finding_log_header(report: &Report, output: &mut impl Write) -> io::Result<()> {
+    writeln!(output, "Smells Finding Log")?;
+    writeln!(
+        output,
+        "Scan summary | verdict: {} | findings: {} | blocking: {} | ignored: {} | review: {} | errors: {}",
+        report.summary.verdict,
+        report.summary.matched_findings,
+        report.summary.blocking_findings,
+        report.summary.ignored_findings,
+        report.summary.review_signals,
+        report.summary.error_count
+    )?;
+    writeln!(
+        output,
+        "Read the Issue Index first, then jump to each exact detail line."
+    )?;
+    writeln!(output)?;
+    writeln!(output, "Issue Index")?;
+    Ok(())
+}
+
+fn write_finding_log_index(
+    report: &Report,
+    targets: &[FindingLogTarget<'_>],
+    output: &mut impl Write,
+) -> io::Result<()> {
+    let mut detail_line = targets.len() + 7;
+    for target in targets {
+        match target {
+            FindingLogTarget::Error(index, _) => {
+                writeln!(
+                    output,
+                    "E{:06} | scanner_error | scanner | - | detail line {}",
+                    index + 1,
+                    detail_line
+                )?;
+                detail_line += 7;
+            }
+            FindingLogTarget::Finding(finding, status) => {
+                writeln!(
+                    output,
+                    "{} | {} | {} | {}:{}:{} | detail line {}",
+                    finding.finding_id,
+                    status,
+                    finding.rule_id,
+                    finding.location.path,
+                    finding.location.line,
+                    finding.location.column,
+                    detail_line
+                )?;
+                detail_line += finding_detail_line_count(report, finding);
+            }
+        }
+    }
+    writeln!(output)?;
+    Ok(())
+}
+
+fn write_finding_log_details(
+    report: &Report,
+    targets: Vec<FindingLogTarget<'_>>,
+    output: &mut impl Write,
+) -> io::Result<()> {
+    for target in targets {
+        let entry = log_entry(report, target);
+        for line in entry.detail {
+            writeln!(output, "{line}")?;
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn write_finding_log(report: &Report, mut output: impl Write) -> io::Result<()> {
+    let targets = finding_log_targets(report);
+    write_finding_log_header(report, &mut output)?;
+    write_finding_log_index(report, &targets, &mut output)?;
+    write_finding_log_details(report, targets, &mut output)
 }
 
 impl Report {

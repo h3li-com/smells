@@ -2,7 +2,7 @@
   "schema_version": 1,
   "rule_pack": "typescript-v1",
   "language": "typescript",
-  "catalog": {"source":"https://refactoring.guru/refactoring/smells","checked_on":"2026-09-19","item_count":23},
+  "catalog": {"source":"https://refactoring.guru/refactoring/smells","checked_on":"2026-09-19","item_count":23,"guidance_pack":"when-to-ignore-v1"},
   "smells": [
     {"id":"long-method","name":"Long Method","category":"bloaters","applicability":"applicable","rules":["typescript.function_lines","typescript.function_crap"]},
     {"id":"large-class","name":"Large Class","category":"bloaters","applicability":"applicable","rules":["typescript.class_fields","typescript.class_methods","typescript.class_method_lines"]},

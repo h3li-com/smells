@@ -1,0 +1,263 @@
+{
+  "schema_version": 1,
+  "catalog_id": "when-to-ignore-v1",
+  "records": [
+    {
+      "guidance_ref": "long-method@1",
+      "smell_id": "long-method",
+      "version": 1,
+      "provenance": "smells_authored",
+      "source_url": "https://refactoring.guru/smells/long-method",
+      "checked_on": "2026-09-25",
+      "items": [
+        "Ignore only when the long routine is a stable generated or boundary algorithm whose required sequential flow is clearer and safer together, and extraction would obscure its invariants without reducing risk."
+      ]
+    },
+    {
+      "guidance_ref": "large-class@1",
+      "smell_id": "large-class",
+      "version": 1,
+      "provenance": "smells_authored",
+      "source_url": "https://refactoring.guru/smells/large-class",
+      "checked_on": "2026-09-25",
+      "items": [
+        "Ignore only when the class is generated or demonstrably represents one cohesive responsibility, and splitting it would duplicate invariants or make the public contract harder to understand."
+      ]
+    },
+    {
+      "guidance_ref": "primitive-obsession@1",
+      "smell_id": "primitive-obsession",
+      "version": 1,
+      "provenance": "smells_authored",
+      "source_url": "https://refactoring.guru/smells/primitive-obsession",
+      "checked_on": "2026-09-25",
+      "items": [
+        "Ignore only when primitive values are mandated by a serialization, FFI, or protocol boundary and wrapping them would add conversion coupling without enforcing a domain invariant."
+      ]
+    },
+    {
+      "guidance_ref": "long-parameter-list@1",
+      "smell_id": "long-parameter-list",
+      "version": 1,
+      "provenance": "refactoring_guru_verbatim",
+      "source_url": "https://refactoring.guru/smells/long-parameter-list",
+      "checked_on": "2026-09-25",
+      "items": [
+        "Don’t get rid of parameters if doing so would cause unwanted dependency between classes."
+      ]
+    },
+    {
+      "guidance_ref": "data-clumps@1",
+      "smell_id": "data-clumps",
+      "version": 1,
+      "provenance": "refactoring_guru_verbatim",
+      "source_url": "https://refactoring.guru/smells/data-clumps",
+      "checked_on": "2026-09-25",
+      "items": [
+        "Passing an entire object in the parameters of a method, instead of passing just its values (primitive types), may create an undesirable dependency between the two classes."
+      ]
+    },
+    {
+      "guidance_ref": "alternative-classes-with-different-interfaces@1",
+      "smell_id": "alternative-classes-with-different-interfaces",
+      "version": 1,
+      "provenance": "refactoring_guru_verbatim",
+      "source_url": "https://refactoring.guru/smells/alternative-classes-with-different-interfaces",
+      "checked_on": "2026-09-25",
+      "items": [
+        "Sometimes merging classes is impossible or so difficult as to be pointless. One example is when the alternative classes are in different libraries that each have their own version of the class."
+      ]
+    },
+    {
+      "guidance_ref": "refused-bequest@1",
+      "smell_id": "refused-bequest",
+      "version": 1,
+      "provenance": "smells_authored",
+      "source_url": "https://refactoring.guru/smells/refused-bequest",
+      "checked_on": "2026-09-25",
+      "items": [
+        "Ignore only when inheritance is intentionally required for type compatibility or a framework extension point and the subtype remains substitutable even though it does not use every inherited operation."
+      ]
+    },
+    {
+      "guidance_ref": "switch-statements@1",
+      "smell_id": "switch-statements",
+      "version": 1,
+      "provenance": "refactoring_guru_verbatim",
+      "source_url": "https://refactoring.guru/smells/switch-statements",
+      "checked_on": "2026-09-25",
+      "items": [
+        "When a switch operator performs simple actions, there’s no reason to make code changes.",
+        "Often switch operators are used by factory design patterns (Factory Method or Abstract Factory) to select a created class."
+      ]
+    },
+    {
+      "guidance_ref": "temporary-field@1",
+      "smell_id": "temporary-field",
+      "version": 1,
+      "provenance": "smells_authored",
+      "source_url": "https://refactoring.guru/smells/temporary-field",
+      "checked_on": "2026-09-25",
+      "items": [
+        "Ignore only when the optional state is intrinsic to the object’s explicit lifecycle protocol and splitting the roles would make valid state transitions or correctness harder to enforce."
+      ]
+    },
+    {
+      "guidance_ref": "divergent-change@1",
+      "smell_id": "divergent-change",
+      "version": 1,
+      "provenance": "smells_authored",
+      "source_url": "https://refactoring.guru/smells/divergent-change",
+      "checked_on": "2026-09-25",
+      "items": [
+        "Ignore only when one stable integration boundary deliberately centralizes closely related vendor or protocol changes and splitting it would scatter the invariant it protects."
+      ]
+    },
+    {
+      "guidance_ref": "parallel-inheritance-hierarchies@1",
+      "smell_id": "parallel-inheritance-hierarchies",
+      "version": 1,
+      "provenance": "refactoring_guru_verbatim",
+      "source_url": "https://refactoring.guru/smells/parallel-inheritance-hierarchies",
+      "checked_on": "2026-09-25",
+      "items": [
+        "Sometimes having parallel class hierarchies is just a way to avoid even bigger mess with program architecture. If you find that your attempts to de-duplicate hierarchies produce even uglier code, just step out, revert all of your changes and get used to that code."
+      ]
+    },
+    {
+      "guidance_ref": "shotgun-surgery@1",
+      "smell_id": "shotgun-surgery",
+      "version": 1,
+      "provenance": "smells_authored",
+      "source_url": "https://refactoring.guru/smells/shotgun-surgery",
+      "checked_on": "2026-09-25",
+      "items": [
+        "Ignore only when coordinated edits are generated or mechanically enforced, or implement an intentional cross-cutting contract whose migration is atomic and covered by tests."
+      ]
+    },
+    {
+      "guidance_ref": "comments@1",
+      "smell_id": "comments",
+      "version": 1,
+      "provenance": "refactoring_guru_verbatim",
+      "source_url": "https://refactoring.guru/smells/comments",
+      "checked_on": "2026-09-25",
+      "items": [
+        "When explaining why something is being implemented in a particular way.",
+        "When explaining complex algorithms (when all other methods for simplifying the algorithm have been tried and come up short)."
+      ]
+    },
+    {
+      "guidance_ref": "duplicate-code@1",
+      "smell_id": "duplicate-code",
+      "version": 1,
+      "provenance": "refactoring_guru_verbatim",
+      "source_url": "https://refactoring.guru/smells/duplicate-code",
+      "checked_on": "2026-09-25",
+      "items": [
+        "In very rare cases, merging two identical fragments of code can make the code less intuitive and obvious."
+      ]
+    },
+    {
+      "guidance_ref": "data-class@1",
+      "smell_id": "data-class",
+      "version": 1,
+      "provenance": "smells_authored",
+      "source_url": "https://refactoring.guru/smells/data-class",
+      "checked_on": "2026-09-25",
+      "items": [
+        "Ignore only when the class is an intentional immutable DTO, value, or serialization model and behavior elsewhere does not rely on mutable access to its internals."
+      ]
+    },
+    {
+      "guidance_ref": "dead-code@1",
+      "smell_id": "dead-code",
+      "version": 1,
+      "provenance": "smells_authored",
+      "source_url": "https://refactoring.guru/smells/dead-code",
+      "checked_on": "2026-09-25",
+      "items": [
+        "Ignore only when the code is a public, platform, reflection, or feature-gated entry point whose use the scanner cannot observe and its required contract is demonstrated by callers or tests."
+      ]
+    },
+    {
+      "guidance_ref": "lazy-class@1",
+      "smell_id": "lazy-class",
+      "version": 1,
+      "provenance": "refactoring_guru_verbatim",
+      "source_url": "https://refactoring.guru/smells/lazy-class",
+      "checked_on": "2026-09-25",
+      "items": [
+        "Sometimes a Lazy Class is created in order to delineate intentions for future development, In this case, try to maintain a balance between clarity and simplicity in your code."
+      ]
+    },
+    {
+      "guidance_ref": "speculative-generality@1",
+      "smell_id": "speculative-generality",
+      "version": 1,
+      "provenance": "refactoring_guru_verbatim",
+      "source_url": "https://refactoring.guru/smells/speculative-generality",
+      "checked_on": "2026-09-25",
+      "items": [
+        "If you’re working on a framework, it’s eminently reasonable to create functionality not used in the framework itself, as long as the functionality is needed by the frameworks’s users.",
+        "Before deleting elements, make sure that they aren’t used in unit tests. This happens if tests need a way to get certain internal information from a class or perform special testing-related actions."
+      ]
+    },
+    {
+      "guidance_ref": "feature-envy@1",
+      "smell_id": "feature-envy",
+      "version": 1,
+      "provenance": "refactoring_guru_verbatim",
+      "source_url": "https://refactoring.guru/smells/feature-envy",
+      "checked_on": "2026-09-25",
+      "items": [
+        "Sometimes behavior is purposefully kept separate from the class that holds the data. The usual advantage of this is the ability to dynamically change the behavior (see Strategy, Visitor and other patterns)."
+      ]
+    },
+    {
+      "guidance_ref": "inappropriate-intimacy@1",
+      "smell_id": "inappropriate-intimacy",
+      "version": 1,
+      "provenance": "smells_authored",
+      "source_url": "https://refactoring.guru/smells/inappropriate-intimacy",
+      "checked_on": "2026-09-25",
+      "items": [
+        "Ignore only when the access occurs inside an explicit bounded adapter, friend, or module relationship and is necessary to preserve an invariant without exposing internals more broadly."
+      ]
+    },
+    {
+      "guidance_ref": "incomplete-library-class@1",
+      "smell_id": "incomplete-library-class",
+      "version": 1,
+      "provenance": "refactoring_guru_verbatim",
+      "source_url": "https://refactoring.guru/smells/incomplete-library-class",
+      "checked_on": "2026-09-25",
+      "items": [
+        "Extending a library can generate additional work if the changes to the library involve changes in code."
+      ]
+    },
+    {
+      "guidance_ref": "message-chains@1",
+      "smell_id": "message-chains",
+      "version": 1,
+      "provenance": "refactoring_guru_verbatim",
+      "source_url": "https://refactoring.guru/smells/message-chains",
+      "checked_on": "2026-09-25",
+      "items": [
+        "Overly aggressive delegate hiding can cause code in which it’s hard to see where the functionality is actually occurring. Which is another way of saying, avoid the Middle Man smell as well."
+      ]
+    },
+    {
+      "guidance_ref": "middle-man@1",
+      "smell_id": "middle-man",
+      "version": 1,
+      "provenance": "refactoring_guru_verbatim",
+      "source_url": "https://refactoring.guru/smells/middle-man",
+      "checked_on": "2026-09-25",
+      "items": [
+        "A middle man may have been added to avoid interclass dependencies.",
+        "Some design patterns create middle man on purpose (such as Proxy or Decorator)."
+      ]
+    }
+  ]
+}

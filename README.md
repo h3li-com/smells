@@ -76,25 +76,25 @@ Choose one channel. Every channel provides the same Rust executable and rule beh
 General-purpose installation with [uv](https://docs.astral.sh/uv/concepts/tools/):
 
 ```sh
-uv tool install smells==0.4.0
+uv tool install smells==0.5.0
 smells --version
 ```
 
 Inside a Node project:
 
 ```sh
-npm install --save-dev --save-exact @mindful-time/smells@0.4.0
+npm install --save-dev --save-exact @mindful-time/smells@0.5.0
 npx --no-install smells --version
 ```
 
 With a Rust toolchain:
 
 ```sh
-cargo install --locked --version 0.4.0 smells
+cargo install --locked --version 0.5.0 smells
 smells --version
 ```
 
-Prebuilt archives for macOS, Linux, and Windows are available from the [v0.4.0 GitHub Release](https://github.com/mindful-time/smells/releases/tag/v0.4.0).
+Prebuilt archives for macOS, Linux, and Windows are available from the [v0.5.0 GitHub Release](https://github.com/mindful-time/smells/releases/tag/v0.5.0).
 
 ### 2. Add a policy to the repository
 
@@ -106,11 +106,11 @@ Choose the policy that matches the language being scanned:
 | Python | [`examples/python-quality-policy.json`](examples/python-quality-policy.json) |
 | TypeScript/TSX | [`examples/typescript-quality-policy.json`](examples/typescript-quality-policy.json) |
 
-For example, add the immutable v0.4.0 Python starter to another repository:
+For example, add the immutable v0.5.0 Python starter to another repository:
 
 ```sh
 curl -fsSLo quality-policy.json \
-  https://raw.githubusercontent.com/mindful-time/smells/v0.4.0/examples/python-quality-policy.json
+  https://raw.githubusercontent.com/mindful-time/smells/v0.5.0/examples/python-quality-policy.json
 smells contracts validate --policy quality-policy.json
 ```
 
@@ -118,17 +118,18 @@ Commit the policy. Local developers, CI, hooks, and coding agents should all use
 
 ### 3. Scan the repository
 
-Use the table for people and keep the complete JSON report for tools:
+Save the complete numbered Finding Log for people and agents, and the normalized JSON Evidence Report for tools:
 
 ```sh
 smells check \
   --path . \
   --policy quality-policy.json \
   --format table \
+  --log smells-findings.log \
   --report smells-report.json
 ```
 
-This is one scan. The terminal shows actionable matches while `smells-report.json` retains matched and nonmatching measurements, coverage states, digests, and implementation ownership.
+This is one scan. Terminal output stays compact and points to the Finding Log Issue Index. `smells-findings.log` contains every numbered error, blocking, ignored, and review detail; `smells-report.json` retains normalized measurements, matched findings, immutable guidance, suppression audits, coverage, digests, and ownership.
 
 Use JSON on standard output when another process consumes the report directly:
 
@@ -142,7 +143,7 @@ smells check --path . --policy quality-policy.json --format json
 
 | Exit | Meaning | Required action |
 | ---: | --- | --- |
-| `0` | Every selected active required rule completed and passed | Continue; review-only signals may still exist |
+| `0` | Every selected active required rule completed without an unsuppressed match | Continue; inspect any explicit ignored findings and review-only signals |
 | `1` | One or more required rules matched | Review the blocking findings |
 | `2` | The scan was invalid or incomplete | Fix the input, policy, parser, ownership, history, budget, or evidence error |
 
@@ -184,13 +185,14 @@ Put this section in the consuming repository's root `AGENTS.md`:
 ```md
 ## Smell review
 
-- Run `smells check --path . --policy quality-policy.json --format table --report smells-report.json` before reviewing or refactoring code smells.
+- Run `smells check --path . --policy quality-policy.json --format table --log smells-findings.log --report smells-report.json` before reviewing or refactoring code smells.
 - Treat exit code 2 as an incomplete scan, never as a clean result.
-- Review blocking findings before review-only signals.
+- Open `smells-findings.log`, start at its Issue Index, and read every referenced error, blocking, ignored, and review detail.
 - Treat each finding as evidence to investigate, not proof that a defect exists.
-- Before judging or changing a matched finding, open and read its exact `diagnostic.reference_url`.
-- NON-NEGOTIABLE RESEARCH: If the URL cannot be consulted, report the research as incomplete and stop review or remediation for that finding.
-- Verify the finding against the surrounding design, tests, and repository contracts.
+- Before review, remediation, or suppression, open and read the exact reference URL and its `when_to_ignore` guidance.
+- NON-NEGOTIABLE RESEARCH: If the URL cannot be consulted, report the research as incomplete and stop review, remediation, and suppression for that finding.
+- Verify the complete finding against its declaration, related locations, callers, tests, and repository contracts.
+- Add `smells: ignore[exact-rule-id] -- non-empty reason` only when the verified exception applies to the next declaration; never add it merely to pass the hook.
 - Prefer small behavior-preserving changes. Run the project's tests and rerun Smells after editing.
 ```
 
@@ -249,6 +251,7 @@ quality-policy.json   reviewed rules, modes, thresholds, exclusions, and budgets
 AGENTS.md             shared human/agent review contract
 CLAUDE.md             optional `@AGENTS.md` import
 smells-report.json    generated report; usually ignored by Git
+smells-findings.log   generated numbered agent log; usually ignored by Git
 ```
 
 Pin the Smells version in the installation command. Upgrade the executable and policy contract deliberately, then review the resulting report changes.
@@ -258,16 +261,17 @@ Pin the Smells version in the installation command. Upgrade the executable and p
 Add the same command to the repository's existing quality job:
 
 ```sh
-uvx --from smells==0.4.0 smells check \
+uvx --from smells==0.5.0 smells check \
   --path . \
   --policy quality-policy.json \
   --format table \
+  --log smells-findings.log \
   --report smells-report.json
 ```
 
 For GitHub Actions, check out full history with `fetch-depth: 0`. Divergent Change and Shotgun Surgery use up to 200 commits of bounded Git co-change history.
 
-Preserve `smells-report.json` as a CI artifact when agents or reviewers need the complete evidence. Let exit `1` block configured violations and exit `2` block incomplete analysis.
+Preserve both artifacts. Let exit `1` block configured violations and exit `2` block incomplete analysis.
 
 ### Run it before commits
 
@@ -282,7 +286,7 @@ repos:
       - id: smells
         name: deterministic smell scan
         language: system
-        entry: uvx --from smells==0.4.0 smells check --staged --policy quality-policy.json --format json
+        entry: uvx --from smells==0.5.0 smells check --staged --policy quality-policy.json --format table --log smells-findings.log --report smells-report.json
         pass_filenames: false
 ```
 
@@ -376,10 +380,10 @@ Run the project's compiler, type checker, tests, fresh coverage, and security to
 
 | Channel | Package | Installation |
 | --- | --- | --- |
-| PyPI | [`smells`](https://pypi.org/project/smells/0.4.0/) | `uv tool install smells==0.4.0` |
-| npm | [`@mindful-time/smells`](https://www.npmjs.com/package/@mindful-time/smells/v/0.4.0) | `npm install --save-dev --save-exact @mindful-time/smells@0.4.0` |
-| crates.io | [`smells`](https://crates.io/crates/smells/0.4.0) | `cargo install --locked --version 0.4.0 smells` |
-| GitHub | [v0.4.0 release](https://github.com/mindful-time/smells/releases/tag/v0.4.0) | Download the archive for the host platform |
+| PyPI | [`smells`](https://pypi.org/project/smells/0.5.0/) | `uv tool install smells==0.5.0` |
+| npm | [`@mindful-time/smells`](https://www.npmjs.com/package/@mindful-time/smells/v/0.5.0) | `npm install --save-dev --save-exact @mindful-time/smells@0.5.0` |
+| crates.io | [`smells`](https://crates.io/crates/smells/0.5.0) | `cargo install --locked --version 0.5.0 smells` |
+| GitHub | [v0.5.0 release](https://github.com/mindful-time/smells/releases/tag/v0.5.0) | Download the archive for the host platform |
 
 All registry payloads originate from one immutable GitHub Release. Protected workflows verify its commit, attestations, checksums, and exact assets before publishing through short-lived identities.
 
@@ -404,7 +408,7 @@ Run the deterministic local gate:
 make pre-commit-push
 ```
 
-It runs formatting, build, Clippy, 131 offline tests, the scanner against itself, CRAP analysis, Gitleaks, and OSV. Pull requests run the same fail-closed gate and must originate from a fork.
+It runs formatting, build, Clippy, the offline test suite, the scanner against itself, CRAP analysis, Gitleaks, and OSV. Pull requests run the same fail-closed gate and must originate from a fork.
 
 The optional live test exercises the complete finding-to-Refactoring.Guru research path:
 
@@ -414,6 +418,6 @@ cargo test --locked --test e2e_live -- --ignored --nocapture
 
 ## Project status
 
-Version `0.4.0` is available from GitHub Releases, PyPI, npm, GitHub Packages, and crates.io. Smells is open-source software licensed under the [MIT License](LICENSE).
+Version `0.5.0` is prepared for GitHub Releases, PyPI, npm, GitHub Packages, and crates.io. Smells is open-source software licensed under the [MIT License](LICENSE).
 
 Repository: [mindful-time/smells](https://github.com/mindful-time/smells)

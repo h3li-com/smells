@@ -144,6 +144,49 @@ fn policy_show_explains_the_resolved_all_active_policy() {
         28
     );
     for rule in value["rules"].as_array().unwrap() {
+        assert_eq!(
+            rule["guidance_ref"],
+            format!("{}@1", rule["smell_id"].as_str().unwrap()),
+            "{} must inherit versioned smell guidance",
+            rule["rule_id"]
+        );
+        let when_to_ignore = rule["when_to_ignore"].as_object().unwrap_or_else(|| {
+            panic!(
+                "{} must resolve its smell-level when_to_ignore guidance",
+                rule["rule_id"]
+            )
+        });
+        assert_eq!(when_to_ignore["version"], 1, "{}", rule["rule_id"]);
+        assert!(
+            matches!(
+                when_to_ignore["provenance"].as_str(),
+                Some("refactoring_guru_verbatim" | "smells_authored")
+            ),
+            "{} has invalid guidance provenance",
+            rule["rule_id"]
+        );
+        assert!(
+            when_to_ignore["source_url"]
+                .as_str()
+                .is_some_and(|url| url.starts_with("https://refactoring.guru/")),
+            "{} must identify its source page",
+            rule["rule_id"]
+        );
+        assert_eq!(
+            when_to_ignore["checked_on"], "2026-09-25",
+            "{}",
+            rule["rule_id"]
+        );
+        assert!(
+            when_to_ignore["items"]
+                .as_array()
+                .is_some_and(|items| !items.is_empty()
+                    && items
+                        .iter()
+                        .all(|item| item.as_str().is_some_and(|text| !text.trim().is_empty()))),
+            "{} must provide ordered non-empty guidance items",
+            rule["rule_id"]
+        );
         if rule["required_inputs"]
             .as_array()
             .unwrap()
@@ -158,6 +201,17 @@ fn policy_show_explains_the_resolved_all_active_policy() {
             );
         }
     }
+
+    let table = Command::new(env!("CARGO_BIN_EXE_smells"))
+        .args(["policy", "show", "--policy", "examples/quality-policy.json"])
+        .output()
+        .unwrap();
+    assert_eq!(table.status.code(), Some(0), "{table:?}");
+    let table = String::from_utf8(table.stdout).unwrap();
+    assert!(table.contains("Resolved policy: examples/quality-policy.json (rust-v1 / rust)"));
+    assert!(table.contains("Active rules: 28/28 | defaults: all"));
+    assert!(table.contains("Guidance: long-method@1"));
+    assert!(table.contains("When to ignore:"));
 }
 
 #[test]
@@ -316,10 +370,18 @@ fn default_rust_scan_detects_compiler_and_type_shape_signals_without_evidence() 
         "rust.port_conformance",
     ] {
         assert!(matched(&data, rule), "missing built-in match for {rule}");
-        assert!(data["findings"].as_array().unwrap().iter().any(|finding| {
-            finding["rule_id"] == rule
-                && finding["evidence"]["provider"]["name"] == "smells-built-in"
-        }));
+        let finding = data["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|finding| finding["rule_id"] == rule)
+            .unwrap();
+        let measurement = finding_measurement(&data, finding);
+        let provider_ref = measurement["evidence"]["provider_ref"].as_u64().unwrap() as usize;
+        assert_eq!(
+            data["evidence_provider_catalog"][provider_ref]["name"],
+            "smells-built-in"
+        );
     }
     assert_eq!(
         finding(&data, "rust.unused_code", "unused-private-declarations")["evaluation"]["metric"],
@@ -456,8 +518,12 @@ fn finding<'a>(report: &'a Value, rule: &str, suffix: &str) -> &'a Value {
         .as_array()
         .unwrap()
         .iter()
+        .chain(report["measurements"].as_array().unwrap().iter())
         .find(|f| f["rule_id"] == rule && f["symbol"].as_str().unwrap().ends_with(suffix))
         .unwrap_or_else(|| panic!("missing {rule} {suffix}"))
+}
+fn finding_measurement<'a>(report: &'a Value, finding: &Value) -> &'a Value {
+    &report["measurements"][finding["measurement_index"].as_u64().unwrap() as usize]
 }
 fn matched(report: &Value, rule: &str) -> bool {
     report["findings"].as_array().unwrap().iter().any(|f| {
@@ -656,7 +722,7 @@ fn catalog_fixture_exercises_every_authored_source_rule() {
         "rust.trait_functions",
     ] {
         assert!(
-            data["findings"]
+            data["measurements"]
                 .as_array()
                 .unwrap()
                 .iter()
@@ -719,11 +785,11 @@ fn catalog_fixture_exercises_every_authored_source_rule() {
             );
             assert_eq!(
                 rule["reference_check"]["required_before"],
-                "review_or_remediation"
+                "review_remediation_or_suppression"
             );
             assert_eq!(
                 rule["reference_check"]["unavailable_action"],
-                "report_reference_research_incomplete_and_do_not_review_or_remediate"
+                "report_reference_research_incomplete_and_do_not_review_remediate_or_suppress"
             );
         }
     }
@@ -746,7 +812,20 @@ fn report_aggregates_rule_evidence_by_canonical_smell_pattern() {
     let output = workspace.check();
     assert_eq!(output.status.code(), Some(1));
     let data = report(&output);
-    assert_eq!(data["report_schema_version"], 6);
+    assert_eq!(data["report_schema_version"], 7);
+    assert_eq!(data["guidance_catalog"].as_array().unwrap().len(), 23);
+    assert!(
+        data["measurements"].as_array().unwrap().len() > data["findings"].as_array().unwrap().len(),
+        "unmatched evaluations must remain compact measurements, not findings"
+    );
+    assert!(
+        data["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|finding| finding["evaluation"]["matched"] == true),
+        "schema-7 findings contain only matched evaluations"
+    );
     let results = data["smell_results"].as_array().unwrap();
     assert_eq!(results.len(), 23);
     assert_eq!(results[0]["smell_id"], "long-method");
@@ -850,6 +929,85 @@ fn table_output_is_actionable_while_json_report_is_saved() {
 }
 
 #[test]
+fn hook_mode_saves_one_indexed_finding_log_and_keeps_stdout_compact() {
+    let workspace =
+        Workspace::new("pub struct Account {\n    pub name: String,\n    pub email: String,\n}\n");
+    let output = workspace.command(&[
+        "check",
+        "--path",
+        ".",
+        "--policy",
+        "quality-policy.json",
+        "--only-group",
+        "source",
+        "--format",
+        "table",
+        "--report",
+        "smells-report.json",
+        "--log",
+        "smells-findings.log",
+    ]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("verdict: required_checks_passed_with_review_signals"));
+    assert!(stdout.contains("Finding Log: smells-findings.log"));
+    assert!(stdout.contains("Start at the Issue Index"));
+    assert!(!stdout.contains("Actionable finding"));
+
+    let log = fs::read_to_string(workspace.path.join("smells-findings.log")).unwrap();
+    let lines: Vec<_> = log.lines().collect();
+    assert_eq!(lines[0], "Smells Finding Log");
+    assert!(lines.contains(&"Issue Index"));
+    let index_line = lines
+        .iter()
+        .find(|line| {
+            line.starts_with("F000001 | review | rust.data_class | src/lib.rs:1:12 | detail line ")
+        })
+        .expect("indexed finding");
+    let detail_line: usize = index_line.rsplit_once(' ').unwrap().1.parse().unwrap();
+    assert_eq!(lines[detail_line - 1], "Finding F000001");
+    assert!(log.contains("When to ignore [data-class@1]"));
+    assert!(log.contains("Provenance: smells_authored"));
+    assert!(
+        log.contains("Suppression form: smells: ignore[rust.data_class] -- <non-empty reason>")
+    );
+    assert!(log.contains("inspect the complete finding, reference, source, callers, and tests"));
+
+    let saved: Value =
+        serde_json::from_slice(&fs::read(workspace.path.join("smells-report.json")).unwrap())
+            .unwrap();
+    assert_eq!(saved["findings"][0]["finding_id"], "F000001");
+}
+
+#[test]
+fn next_declaration_suppression_covers_a_finding_inside_its_body() {
+    let workspace = Workspace::new(
+        "struct Root;\n// smells: ignore[rust.navigation_chains] -- fluent traversal is the public API\nfn read(root: Root) { let _ = root.first.second.third; }\n",
+    );
+    workspace.git(&["init", "-q"]);
+    let output = workspace.command(&[
+        "check",
+        "--path",
+        ".",
+        "--policy",
+        "quality-policy.json",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let data = report(&output);
+    let finding = data["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| finding["rule_id"] == "rust.navigation_chains")
+        .expect("navigation finding remains visible");
+    assert_eq!(finding["status"], "ignored_match");
+    assert_eq!(finding["suppression"]["target_location"]["line"], 3);
+    assert_eq!(finding["suppression"]["target_end_line"], 3);
+}
+
+#[test]
 fn self_smell_script_keeps_actionable_output_visible() {
     let output_directory = std::env::temp_dir().join(format!(
         "smells-self-check-{}-{}",
@@ -858,11 +1016,13 @@ fn self_smell_script_keeps_actionable_output_visible() {
     ));
     fs::create_dir(&output_directory).unwrap();
     let report_path = output_directory.join("smells-report.json");
+    let log_path = output_directory.join("smells-findings.log");
     let output = Command::new("sh")
         .arg("scripts/self-smell-check.sh")
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .env("SMELLS_BIN", env!("CARGO_BIN_EXE_smells"))
         .env("SMELLS_REPORT", &report_path)
+        .env("SMELLS_FINDING_LOG", &log_path)
         .output()
         .unwrap();
 
@@ -870,16 +1030,24 @@ fn self_smell_script_keeps_actionable_output_visible() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     for expected in [
         "Scan summary | verdict:",
-        "Matched evidence for .:",
-        "Actionable findings for .:",
-        "Observed versus threshold:",
+        "Finding Log:",
+        "Start at the Issue Index",
+        "JSON Evidence Report:",
+        "self smell scan passed; complete Finding Log:",
+    ] {
+        assert!(stdout.contains(expected), "missing {expected:?}");
+    }
+    let log = fs::read_to_string(&log_path).unwrap();
+    for expected in [
+        "Issue Index",
+        "Policy evaluation:",
         "Source excerpt:",
         "Remediation:",
         "Reference URL: https://refactoring.guru/smells/",
+        "When to ignore [",
         "Review guidance: NON-NEGOTIABLE RESEARCH:",
-        "self smell scan passed; complete deterministic JSON report:",
     ] {
-        assert!(stdout.contains(expected), "missing {expected:?}");
+        assert!(log.contains(expected), "missing {expected:?}");
     }
     let saved: Value = serde_json::from_slice(&fs::read(&report_path).unwrap()).unwrap();
     assert!(saved["summary"]["matched_findings"].as_u64().unwrap() > 0);
@@ -940,7 +1108,7 @@ fn smell_results_distinguish_checked_disabled_and_inapplicable_patterns() {
 }
 
 #[test]
-fn matched_findings_are_self_contained_llm_diagnostics() {
+fn matched_findings_resolve_normalized_measurements_and_llm_diagnostics() {
     let workspace = Workspace::new(&format!(
         "{}fn overloaded(a:i32,b:i32,c:i32,d:i32,e:i32,f:i32,g:i32,h:i32){{}}",
         " ".repeat(500)
@@ -950,6 +1118,21 @@ fn matched_findings_are_self_contained_llm_diagnostics() {
     let data = report(&output);
     assert_eq!(data["summary"]["verdict"], "blocked_by_required_patterns");
     let finding = finding(&data, "rust.function_arguments", "::overloaded");
+    assert_eq!(finding["guidance_ref"], "long-parameter-list@1");
+    let inherited_guidance = data["guidance_catalog"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|guidance| guidance["guidance_ref"] == finding["guidance_ref"])
+        .expect("finding guidance reference must resolve offline");
+    assert_eq!(
+        inherited_guidance["provenance"],
+        "refactoring_guru_verbatim"
+    );
+    assert_eq!(
+        inherited_guidance["items"][0],
+        "Don’t get rid of parameters if doing so would cause unwanted dependency between classes."
+    );
     assert_eq!(finding["smell_id"], "long-parameter-list");
     assert_eq!(finding["smell"], "Long Parameter List");
     assert_eq!(finding["category"], "bloaters");
@@ -981,11 +1164,11 @@ fn matched_findings_are_self_contained_llm_diagnostics() {
     );
     assert_eq!(
         finding["diagnostic"]["reference_check"]["required_before"],
-        "review_or_remediation"
+        "review_remediation_or_suppression"
     );
     assert_eq!(
         finding["diagnostic"]["reference_check"]["unavailable_action"],
-        "report_reference_research_incomplete_and_do_not_review_or_remediate"
+        "report_reference_research_incomplete_and_do_not_review_remediate_or_suppress"
     );
     assert!(
         finding["diagnostic"]["review"]
@@ -1010,16 +1193,13 @@ fn matched_findings_are_self_contained_llm_diagnostics() {
     ] {
         assert!(!finding["diagnostic"][field].as_str().unwrap().is_empty());
     }
-    let excerpt = &finding["source_excerpt"];
-    assert_eq!(excerpt["focus_line"], 1);
-    assert!(excerpt["focus_column"].as_u64().unwrap() > 500);
-    assert!(
-        excerpt["lines"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("fn overloaded")
-    );
-    assert_eq!(excerpt["lines"][0]["truncated_before"], true);
+    assert!(finding.get("source_excerpt").is_none());
+    assert!(finding.get("evidence").is_none());
+    let measurement = finding_measurement(&data, finding);
+    assert_eq!(measurement["symbol"], finding["symbol"]);
+    assert_eq!(measurement["location"], finding["location"]);
+    assert_eq!(measurement["evaluation"]["observed"], 8);
+    assert_eq!(measurement["evaluation"]["matched"], true);
 }
 
 #[test]
@@ -1511,8 +1691,10 @@ fn duplicate_similarity_compares_the_fraction_without_rounding() {
                 json!({"intersection":17,"union":18})
             );
             assert_eq!(finding["related_locations"].as_array().unwrap().len(), 1);
+            assert!(finding.get("related_source_excerpts").is_none());
+            let measurement = finding_measurement(&data, finding);
             assert_eq!(
-                finding["related_source_excerpts"].as_array().unwrap().len(),
+                measurement["related_locations"].as_array().unwrap().len(),
                 1
             );
         }
@@ -1751,7 +1933,7 @@ fn nested_named_functions_are_measured_once_at_every_depth() {
     let workspace = Workspace::new("fn outer(){fn middle(){fn inner(){} inner();} middle();}");
     let data = report(&workspace.check());
     assert_eq!(
-        data["findings"]
+        data["measurements"]
             .as_array()
             .unwrap()
             .iter()
@@ -1791,7 +1973,7 @@ fn built_in_rust_callable_population_matches_body_metrics_and_excludes_required_
     assert_eq!(output.status.code(), Some(0), "{output:?}");
     let data = report(&output);
     let locations = |rule: &str| {
-        data["findings"]
+        data["measurements"]
             .as_array()
             .unwrap()
             .iter()
@@ -1809,19 +1991,31 @@ fn built_in_rust_callable_population_matches_body_metrics_and_excludes_required_
         locations("rust.function_lines")
     );
     for name in ["nested_trait", "nested_method", "nested_free"] {
-        assert!(data["findings"].as_array().unwrap().iter().any(|finding| {
-            finding["rule_id"] == "rust.function_crap"
-                && finding["symbol"]
-                    .as_str()
-                    .is_some_and(|symbol| symbol.contains(name))
-        }));
+        assert!(
+            data["measurements"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|finding| {
+                    finding["rule_id"] == "rust.function_crap"
+                        && finding["symbol"]
+                            .as_str()
+                            .is_some_and(|symbol| symbol.contains(name))
+                })
+        );
     }
-    assert!(data["findings"].as_array().unwrap().iter().all(|finding| {
-        finding["rule_id"] != "rust.function_crap"
-            || !finding["symbol"]
-                .as_str()
-                .is_some_and(|symbol| symbol.contains("required"))
-    }));
+    assert!(
+        data["measurements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|finding| {
+                finding["rule_id"] != "rust.function_crap"
+                    || !finding["symbol"]
+                        .as_str()
+                        .is_some_and(|symbol| symbol.contains("required"))
+            })
+    );
     assert_eq!(
         finding(
             &data,

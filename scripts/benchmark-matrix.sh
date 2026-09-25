@@ -23,7 +23,7 @@ matrix_languages=${SMELLS_MATRIX_LANGUAGES:-"rust python typescript"}
 matrix_shapes=${SMELLS_MATRIX_SHAPES:-"no-clone clone-heavy short long"}
 matrix_thresholds=${SMELLS_MATRIX_THRESHOLDS:-"5000 6000 7000 8200 9000 9500"}
 matrix_cache_modes=${SMELLS_MATRIX_CACHE_MODES:-"cold warm"}
-matrix_threads=${SMELLS_MATRIX_THREADS:-"1 default"}
+matrix_threads=${SMELLS_MATRIX_THREADS:-"1 4 default"}
 
 write_policy() {
     language=$1

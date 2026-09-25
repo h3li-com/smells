@@ -2,7 +2,7 @@
   "schema_version": 1,
   "rule_pack": "python-v1",
   "language": "python",
-  "catalog": {"source":"https://refactoring.guru/refactoring/smells","checked_on":"2026-09-19","item_count":23},
+  "catalog": {"source":"https://refactoring.guru/refactoring/smells","checked_on":"2026-09-19","item_count":23,"guidance_pack":"when-to-ignore-v1"},
   "smells": [
     {"id":"long-method","name":"Long Method","category":"bloaters","applicability":"applicable","rules":["python.function_lines","python.function_crap"]},
     {"id":"large-class","name":"Large Class","category":"bloaters","applicability":"applicable","rules":["python.class_fields","python.class_methods","python.class_method_lines"]},
