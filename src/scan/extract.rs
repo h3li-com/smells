@@ -312,13 +312,16 @@ fn function(
         "signature inputs including receiver",
     );
     if body.is_some() {
-        report.maximum(
+        report.maximum_with_role(
             &input.policy,
             "rust.function_lines",
             &symbol,
             &loc,
-            lines,
-            "body code lines",
+            crate::report::RoleAdjustedMaximum::new(
+                lines,
+                "body code lines",
+                crate::migration::function_role(input, &module.path, &symbol, owner.as_deref()),
+            ),
         );
     }
     let parameters: Vec<_> = signature
@@ -494,26 +497,29 @@ pub(super) fn functions(facts: &mut Facts, input: &Input, report: &mut Report) {
     }
 }
 
-pub(super) fn record_type_metrics(facts: &Facts, policy: &Policy, report: &mut Report) {
+pub(super) fn record_type_metrics(facts: &Facts, input: &Input, report: &mut Report) {
     for (symbol, ty) in &facts.types {
         report.maximum(
-            policy,
+            &input.policy,
             "rust.type_functions",
             symbol,
             &ty.location,
             ty.functions.len(),
             "owned associated functions",
         );
-        report.maximum(
-            policy,
+        report.maximum_with_role(
+            &input.policy,
             "rust.type_function_lines",
             symbol,
             &ty.location,
-            ty.functions
-                .iter()
-                .map(|index| facts.functions[*index].lines)
-                .sum(),
-            "summed associated body code lines",
+            crate::report::RoleAdjustedMaximum::new(
+                ty.functions
+                    .iter()
+                    .map(|index| facts.functions[*index].lines)
+                    .sum(),
+                "summed associated body code lines",
+                crate::migration::type_role(input, &ty.location.path, symbol),
+            ),
         );
     }
 }

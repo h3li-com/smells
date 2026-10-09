@@ -48,6 +48,7 @@ fn fact_cache_key(path: &str, source: &str, registry: &Registry, needs: RuleNeed
         crate::input::digest(&[
             b"portable-facts-v1",
             include_bytes!("../portable.rs"),
+            include_bytes!("extract.rs"),
             include_bytes!("../../Cargo.lock"),
         ])
     });

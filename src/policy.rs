@@ -117,6 +117,16 @@ pub struct Limits {
     pub maximum_group_combinations: usize,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceRoleDeclaration {
+    pub role: String,
+    pub framework: String,
+    pub paths: Vec<String>,
+    #[serde(default)]
+    pub configuration: Vec<String>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Policy {
@@ -127,6 +137,8 @@ pub struct Policy {
     #[serde(default = "all_default_groups")]
     pub default_groups: Vec<String>,
     pub exclude_directories: Vec<String>,
+    #[serde(default)]
+    pub source_roles: Vec<SourceRoleDeclaration>,
     pub limits: Limits,
     #[serde(deserialize_with = "unique_map")]
     pub rules: BTreeMap<String, Selection>,
@@ -314,7 +326,7 @@ fn validate_applicability(registry: &Registry) -> Result<(), String> {
 }
 
 fn valid_rule(rule: &Rule, registry: &Registry) -> bool {
-    rule.version == 1
+    rule.version > 0
         && !rule.inputs.is_empty()
         && !rule.contract.is_empty()
         && matches!(
@@ -478,6 +490,113 @@ fn validate_exclusions(policy: &Policy) -> Result<(), String> {
         || !exclusions.contains(".git")
     {
         return Err("exclude_directories must be unique directory names and include .git".into());
+    }
+    Ok(())
+}
+
+fn valid_anchored_role_path(path: &str, allow_glob: bool) -> bool {
+    if !path.starts_with('/')
+        || path.len() == 1
+        || path.contains('\\')
+        || path.contains("//")
+        || path
+            .split('/')
+            .any(|component| matches!(component, "." | ".."))
+    {
+        return false;
+    }
+    if allow_glob {
+        !path.contains(['?', '[', ']', '{', '}'])
+    } else {
+        !path.contains('*') && !path.contains(['?', '[', ']', '{', '}'])
+    }
+}
+
+fn framework_supported(language: &str, framework: &str) -> bool {
+    match language {
+        "python" => matches!(framework, "alembic" | "django"),
+        "typescript" => matches!(
+            framework,
+            "typeorm" | "knex" | "mikro_orm" | "kysely" | "sequelize_umzug" | "prisma_8"
+        ),
+        "rust" => matches!(framework, "sea_orm" | "refinery" | "rusqlite_migration"),
+        _ => false,
+    }
+}
+
+fn valid_source_role_declaration(declaration: &SourceRoleDeclaration, registry: &Registry) -> bool {
+    let unique_paths = declaration.paths.iter().collect::<BTreeSet<_>>();
+    let unique_configuration = declaration.configuration.iter().collect::<BTreeSet<_>>();
+    declaration.role == "database_migration"
+        && framework_supported(&registry.language, &declaration.framework)
+        && !declaration.paths.is_empty()
+        && unique_paths.len() == declaration.paths.len()
+        && unique_configuration.len() == declaration.configuration.len()
+        && declaration
+            .paths
+            .iter()
+            .all(|path| valid_anchored_role_path(path, true))
+        && declaration
+            .configuration
+            .iter()
+            .all(|path| valid_anchored_role_path(path, false))
+}
+
+fn validate_source_role_directories(
+    declaration: &SourceRoleDeclaration,
+    excluded_directories: &[String],
+) -> Result<(), String> {
+    for path in declaration.paths.iter().chain(&declaration.configuration) {
+        if path.split('/').any(|component| {
+            excluded_directories
+                .iter()
+                .any(|excluded| excluded == component)
+        }) {
+            return Err(format!(
+                "source role path traverses an excluded directory: {path}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn record_source_role_identity<'a>(
+    declaration: &'a SourceRoleDeclaration,
+    identities: &mut BTreeSet<(&'a str, &'a str, &'a Vec<String>, &'a Vec<String>)>,
+    scopes: &mut BTreeMap<&'a str, &'a str>,
+) -> Result<(), String> {
+    let identity = (
+        declaration.role.as_str(),
+        declaration.framework.as_str(),
+        &declaration.paths,
+        &declaration.configuration,
+    );
+    if !identities.insert(identity) {
+        return Err("duplicate source role declaration".into());
+    }
+    for path in &declaration.paths {
+        if let Some(previous) = scopes.insert(path, &declaration.framework) {
+            return Err(format!(
+                "duplicate or ambiguous source role path scope: {path} ({previous}, {})",
+                declaration.framework
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_source_roles(policy: &Policy, registry: &Registry) -> Result<(), String> {
+    let mut identities = BTreeSet::new();
+    let mut scopes = BTreeMap::<&str, &str>::new();
+    for declaration in &policy.source_roles {
+        if !valid_source_role_declaration(declaration, registry) {
+            return Err(format!(
+                "invalid source role declaration for {}",
+                declaration.framework
+            ));
+        }
+        validate_source_role_directories(declaration, &policy.exclude_directories)?;
+        record_source_role_identity(declaration, &mut identities, &mut scopes)?;
     }
     Ok(())
 }
@@ -715,6 +834,7 @@ pub fn parse_with_selection(
     validate_scope(&policy, registry)?;
     validate_budgets_and_exceptions(&policy)?;
     validate_exclusions(&policy)?;
+    validate_source_roles(&policy, registry)?;
     validate_selected_rules(&policy, registry)?;
     validate_rule_parameters(&policy, registry)?;
     policy.resolved = resolve_selection(&policy, registry, options)?;

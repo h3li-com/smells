@@ -36,6 +36,18 @@ _Avoid_: Smell summary, policy rule
 A compact deterministic evaluation of one rule against one source subject, whether or not it matches. An unmatched Measurement preserves the value and threshold needed for coverage and audit but does not repeat finding-only diagnostic or guidance prose.
 _Avoid_: Finding, violation
 
+**Source Role**:
+A scanner-resolved classification that an authored file has a framework-defined responsibility such as `database_migration`. A Consumer Policy may declare an anchored discovery scope and framework when dynamic configuration, wrapper types, or custom providers prevent static inference, but it cannot name a Declaration Role or choose a rule disposition. The scanner still verifies the framework-specific declaration shape. The file remains in the corpus, ownership, digest, history, Measurements, and Findings. Resolution records framework, owning Implementation, declared-or-inferred source, confidence, and evidence.
+_Avoid_: Directory exclusion, suppression, policy exception
+
+**Declaration Role**:
+A scanner-owned classification of one exact framework declaration inside a resolved Source Role, such as `migration_up` or `migration_sql_builder`. For an inferred Source Role, the declaration must bind to statically resolved framework imports and types. For an explicit Source Role, the declared framework supplies that file-level evidence while the scanner still requires its canonical top-level export or direct class relationship, entrypoint set, and parameter presence. Nearby helpers, callbacks, sibling declarations, and same-named functions that do not satisfy that structure do not inherit it.
+_Avoid_: Whole-file exemption, name-only match, source role
+
+**Role-Adjusted Finding**:
+A matched Finding whose exact Declaration Role changes one rule's applicability under the versioned Rule Pack. It retains the original Measurement and remains a review signal, but a `reported_by_role` disposition does not block even when the rule mode is `required`. This is scanner-owned applicability, not a Consumer Policy suppression; an explicit policy role can resolve file-level framework ownership but cannot select the declaration or assign the disposition.
+_Avoid_: Ignored finding, hidden finding, policy exception
+
 **Guidance Reference**:
 A stable link from a Finding to exactly one immutable Rule Pack guidance record. An Evidence Report stores the referenced When to Ignore text once, while every rendered human or agent view of the Finding must resolve and display the complete guidance rather than leaving the reader to infer it.
 _Avoid_: Optional link, consumer override

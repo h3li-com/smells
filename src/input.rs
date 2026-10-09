@@ -9,7 +9,9 @@ use std::{
 
 pub struct Input {
     pub files: BTreeMap<String, String>,
+    pub artifacts: BTreeMap<String, Vec<u8>>,
     pub implementations: Vec<Implementation>,
+    pub source_roles: Vec<crate::migration::ResolvedSourceRole>,
     pub history: History,
     pub policy: Policy,
     pub digest: String,
@@ -82,6 +84,12 @@ fn source_file(path: &Path, language: &str) -> bool {
         "typescript" => matches!(extension, Some("ts" | "tsx" | "mts" | "cts")),
         _ => false,
     }
+}
+
+fn migration_artifact_candidate(path: &Path, registry: &Registry) -> bool {
+    path.to_str().is_some_and(|path| {
+        crate::migration::migration_artifact_path_candidate(&registry.rule_pack, path)
+    })
 }
 
 fn runtime_manifest(path: &Path) -> Option<(&'static str, &'static str)> {
@@ -214,10 +222,8 @@ fn capture_working_file(
     if name.contains('\\') {
         return Err("backslash source paths are not supported in the portable corpus".into());
     }
-    let source = text(
-        fs::read(path).map_err(|e| format!("cannot read {name}: {e}"))?,
-        &name,
-    )?;
+    let bytes = fs::read(path).map_err(|e| format!("cannot read {name}: {e}"))?;
+    let source = text(bytes, &name)?;
     if runtime_manifest(path).is_some() {
         manifests.insert(name, source);
     } else {
@@ -259,9 +265,110 @@ fn walk_entry(
     Ok(())
 }
 
+struct ArtifactRecognizer<'a> {
+    rule_pack: &'a str,
+    files: &'a BTreeMap<String, String>,
+    implementations: &'a [Implementation],
+    index: &'a crate::migration::MigrationArtifactIndex,
+}
+
+impl ArtifactRecognizer<'_> {
+    fn recognizes(&self, path: &str) -> bool {
+        crate::migration::is_recognized_migration_artifact(
+            self.rule_pack,
+            self.files,
+            self.index,
+            self.implementations,
+            path,
+        )
+    }
+}
+
+fn walk_migration_artifacts(
+    root: &Path,
+    dir: &Path,
+    policy: &Policy,
+    registry: &Registry,
+    recognizer: &ArtifactRecognizer<'_>,
+    artifacts: &mut BTreeMap<String, Vec<u8>>,
+) -> Result<(), String> {
+    let mut entries = fs::read_dir(dir)
+        .map_err(|e| format!("cannot enumerate migration artifact directory: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("cannot enumerate migration artifact entry: {e}"))?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        walk_migration_artifact_entry(root, entry, policy, registry, recognizer, artifacts)?;
+    }
+    Ok(())
+}
+
+fn walk_migration_artifact_entry(
+    root: &Path,
+    entry: fs::DirEntry,
+    policy: &Policy,
+    registry: &Registry,
+    recognizer: &ArtifactRecognizer<'_>,
+    artifacts: &mut BTreeMap<String, Vec<u8>>,
+) -> Result<(), String> {
+    let path = entry.path();
+    let relative = path
+        .strip_prefix(root)
+        .map_err(|_| "migration artifact path escapes root")?;
+    if excluded(relative, policy) {
+        return Ok(());
+    }
+    let kind = entry
+        .file_type()
+        .map_err(|error| format!("cannot inspect migration artifact entry: {error}"))?;
+    if kind.is_dir() {
+        return walk_migration_artifacts(root, &path, policy, registry, recognizer, artifacts);
+    }
+    capture_migration_artifact(
+        &path,
+        relative,
+        kind.is_symlink(),
+        policy,
+        registry,
+        recognizer,
+        artifacts,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn capture_migration_artifact(
+    path: &Path,
+    relative: &Path,
+    symlink: bool,
+    policy: &Policy,
+    registry: &Registry,
+    recognizer: &ArtifactRecognizer<'_>,
+    artifacts: &mut BTreeMap<String, Vec<u8>>,
+) -> Result<(), String> {
+    if !migration_artifact_candidate(relative, registry) {
+        return Ok(());
+    }
+    let name = relative
+        .to_str()
+        .ok_or("migration artifact path is not UTF-8")?;
+    if !recognizer.recognizes(name) {
+        return Ok(());
+    }
+    if symlink {
+        return Err(format!("symlink migration artifact: {name}"));
+    }
+    if recognizer.files.len() + artifacts.len() >= policy.limits.maximum_files {
+        return Err("maximum_files budget exceeded".into());
+    }
+    let bytes = fs::read(path).map_err(|error| format!("cannot read {name}: {error}"))?;
+    artifacts.insert(name.to_string(), bytes);
+    Ok(())
+}
+
 fn snapshot_digest(
     files: &BTreeMap<String, String>,
     manifests: &BTreeMap<String, String>,
+    artifacts: &BTreeMap<String, Vec<u8>>,
     history: &History,
     policy: &str,
     resolved_selection: &[u8],
@@ -280,6 +387,11 @@ fn snapshot_digest(
         parts.push(b"source");
         parts.push(path.as_bytes());
         parts.push(source.as_bytes());
+    }
+    for (path, source) in artifacts {
+        parts.push(b"migration_artifact");
+        parts.push(path.as_bytes());
+        parts.push(source.as_slice());
     }
     parts.push(b"git_history_available");
     parts.push(if history.available { b"true" } else { b"false" });
@@ -370,42 +482,67 @@ pub fn working_tree(
     policy_path: &Path,
     selection: &SelectionOptions,
 ) -> Result<CapturedInput, String> {
+    let root = working_root(root)?;
+    let (policy_text, registry, policy) = working_policy(policy_path, selection)?;
+    let snapshot = working_snapshot(&root, &policy, &registry)?;
+    captured_input(
+        snapshot,
+        &policy_text,
+        policy,
+        registry,
+        "working_tree",
+        "source corpus",
+    )
+}
+
+fn working_root(root: &Path) -> Result<PathBuf, String> {
     let root = fs::canonicalize(root).map_err(|e| format!("cannot open source root: {e}"))?;
-    if !root.is_dir() {
-        return Err("--path must be a source directory".into());
+    if root.is_dir() {
+        Ok(root)
+    } else {
+        Err("--path must be a source directory".into())
     }
+}
+
+fn working_policy(
+    policy_path: &Path,
+    selection: &SelectionOptions,
+) -> Result<(String, Registry, Policy), String> {
     let policy_text = text(
         fs::read(policy_path).map_err(|e| format!("cannot read policy: {e}"))?,
         "policy",
     )?;
     let registry = crate::policy::registry_for_policy(&policy_text)?;
     let policy = crate::policy::parse_with_selection(&policy_text, &registry, selection)?;
+    Ok((policy_text, registry, policy))
+}
+
+fn working_snapshot(
+    root: &Path,
+    policy: &Policy,
+    registry: &Registry,
+) -> Result<CapturedSnapshot, String> {
     let mut files = BTreeMap::new();
     let mut manifests = BTreeMap::new();
-    walk(&root, &root, &policy, &registry, &mut files, &mut manifests)?;
-    if files.is_empty() {
-        return Err(format!(
-            "source corpus contains no {} files",
-            registry.language
-        ));
-    }
-    let history = captured_history(&root, &files);
-    Ok(CapturedInput {
-        input: Input {
-            digest: snapshot_digest(
-                &files,
-                &manifests,
-                &history,
-                &policy_text,
-                &serde_json::to_vec(&policy.resolved).expect("resolved selection serializes"),
-            ),
-            implementations: implementations(&files, &manifests),
-            history,
-            files,
-            policy,
-            mode: "working_tree",
-        },
-        registry,
+    walk(root, root, policy, registry, &mut files, &mut manifests)?;
+    let history = captured_history(root, &files);
+    let implementations = implementations(&files, &manifests);
+    let artifact_index =
+        crate::migration::migration_artifact_index(&policy.rule_pack, &files, &implementations);
+    let recognizer = ArtifactRecognizer {
+        rule_pack: &policy.rule_pack,
+        files: &files,
+        implementations: &implementations,
+        index: &artifact_index,
+    };
+    let mut artifacts = BTreeMap::new();
+    walk_migration_artifacts(root, root, policy, registry, &recognizer, &mut artifacts)?;
+    Ok(CapturedSnapshot {
+        files,
+        manifests,
+        implementations,
+        artifacts,
+        history,
     })
 }
 
@@ -502,6 +639,20 @@ fn capture_staged_blob(
     text(git(root, &["cat-file", "blob", oid])?, name)
 }
 
+fn capture_staged_artifact(
+    root: &Path,
+    name: &str,
+    mode: &str,
+    oid: &str,
+) -> Result<Vec<u8>, String> {
+    if !matches!(mode, "100644" | "100755") {
+        return Err(format!(
+            "staged migration artifact is not a regular file: {name}"
+        ));
+    }
+    git(root, &["cat-file", "blob", oid])
+}
+
 fn staged_corpus(
     root: &Path,
     entries: &IndexEntries,
@@ -532,6 +683,43 @@ fn staged_corpus(
     Ok((files, manifests))
 }
 
+fn staged_migration_artifacts(
+    root: &Path,
+    entries: &IndexEntries,
+    registry: &Registry,
+    policy: &Policy,
+    files: &BTreeMap<String, String>,
+    implementations: &[Implementation],
+) -> Result<BTreeMap<String, Vec<u8>>, String> {
+    let artifact_index =
+        crate::migration::migration_artifact_index(&policy.rule_pack, files, implementations);
+    let recognizer = ArtifactRecognizer {
+        rule_pack: &policy.rule_pack,
+        files,
+        implementations,
+        index: &artifact_index,
+    };
+    let mut artifacts = BTreeMap::new();
+    for (name, (mode, oid)) in entries {
+        let path = Path::new(name);
+        if excluded(path, policy)
+            || !migration_artifact_candidate(path, registry)
+            || !recognizer.recognizes(name)
+        {
+            continue;
+        }
+        validate_staged_path(name, path)?;
+        if files.len() + artifacts.len() >= policy.limits.maximum_files {
+            return Err("maximum_files budget exceeded".into());
+        }
+        artifacts.insert(
+            name.clone(),
+            capture_staged_artifact(root, name, mode, oid)?,
+        );
+    }
+    Ok(artifacts)
+}
+
 fn validate_stable_index(root: &Path, initial: &[u8]) -> Result<(), String> {
     if initial == git(root, &["ls-files", "--stage", "-z"])? {
         Ok(())
@@ -540,34 +728,58 @@ fn validate_stable_index(root: &Path, initial: &[u8]) -> Result<(), String> {
     }
 }
 
-fn staged_input(
+struct CapturedSnapshot {
     files: BTreeMap<String, String>,
     manifests: BTreeMap<String, String>,
+    implementations: Vec<Implementation>,
+    artifacts: BTreeMap<String, Vec<u8>>,
     history: History,
+}
+
+fn captured_input(
+    snapshot: CapturedSnapshot,
     policy_text: &str,
     policy: Policy,
     registry: Registry,
+    mode: &'static str,
+    corpus_label: &str,
 ) -> Result<CapturedInput, String> {
+    let CapturedSnapshot {
+        files,
+        manifests,
+        implementations,
+        artifacts,
+        history,
+    } = snapshot;
     if files.is_empty() {
         return Err(format!(
-            "staged corpus contains no {} files",
+            "{corpus_label} contains no {} files",
             registry.language
         ));
     }
+    let source_roles = crate::migration::resolve_source_roles(
+        &policy,
+        &files,
+        &registry.language,
+        &implementations,
+    )?;
     Ok(CapturedInput {
         input: Input {
             digest: snapshot_digest(
                 &files,
                 &manifests,
+                &artifacts,
                 &history,
                 policy_text,
                 &serde_json::to_vec(&policy.resolved).expect("resolved selection serializes"),
             ),
-            implementations: implementations(&files, &manifests),
+            implementations,
+            source_roles,
             history,
+            artifacts,
             files,
             policy,
-            mode: "staged_snapshot",
+            mode,
         },
         registry,
     })
@@ -589,22 +801,76 @@ fn staged_evidence(
     Ok(Some(git(root, &["cat-file", "blob", oid])?))
 }
 
-pub fn staged(
+struct StagedCapture {
+    root: PathBuf,
+    initial: Vec<u8>,
+    entries: IndexEntries,
+    policy_text: String,
+    registry: Registry,
+    policy: Policy,
+}
+
+fn staged_capture(
     policy_path: &Path,
-    evidence_path: Option<&Path>,
     selection: &SelectionOptions,
-) -> Result<(CapturedInput, Option<Vec<u8>>), String> {
+) -> Result<StagedCapture, String> {
     let policy_name = validate_staged_policy_path(policy_path)?;
     let root = repository_root()?;
     let initial = git(&root, &["ls-files", "--stage", "-z"])?;
     let entries = parse_index(&initial)?;
     let (policy_text, registry, policy) = staged_policy(&root, &entries, policy_name, selection)?;
-    let (files, manifests) = staged_corpus(&root, &entries, &registry, &policy)?;
-    let history = captured_history(&root, &files);
-    let evidence = staged_evidence(&root, &entries, evidence_path)?;
-    validate_stable_index(&root, &initial)?;
-    Ok((
-        staged_input(files, manifests, history, &policy_text, policy, registry)?,
-        evidence,
-    ))
+    Ok(StagedCapture {
+        root,
+        initial,
+        entries,
+        policy_text,
+        registry,
+        policy,
+    })
+}
+
+fn staged_snapshot(capture: &StagedCapture) -> Result<CapturedSnapshot, String> {
+    let (files, manifests) = staged_corpus(
+        &capture.root,
+        &capture.entries,
+        &capture.registry,
+        &capture.policy,
+    )?;
+    let implementations = implementations(&files, &manifests);
+    let artifacts = staged_migration_artifacts(
+        &capture.root,
+        &capture.entries,
+        &capture.registry,
+        &capture.policy,
+        &files,
+        &implementations,
+    )?;
+    let history = captured_history(&capture.root, &files);
+    Ok(CapturedSnapshot {
+        files,
+        manifests,
+        implementations,
+        artifacts,
+        history,
+    })
+}
+
+pub fn staged(
+    policy_path: &Path,
+    evidence_path: Option<&Path>,
+    selection: &SelectionOptions,
+) -> Result<(CapturedInput, Option<Vec<u8>>), String> {
+    let capture = staged_capture(policy_path, selection)?;
+    let snapshot = staged_snapshot(&capture)?;
+    let evidence = staged_evidence(&capture.root, &capture.entries, evidence_path)?;
+    validate_stable_index(&capture.root, &capture.initial)?;
+    let input = captured_input(
+        snapshot,
+        &capture.policy_text,
+        capture.policy,
+        capture.registry,
+        "staged_snapshot",
+        "staged corpus",
+    )?;
+    Ok((input, evidence))
 }

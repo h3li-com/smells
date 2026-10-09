@@ -4,6 +4,14 @@ All notable changes to Smells are recorded here. Release tags use `vMAJOR.MINOR.
 
 ## Unreleased
 
+- Classify high-confidence Python, TypeScript, and Rust database migration source
+  roles without removing migration code from the measured corpus, and report exact
+  canonical entrypoint findings as visible nonblocking review signals.
+- Inventory recognized Drizzle, Prisma, SQLx, Diesel, and Refinery SQL migration
+  artifacts as `migration_body_not_analyzed`, with staged/working parity and
+  source-first budget enforcement.
+- Introduce report schema 8 and rule version 2 for the line metrics whose
+  applicability now recognizes exact migration declaration roles.
 - Identify the embedded concept-catalog and source-manifest versions directly in
   every JSON report while retaining `implementation_sha256` for exact artifact
   identity.

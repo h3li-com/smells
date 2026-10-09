@@ -44,6 +44,7 @@ struct SourceError {
 #[serde(deny_unknown_fields)]
 struct FunctionFact {
     symbol: String,
+    owner: Option<String>,
     location: Location,
     parameters: Vec<(String, String)>,
     lines: usize,

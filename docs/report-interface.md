@@ -2,7 +2,7 @@
 
 The report is the deterministic interface between Smells and a review agent. The scanner owns collection, measurement, threshold evaluation, and suppression validation. The agent owns semantic investigation and any proposed code change.
 
-`report_schema_version` is `7`. Consumers must reject unsupported versions rather than guessing field semantics. Schema 7 separates compact `measurements` from matched `findings`, assigns stable per-report finding IDs, stores immutable `when_to_ignore` guidance once in `guidance_catalog`, and audits source-local suppressions. Policy schema remains `2`.
+`report_schema_version` is `8`. Consumers must reject unsupported versions rather than guessing field semantics. Schema 8 adds resolved `source_roles` and role-adjusted finding dispositions to the schema 7 measurement, finding, guidance, and suppression model. Policy schema remains `2`; `source_roles` is an optional, backward-compatible policy member.
 
 Each report identifies the embedded provenance metadata with `catalog_version` and `source_manifest_version`. These compact identifiers make the report readable without duplicating the complete source manifest or concept catalog. `implementation_sha256` continues to bind the report to the exact scanner code, rule packs, schemas, manifest, and catalog shipped in that artifact.
 
@@ -15,6 +15,9 @@ The top-level collections have distinct responsibilities:
 - `evidence_provider_catalog` stores each provider identity/configuration once. Measurement evidence uses `provider_ref`; its completed status and measured value are represented by the measurement itself instead of repeated inside every evidence object.
 - `guidance_catalog` contains exactly one immutable `when_to_ignore` record for each of the 23 smells. All 28 rules inherit one by `guidance_ref`; findings never duplicate the guidance text.
 - `suppressions` audits every syntactically valid directive and whether it was `used`, `unused`, or `unverified_due_to_incomplete_rule`. Invalid directives are reported in `errors` and make the scan incomplete.
+- `source_roles` lists every resolved special source artifact without removing it from the corpus. Each record identifies the role, framework, owning Implementation, path and path scope, declared or inferred source, confidence, and detector evidence. One explicit declaration cannot span multiple Implementations.
+- `source_role_candidates` lists unresolved, low-confidence path signals such as a `versions` component. Candidates never change measurements, findings, or blocking status; an explicit anchored role is the deterministic way to resolve a custom framework layout.
+- `migration_artifacts` inventories recognized SQL migration bodies that are included in the input digest but are not parsed by the current language pack. Each record carries `status: "migration_body_not_analyzed"`; reports with one or more such records also disclose `migration_sql_bodies_are_inventoried_not_analyzed` in `limitations`.
 
 Every guidance record contains `guidance_ref`, `smell_id`, version, provenance, source URL, checked date, and an ordered list of conditions. `refactoring_guru_verbatim` means the item text is an attributed excerpt from the linked page. `smells_authored` means Smells supplies the guidance because that page has no explicit “When to Ignore” section. The pack is embedded and versioned; ordinary scans never download it.
 
@@ -33,6 +36,12 @@ Directive-looking text inside Rust strings, Python strings, or TypeScript string
 If the targeted rule cannot complete, Smells cannot prove that its directive is unused. The directive remains visible with `state: "unverified_due_to_incomplete_rule"`; the rule error still makes the scan incomplete and unsuppressible. Once the rule completes on a later scan, the directive must resolve to `used` or fail as genuinely `unused`.
 
 An accepted finding remains in `findings` with `status: "ignored_match"`, `blocking: false`, and its full suppression record. It is counted in `summary.ignored_findings` and the relevant smell result. A scan whose only matches are accepted required findings exits `0` with `passed_with_ignored_findings`.
+
+## Role-adjusted migration findings
+
+A confirmed database migration remains in `scanned_files`, implementation ownership, the input digest, measurements, findings, and history. Only canonical framework declarations receive a `role_context`. The context records `source_role`, `declaration_role`, framework, owning Implementation, declared/inferred source, confidence, path scope, detector evidence, and disposition.
+
+When a canonical migration entrypoint exceeds the generic line limit, it remains a matched finding and measurement with `status: "reported_by_role"`, `blocking: false`, and `disposition: "reported_by_role"`. It counts as a review signal. Helpers, callbacks, data transforms, runtime migration launchers, and behavioral-complexity rules retain their normal status. This is auditable rule applicability, not file exclusion or suppression.
 
 ## Policy selection and coverage
 

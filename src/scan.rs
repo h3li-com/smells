@@ -125,7 +125,7 @@ pub fn check(input: &Input, registry: &Registry) -> Report {
     }
     extract::functions(&mut facts, input, &mut report);
     metrics::add(Counter::Functions, facts.functions.len());
-    extract::record_type_metrics(&facts, &input.policy, &mut report);
+    extract::record_type_metrics(&facts, input, &mut report);
     crate::patterns::check(&facts, &input.policy, &mut report);
     report
 }

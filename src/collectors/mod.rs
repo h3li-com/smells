@@ -6,6 +6,8 @@ mod source;
 mod structural;
 mod syntax;
 
+pub(crate) use syntax::{code_only, import_statements};
+
 use crate::{
     evidence::Observation,
     input::Input,

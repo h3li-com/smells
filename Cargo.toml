@@ -1,6 +1,6 @@
 [package]
 name = "smells"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Deterministic Rust, Python, and TypeScript source-pattern smell scanner"
@@ -34,6 +34,7 @@ include = [
     "docs/python-rule-contracts.md",
     "docs/typescript-rule-contracts.md",
     "docs/report-interface.md",
+    "docs/migration-code-analysis.md",
     "docs/provider-evidence.md",
     "/Cargo.toml",
     "/Cargo.lock",

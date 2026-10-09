@@ -15,9 +15,11 @@ This is the normative contract for `typescript-v1`. It maps the exact 23-item Re
 ## Implemented source rules
 
 <a id="typescript-function-lines"></a>
-### `typescript.function_lines@1`
+### `typescript.function_lines@2`
 
 Match when authored body code lines are greater than `maximum` (default 100). The maximum is inclusive.
+
+Exact canonical `up`, `down`, or Prisma `operations` Declaration Roles in a high-confidence framework migration Source Role retain matched Measurements and Findings but are reported as nonblocking `reported_by_role` review signals. Inferred roles require actual framework imports/contracts and framework-bound parameters. An explicit anchored role supplies file-level framework evidence for wrappers or custom providers, but the scanner still requires the framework's exact top-level export or direct class relationship, entrypoint set, and nonempty parameters where that framework uses them. Helpers and sibling declarations use normal blocking semantics.
 
 <a id="typescript-function-arguments"></a>
 ### `typescript.function_arguments@1`
@@ -35,9 +37,11 @@ Match when the class field set defined above is greater than `maximum` (default 
 Match when direct source-owned class methods are greater than `maximum` (default 20).
 
 <a id="typescript-class-method-lines"></a>
-### `typescript.class_method_lines@1`
+### `typescript.class_method_lines@2`
 
 Match when the sum of authored code lines across direct methods is greater than `maximum` (default 500).
+
+A TypeORM, MikroORM, or Prisma migration shell bound to its actual imported interface/base—or to the corresponding direct `implements`/`extends` structure inside an explicit anchored framework role—retains the aggregate Measurement and Finding but is reported as a nonblocking `reported_by_role` review signal. Unrelated sibling classes remain blocking.
 
 <a id="typescript-data-clumps"></a>
 ### `typescript.data_clumps@1`

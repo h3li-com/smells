@@ -1,5 +1,6 @@
+use crate::migration::RoleContext;
 use crate::policy::Mode;
-use serde::{Deserialize, Serialize, ser::SerializeStruct};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, value::RawValue};
 use std::collections::BTreeMap;
 
@@ -28,6 +29,8 @@ pub struct Finding {
     pub diagnostic: Diagnostic,
     pub status: String,
     pub blocking: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role_context: Option<RoleContext>,
     pub suppression: Option<Suppression>,
     #[serde(skip_serializing)]
     pub evidence: Value,
@@ -82,6 +85,7 @@ pub struct Measurement {
     pub related_locations: Vec<Location>,
     pub observed: Value,
     pub matched: bool,
+    pub role_context: Option<RoleContext>,
     pub evidence: Box<RawValue>,
 }
 
@@ -91,26 +95,38 @@ struct CompactEvaluation<'a> {
     matched: bool,
 }
 
+#[derive(Serialize)]
+struct SerializableMeasurement<'a> {
+    rule_id: &'a str,
+    symbol: &'a str,
+    location: &'a Location,
+    related_symbols: &'a [String],
+    related_locations: &'a [Location],
+    evaluation: CompactEvaluation<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    role_context: Option<&'a RoleContext>,
+    evidence: &'a RawValue,
+}
+
 impl Serialize for Measurement {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
-        let mut state = serializer.serialize_struct("Measurement", 7)?;
-        state.serialize_field("rule_id", &self.rule_id)?;
-        state.serialize_field("symbol", &self.symbol)?;
-        state.serialize_field("location", &self.location)?;
-        state.serialize_field("related_symbols", &self.related_symbols)?;
-        state.serialize_field("related_locations", &self.related_locations)?;
-        state.serialize_field(
-            "evaluation",
-            &CompactEvaluation {
+        SerializableMeasurement {
+            rule_id: &self.rule_id,
+            symbol: &self.symbol,
+            location: &self.location,
+            related_symbols: &self.related_symbols,
+            related_locations: &self.related_locations,
+            evaluation: CompactEvaluation {
                 observed: &self.observed,
                 matched: self.matched,
             },
-        )?;
-        state.serialize_field("evidence", &self.evidence)?;
-        state.end()
+            role_context: self.role_context.as_ref(),
+            evidence: &self.evidence,
+        }
+        .serialize(serializer)
     }
 }
 

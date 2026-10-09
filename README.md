@@ -160,7 +160,7 @@ smells check --path . --policy quality-policy.json --format json
 
 | Exit | Meaning | Required action |
 | ---: | --- | --- |
-| `0` | Every selected active required rule completed without an unsuppressed match | Continue; inspect any explicit ignored findings and review-only signals |
+| `0` | Every selected active required rule completed without an unsuppressed, applicable blocking match | Continue; inspect any explicit ignored findings and review-only or role-adjusted signals |
 | `1` | One or more required rules matched | Review the blocking findings |
 | `2` | The scan was invalid or incomplete | Fix the input, policy, parser, ownership, history, budget, or evidence error |
 
@@ -170,7 +170,7 @@ An exit code of `2` never means “clean.” Errors take precedence over violati
 
 | Rule mode | Effect |
 | --- | --- |
-| `required` | A match is a blocking violation and produces exit `1` |
+| `required` | An applicable match is a blocking violation and produces exit `1`; an audited rule-applicability disposition such as `reported_by_role` remains visible as a non-blocking review finding |
 | `report` | A match is a review signal and does not change an otherwise successful exit |
 | `off` | An explicit custom-policy opt-out; shipped starter policies do not use it |
 
@@ -326,7 +326,7 @@ Preserve both artifacts. Let exit `1` block configured violations and exit `2` b
 
 ### Run it before commits
 
-`--staged` scans the complete tracked source snapshot in the Git index. It reads source, runtime manifests, policy, and optional evidence from staged blobs rather than unstaged replacements.
+`--staged` scans the complete tracked source snapshot in the Git index. It reads source, runtime manifests, recognized SQL migration artifacts, policy, and optional evidence from staged blobs rather than unstaged replacements. Those artifact bytes participate in the same file budget and input digest as the source snapshot.
 
 With the Python `pre-commit` framework:
 
@@ -399,6 +399,23 @@ Available groups are `all`, `source`, `evidence`, and the five canonical smell c
 
 Unknown, duplicate, or conflicting selectors return exit `2`. The resolved selection and selected/excluded rules appear in every report.
 
+### Database migration source roles
+
+Smells recognizes high-confidence framework migration shapes without excluding their files. Canonical migration entrypoints that exceed a generic line limit remain measured and appear as non-blocking `reported_by_role` review findings; helpers, callbacks, data transforms, complexity rules, and runtime migration launchers keep their normal evaluation.
+
+Dynamic or custom discovery can be declared with repository-root-anchored policy paths:
+
+```json
+"source_roles": [{
+  "role": "database_migration",
+  "framework": "alembic",
+  "paths": ["/backend/alembic/versions/**/*.py"],
+  "configuration": ["/backend/alembic.ini"]
+}]
+```
+
+Supported source-role frameworks are documented by each language policy schema. Recognized SQL migration files are included in the input digest and listed under `migration_artifacts` with `migration_body_not_analyzed`; Smells does not imply that scanning a Drizzle, Prisma, SQLx, Diesel, or Refinery launcher analyzed its SQL body. See the [migration design and framework evidence](docs/migration-code-analysis.md).
+
 ### Optional higher-fidelity evidence
 
 `--evidence` is not required for a complete default scan. It is an optional replacement for individual built-in observations when a team already has stronger compiler, type, coverage, test, or architecture facts.
@@ -417,7 +434,7 @@ Start with the [provider evidence guide](docs/provider-evidence.md) and [JSON Sc
 
 ## Safety and limitations
 
-- Smells captures source and fixed runtime manifests without following symlinks.
+- Smells captures source, fixed runtime manifests, and recognized SQL migration artifacts without following symlinks.
 - It never executes repository code, dependencies, build scripts, tests, compilers, or package managers.
 - Deterministic analysis budgets prevent unbounded work; exhaustion returns exit `2`.
 - Missing Git history, unresolved ownership, parser failure, and invalid evidence are incomplete—not clean.

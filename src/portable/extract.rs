@@ -150,6 +150,15 @@ fn receiver_field(node: Node<'_>, source: &str, language: &str) -> bool {
 
 fn node_name(node: Node<'_>, source: &str) -> String {
     node.child_by_field_name("name")
+        .or_else(|| {
+            let parent = node.parent()?;
+            (parent.kind() == "variable_declarator"
+                && parent
+                    .child_by_field_name("value")
+                    .is_some_and(|value| value.id() == node.id()))
+            .then(|| parent.child_by_field_name("name"))
+            .flatten()
+        })
         .and_then(|name| name.utf8_text(source.as_bytes()).ok())
         .unwrap_or("<anonymous>")
         .to_string()
@@ -195,11 +204,6 @@ pub(super) fn record_class_metrics(
             summary.methods,
             "source-owned class methods",
         ),
-        (
-            "class_method_lines",
-            summary.method_lines,
-            "summed class method code lines",
-        ),
     ] {
         report.maximum(
             &input.policy,
@@ -210,6 +214,17 @@ pub(super) fn record_class_metrics(
             description,
         );
     }
+    report.maximum_with_role(
+        &input.policy,
+        &format!("{}.class_method_lines", registry.language),
+        summary.symbol,
+        summary.location,
+        crate::report::RoleAdjustedMaximum::new(
+            summary.method_lines,
+            "summed class method code lines",
+            crate::migration::class_role(input, &summary.location.path, summary.symbol),
+        ),
+    );
 }
 
 fn is_class(node: Node<'_>, language: &str) -> bool {
@@ -272,6 +287,7 @@ struct ActiveFunction {
     body_range: Option<(usize, usize)>,
     metrics: FunctionBodyMetrics,
     metric_needs: RuleNeeds,
+    owner: Option<String>,
     direct_class: Option<usize>,
     accessor: Option<AccessorState>,
 }
@@ -340,6 +356,7 @@ fn active_function(
     classes: &[ActiveClass],
     order: usize,
 ) -> ActiveFunction {
+    let owner = direct_class_owner(node, language).map(|owner| node_name(owner, source));
     let direct_class = direct_class_index(node, language, classes);
     let record_fact = needs.functions;
     let needs_parameters = record_fact && needs.parameters || direct_class.is_some();
@@ -385,6 +402,7 @@ fn active_function(
         body_range,
         metrics: FunctionBodyMetrics::default(),
         metric_needs,
+        owner,
         direct_class,
         accessor,
     }
@@ -750,6 +768,7 @@ fn exit_node(node: Node<'_>, state: &mut ExtractionState) {
                 function.order,
                 FunctionFact {
                     symbol: function.symbol,
+                    owner: function.owner,
                     location: function.location,
                     parameters: function.parameters,
                     lines,
@@ -823,5 +842,38 @@ pub(super) fn extract_facts(
             }
             exit_node(cursor.node(), &mut state);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn typescript_method_fact_keeps_its_class_owner_without_class_rules() {
+        let source = concat!(
+            "export class Accounts implements AppMigration {\n",
+            "  async up(queryRunner: QueryRunner) {\n",
+            "    await queryRunner.query('CREATE TABLE accounts (id integer)');\n",
+            "  }\n",
+            "}\n",
+        );
+        let registry = crate::policy::registry("typescript-v1").unwrap();
+        let mut parsers = ParserPool::default();
+        let tree = parse_source("accounts.ts", source, &registry, &mut parsers)
+            .unwrap_or_else(|error| panic!("{}", error.message));
+        let needs = RuleNeeds {
+            functions: true,
+            parameters: false,
+            lines: true,
+            comments: false,
+            tokens: false,
+            classes: false,
+        };
+
+        let (facts, _) = extract_facts(&tree, "accounts.ts", source, &registry, needs);
+
+        assert_eq!(facts.functions[0].symbol, "up");
+        assert_eq!(facts.functions[0].owner.as_deref(), Some("Accounts"));
     }
 }

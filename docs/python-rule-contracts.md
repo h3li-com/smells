@@ -15,9 +15,11 @@ This is the normative contract for `python-v1`. It maps the exact 23-item Refact
 ## Implemented source rules
 
 <a id="python-function-lines"></a>
-### `python.function_lines@1`
+### `python.function_lines@2`
 
 Match when authored body code lines are greater than `maximum` (default 100). The maximum is inclusive.
+
+An exact zero-argument Alembic `upgrade` or `downgrade` Declaration Role in a high-confidence `database_migration` Source Role retains the matched Measurement and Finding but is reported as a nonblocking `reported_by_role` review signal. Inferred roles require Alembic import and revision-graph evidence; an explicit anchored Alembic role supplies the file-level framework evidence but still requires revision metadata and the canonical signature. Helpers and same-named functions without that evidence use normal blocking semantics.
 
 <a id="python-function-arguments"></a>
 ### `python.function_arguments@1`

@@ -28,7 +28,11 @@ impl Workspace {
         workspace
     }
     fn source(&self, path: &str, source: &str) {
-        fs::write(self.path.join(path), source).unwrap();
+        let path = self.path.join(path);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(path, source).unwrap();
     }
     fn policy(&self, value: &Value) {
         fs::write(
@@ -76,6 +80,267 @@ impl Workspace {
             String::from_utf8_lossy(&result.stderr)
         );
     }
+}
+
+#[test]
+fn refinery_rust_migration_builder_is_inferred_and_reported_by_role() {
+    let workspace =
+        Workspace::new("use refinery::embed_migrations;\nembed_migrations!(\"migrations\");\n");
+    workspace.source(
+        "migrations/V1__create_accounts.rs",
+        concat!(
+            "pub fn migration() -> String {\n",
+            "    let mut sql = String::new();\n",
+            "    sql.push_str(\"CREATE TABLE accounts (id INTEGER);\");\n",
+            "    sql.push_str(\"CREATE INDEX ix_accounts_id ON accounts(id);\");\n",
+            "    sql.push_str(\"ALTER TABLE accounts ADD COLUMN name TEXT;\");\n",
+            "    sql\n",
+            "}\n",
+        ),
+    );
+    workspace.modify("/rules/rust.function_lines/parameters/maximum", json!(3));
+
+    let output = workspace.check();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let data = report(&output);
+    let role = data["source_roles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|role| role["path"] == "migrations/V1__create_accounts.rs")
+        .expect("Refinery source role");
+    assert_eq!(role["framework"], "refinery");
+    assert_eq!(role["source"], "inferred");
+    assert_eq!(
+        role["evidence"],
+        json!([
+            "versioned_filename:refinery",
+            "canonical_signature:migration_to_string",
+            "embedding_call:embed_migrations"
+        ])
+    );
+    let finding = data["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| {
+            finding["rule_id"] == "rust.function_lines"
+                && finding["location"]["path"] == "migrations/V1__create_accounts.rs"
+        })
+        .expect("long Refinery builder");
+    assert_eq!(finding["status"], "reported_by_role");
+    assert_eq!(finding["blocking"], false);
+    assert_eq!(
+        finding["role_context"]["declaration_role"],
+        "migration_sql_builder"
+    );
+}
+
+#[test]
+fn refinery_embedding_does_not_classify_a_different_directory() {
+    let workspace =
+        Workspace::new("use refinery::embed_migrations;\nembed_migrations!(\"migrations\");\n");
+    workspace.source(
+        "legacy/V1__not_embedded.rs",
+        concat!(
+            "pub fn migration() -> String {\n",
+            "    let mut sql = String::new();\n",
+            "    sql.push_str(\"CREATE TABLE legacy (id INTEGER);\");\n",
+            "    sql.push_str(\"CREATE INDEX legacy_id ON legacy(id);\");\n",
+            "    sql\n",
+            "}\n",
+        ),
+    );
+    workspace.modify("/rules/rust.function_lines/parameters/maximum", json!(2));
+
+    let output = workspace.check();
+    assert_eq!(output.status.code(), Some(1));
+    let data = report(&output);
+    assert_eq!(data["source_roles"], json!([]));
+    assert_eq!(
+        data["source_role_candidates"][0]["evidence"],
+        json!(["unresolved_versioned_filename:refinery"])
+    );
+    let finding = data["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| finding["location"]["path"] == "legacy/V1__not_embedded.rs")
+        .expect("unembedded Refinery-like builder remains blocking");
+    assert_eq!(finding["status"], "violation");
+}
+
+#[test]
+fn seaorm_migration_type_reports_aggregate_function_lines_by_role() {
+    let workspace = Workspace::new(concat!(
+        "use sea_orm_migration::prelude::*;\n",
+        "mod m20261009_accounts;\n",
+        "pub struct Migrator;\n",
+        "impl MigratorTrait for Migrator {\n",
+        "    fn migrations() -> Vec<Box<dyn MigrationTrait>> {\n",
+        "        vec![Box::new(m20261009_accounts::Migration)]\n",
+        "    }\n",
+        "}\n",
+    ));
+    workspace.source(
+        "src/m20261009_accounts.rs",
+        concat!(
+            "use sea_orm_migration::prelude::*;\n",
+            "#[derive(DeriveMigrationName)]\n",
+            "pub struct Migration;\n\n",
+            "#[async_trait::async_trait]\n",
+            "impl MigrationTrait for Migration {\n",
+            "    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {\n",
+            "        let table = Table::create();\n",
+            "        manager.create_table(table).await?;\n",
+            "        manager.create_index(Index::create()).await?;\n",
+            "        Ok(())\n",
+            "    }\n\n",
+            "    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {\n",
+            "        manager.drop_table(Table::drop()).await?;\n",
+            "        Ok(())\n",
+            "    }\n",
+            "}\n",
+        ),
+    );
+    workspace.modify(
+        "/rules/rust.type_function_lines/parameters/maximum",
+        json!(4),
+    );
+
+    let output = workspace.check();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let data = report(&output);
+    assert_eq!(data["source_roles"][0]["framework"], "sea_orm");
+    let finding = data["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| {
+            finding["rule_id"] == "rust.type_function_lines"
+                && finding["location"]["path"] == "src/m20261009_accounts.rs"
+        })
+        .expect("SeaORM aggregate function lines");
+    assert_eq!(finding["status"], "reported_by_role");
+    assert_eq!(finding["blocking"], false);
+    assert_eq!(
+        finding["role_context"]["declaration_role"],
+        "migration_shell"
+    );
+}
+
+#[test]
+fn seaorm_shape_without_registry_stays_an_unresolved_candidate() {
+    let workspace = Workspace::new(concat!(
+        "use sea_orm_migration::prelude::*;\n",
+        "mod m20261009_accounts;\n",
+        "pub struct Migrator;\n",
+        "impl MigratorTrait for Migrator {\n",
+        "    fn migrations() -> Vec<Box<dyn MigrationTrait>> { vec![] }\n",
+        "}\n",
+    ));
+    workspace.source(
+        "src/m20261009_accounts.rs",
+        concat!(
+            "use sea_orm_migration::prelude::*;\n",
+            "#[derive(DeriveMigrationName)]\n",
+            "pub struct Migration;\n",
+            "#[async_trait::async_trait]\n",
+            "impl MigrationTrait for Migration {\n",
+            "    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {\n",
+            "        manager.create_table(Table::create()).await?;\n",
+            "        manager.create_index(Index::create()).await?;\n",
+            "        manager.alter_table(Table::alter()).await?;\n",
+            "        Ok(())\n",
+            "    }\n",
+            "}\n",
+        ),
+    );
+    workspace.modify(
+        "/rules/rust.type_function_lines/parameters/maximum",
+        json!(3),
+    );
+
+    let output = workspace.check();
+    assert_eq!(output.status.code(), Some(1));
+    let data = report(&output);
+    assert_eq!(data["source_roles"], json!([]));
+    assert_eq!(
+        data["source_role_candidates"][0]["evidence"],
+        json!(["unresolved_framework_signal:sea_orm_migration"])
+    );
+    let finding = data["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| finding["rule_id"] == "rust.type_function_lines")
+        .expect("unregistered SeaORM shape remains blocking");
+    assert_eq!(finding["status"], "violation");
+}
+
+#[test]
+fn rust_sql_migration_inventory_honors_framework_evidence_and_refinery_path() {
+    let workspace = Workspace::new(concat!(
+        "use diesel_migrations::{embed_migrations, EmbeddedMigrations};\n",
+        "const DIESEL: EmbeddedMigrations = embed_migrations!();\n",
+        "static SQLX: sqlx::migrate::Migrator = sqlx::migrate!(\"./sqlx\");\n",
+        "refinery::embed_migrations!(\"refinery\");\n",
+    ));
+    workspace.source(
+        "migrations/20261009000000_accounts/up.sql",
+        "CREATE TABLE accounts(id integer);\n",
+    );
+    workspace.source(
+        "sqlx/20261009000000_accounts.up.sql",
+        "CREATE TABLE accounts(id integer);\n",
+    );
+    workspace.source(
+        "refinery/V1__accounts.sql",
+        "CREATE TABLE accounts(id integer);\n",
+    );
+    workspace.source(
+        "legacy/V2__not_embedded.sql",
+        "CREATE TABLE legacy(id integer);\n",
+    );
+    workspace.source(
+        "legacy/20261009000000_not_embedded.sql",
+        "CREATE TABLE legacy_sqlx(id integer);\n",
+    );
+    workspace.source(
+        "archive/20261009000000_not_embedded/up.sql",
+        "CREATE TABLE legacy_diesel(id integer);\n",
+    );
+
+    let output = workspace.check();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let data = report(&output);
+    let artifacts = data["migration_artifacts"].as_array().unwrap();
+    assert_eq!(artifacts.len(), 3, "{artifacts:?}");
+    assert_eq!(artifacts[0]["framework"], "diesel");
+    assert_eq!(artifacts[1]["framework"], "refinery");
+    assert_eq!(artifacts[2]["framework"], "sqlx");
+    assert!(
+        artifacts
+            .iter()
+            .all(|artifact| !artifact["path"].as_str().unwrap().contains("not_embedded"))
+    );
 }
 
 #[test]
@@ -823,7 +1088,7 @@ fn report_aggregates_rule_evidence_by_canonical_smell_pattern() {
     let output = workspace.check();
     assert_eq!(output.status.code(), Some(1));
     let data = report(&output);
-    assert_eq!(data["report_schema_version"], 7);
+    assert_eq!(data["report_schema_version"], 8);
     assert_eq!(data["guidance_catalog"].as_array().unwrap().len(), 23);
     assert!(
         data["measurements"].as_array().unwrap().len() > data["findings"].as_array().unwrap().len(),
@@ -835,7 +1100,7 @@ fn report_aggregates_rule_evidence_by_canonical_smell_pattern() {
             .unwrap()
             .iter()
             .all(|finding| finding["evaluation"]["matched"] == true),
-        "schema-7 findings contain only matched evaluations"
+        "schema-8 findings contain only matched evaluations"
     );
     let results = data["smell_results"].as_array().unwrap();
     assert_eq!(results.len(), 23);
@@ -1577,12 +1842,24 @@ fn malformed_unknown_duplicate_and_out_of_range_policy_values_error() {
     for (pointer, value) in [
         ("/schema_version", json!(1)),
         ("/scanner_version", json!("latest")),
-        ("/rules/rust.function_lines/version", json!(2)),
+        ("/rules/rust.function_lines/version", json!(3)),
         (
             "/rules/rust.primitive_slots/parameters/minimum_share_percent",
             json!(101),
         ),
         ("/exceptions", json!([{"reason":"ignore everything"}])),
+        (
+            "/source_roles",
+            json!([{"role":"database_migration","framework":"alembic","paths":["/migrations/*.rs"]}]),
+        ),
+        (
+            "/source_roles",
+            json!([{"role":"database_migration","framework":"refinery","paths":["migrations/*.rs"]}]),
+        ),
+        (
+            "/source_roles",
+            json!([{"role":"database_migration","framework":"refinery","paths":["/../migrations/*.rs"]}]),
+        ),
     ] {
         workspace.policy(
             &serde_json::from_str(include_str!("../examples/quality-policy.json")).unwrap(),

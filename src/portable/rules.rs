@@ -291,13 +291,21 @@ pub(super) fn source_metrics(
             function.parameters.len(),
             "declared parameters",
         );
-        report.maximum(
+        report.maximum_with_role(
             &input.policy,
             &format!("{}.function_lines", registry.language),
             &function.symbol,
             &function.location,
-            function.lines,
-            "authored body code lines",
+            crate::report::RoleAdjustedMaximum::new(
+                function.lines,
+                "authored body code lines",
+                crate::migration::function_role(
+                    input,
+                    &function.location.path,
+                    &function.symbol,
+                    function.owner.as_deref(),
+                ),
+            ),
         );
     }
     for class in &facts.classes {

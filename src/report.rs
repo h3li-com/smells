@@ -1,5 +1,6 @@
 use crate::{
     input::{History, Implementation, Input},
+    migration::{MigrationArtifact, ResolvedSourceRole, RoleContext, SourceRoleCandidate},
     policy::{Policy, Registry, ResolvedSelection},
 };
 use serde::Serialize;
@@ -50,6 +51,7 @@ const IMPLEMENTATION_INPUTS: &[&[u8]] = &[
     include_bytes!("evidence.rs"),
     include_bytes!("evidence_evaluators.rs"),
     include_bytes!("metrics.rs"),
+    include_bytes!("migration.rs"),
     include_bytes!("report.rs"),
     include_bytes!("report/guidance.rs"),
     include_bytes!("report/model.rs"),
@@ -75,6 +77,7 @@ const IMPLEMENTATION_INPUTS: &[&[u8]] = &[
     include_bytes!("../docs/python-rule-contracts.md"),
     include_bytes!("../docs/typescript-rule-contracts.md"),
     include_bytes!("../docs/report-interface.md"),
+    include_bytes!("../docs/migration-code-analysis.md"),
     include_bytes!("../docs/provider-evidence.md"),
 ];
 
@@ -102,6 +105,27 @@ struct ReportError {
     location: Option<Location>,
 }
 
+struct RoleAdjustedRelations {
+    related: FindingRelations,
+    role_context: Option<RoleContext>,
+}
+
+pub(crate) struct RoleAdjustedMaximum<'a> {
+    value: usize,
+    unit: &'a str,
+    role_context: Option<RoleContext>,
+}
+
+impl<'a> RoleAdjustedMaximum<'a> {
+    pub(crate) fn new(value: usize, unit: &'a str, role_context: Option<RoleContext>) -> Self {
+        Self {
+            value,
+            unit,
+            role_context,
+        }
+    }
+}
+
 fn serialize_report_errors<S>(errors: &[ReportError], serializer: S) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
@@ -115,6 +139,9 @@ pub struct Report {
     metadata: ReportMetadata,
     scanned_files: Vec<String>,
     excluded_directories: Vec<String>,
+    source_roles: Vec<ResolvedSourceRole>,
+    source_role_candidates: Vec<SourceRoleCandidate>,
+    migration_artifacts: Vec<MigrationArtifact>,
     policy_selection: ResolvedSelection,
     pub(crate) summary: ReportSummary,
     implementation_results: Vec<ImplementationResult>,
@@ -284,7 +311,7 @@ impl Report {
             })
             .collect();
         let metadata = ReportMetadata {
-            report_schema_version: 7,
+            report_schema_version: 8,
             scanner_version: env!("CARGO_PKG_VERSION"),
             rule_pack: registry.rule_pack.clone(),
             catalog_versions: registry.catalog_versions.clone(),
@@ -311,6 +338,9 @@ impl Report {
             metadata,
             scanned_files: vec![],
             excluded_directories: policy.exclude_directories.clone(),
+            source_roles: vec![],
+            source_role_candidates: vec![],
+            migration_artifacts: vec![],
             policy_selection: policy.resolved.clone(),
             summary: ReportSummary::default(),
             implementation_results: vec![],
@@ -343,6 +373,14 @@ impl Report {
     pub fn begin_scan(&mut self, input: &Input) {
         self.metadata.input_sha256.clone_from(&input.digest);
         self.scanned_files = input.files.keys().cloned().collect();
+        self.source_roles.clone_from(&input.source_roles);
+        self.source_role_candidates = crate::migration::resolve_source_role_candidates(input);
+        self.migration_artifacts = crate::migration::resolve_migration_artifacts(input);
+        if !self.migration_artifacts.is_empty() {
+            self.metadata
+                .limitations
+                .push("migration_sql_bodies_are_inventoried_not_analyzed".into());
+        }
     }
 
     pub fn set_provider_evidence_digest(&mut self, digest: String) {
@@ -385,7 +423,7 @@ impl Report {
         matched: bool,
         evidence: Value,
     ) {
-        self.finding_with_relations(
+        self.finding_with_relations_and_role(
             policy,
             id,
             symbol,
@@ -395,10 +433,13 @@ impl Report {
             comparison,
             threshold,
             matched,
-            FindingRelations {
-                evidence,
-                symbols: Vec::new(),
-                locations: Vec::new(),
+            RoleAdjustedRelations {
+                related: FindingRelations {
+                    evidence,
+                    symbols: Vec::new(),
+                    locations: Vec::new(),
+                },
+                role_context: None,
             },
         );
     }
@@ -417,6 +458,41 @@ impl Report {
         matched: bool,
         related: FindingRelations,
     ) {
+        self.finding_with_relations_and_role(
+            policy,
+            id,
+            symbol,
+            location,
+            metric,
+            value,
+            comparison,
+            threshold,
+            matched,
+            RoleAdjustedRelations {
+                related,
+                role_context: None,
+            },
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finding_with_relations_and_role(
+        &mut self,
+        policy: &Policy,
+        id: &str,
+        symbol: &str,
+        location: &Location,
+        metric: &str,
+        value: Value,
+        comparison: &str,
+        threshold: Value,
+        matched: bool,
+        adjusted: RoleAdjustedRelations,
+    ) {
+        let RoleAdjustedRelations {
+            related,
+            role_context,
+        } = adjusted;
         let FindingRelations {
             evidence,
             symbols: related_symbols,
@@ -442,6 +518,7 @@ impl Report {
             related_locations: related_locations.clone(),
             observed: value.clone(),
             matched,
+            role_context: role_context.clone(),
             evidence: measurement_evidence,
         });
         if !matched {
@@ -468,7 +545,12 @@ impl Report {
         let review = research_gated_review(&reference_url, &guidance.review);
         let remediation = guidance.remediation;
         let contract = metadata.contract;
-        let status = if policy.required(id) {
+        let reported_by_role = role_context
+            .as_ref()
+            .is_some_and(|role| role.disposition == "reported_by_role");
+        let status = if reported_by_role {
+            "reported_by_role"
+        } else if policy.required(id) {
             "violation"
         } else {
             "indicator"
@@ -518,7 +600,8 @@ impl Report {
                 },
             },
             status: status.into(),
-            blocking: policy.required(id),
+            blocking: policy.required(id) && !reported_by_role,
+            role_context,
             suppression: None,
             evidence,
         });
@@ -582,6 +665,36 @@ impl Report {
             json!(maximum),
             value as u64 > maximum,
             json!({"scope":"source_authored"}),
+        );
+    }
+
+    pub fn maximum_with_role(
+        &mut self,
+        policy: &Policy,
+        id: &str,
+        symbol: &str,
+        location: &Location,
+        observation: RoleAdjustedMaximum<'_>,
+    ) {
+        let maximum = policy.parameter(id, "maximum");
+        self.finding_with_relations_and_role(
+            policy,
+            id,
+            symbol,
+            location,
+            observation.unit,
+            json!(observation.value),
+            ">",
+            json!(maximum),
+            observation.value as u64 > maximum,
+            RoleAdjustedRelations {
+                related: FindingRelations {
+                    evidence: json!({"scope":"source_authored"}),
+                    symbols: Vec::new(),
+                    locations: Vec::new(),
+                },
+                role_context: observation.role_context,
+            },
         );
     }
 
@@ -672,7 +785,7 @@ impl Report {
             .count();
         let review_signals = matched
             .iter()
-            .filter(|finding| finding.status == "indicator")
+            .filter(|finding| matches!(finding.status.as_str(), "indicator" | "reported_by_role"))
             .count();
         let matched_smell_ids: Vec<_> = self
             .smell_results
@@ -882,7 +995,9 @@ fn build_smell_results(report: &Report, source_files: Option<&[String]>) -> Vec<
                 .count();
             let review_signals = matched_findings
                 .iter()
-                .filter(|(_, finding)| finding.status == "indicator")
+                .filter(|(_, finding)| {
+                    matches!(finding.status.as_str(), "indicator" | "reported_by_role")
+                })
                 .count();
             let status = smell_state(SmellStateInputs {
                 applicable: applicability == "applicable",

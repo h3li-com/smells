@@ -252,6 +252,19 @@ fn finding_log_entry(report: &Report, finding: &Finding, status: &'static str) -
             finding.location.path, finding.location.line, finding.location.column, finding.symbol
         ),
     ];
+    if let Some(role) = &finding.role_context {
+        detail.push(format!(
+            "Role adjustment: {}/{} | framework: {} | Implementation: {} | source: {} | confidence: {} | disposition: {}",
+            role.source_role,
+            role.declaration_role,
+            role.framework,
+            role.implementation_id,
+            role.source,
+            role.confidence,
+            role.disposition
+        ));
+        detail.push(format!("Role evidence: {}", role.evidence.join(", ")));
+    }
     for (index, (symbol, location)) in finding
         .related_symbols
         .iter()
@@ -346,7 +359,9 @@ fn finding_log_targets(report: &Report) -> Vec<FindingLogTarget<'_>> {
                 .filter(|finding| match status {
                     "blocking" => finding.blocking,
                     "ignored" => finding.status == "ignored_match",
-                    "review" => finding.status == "indicator",
+                    "review" => {
+                        matches!(finding.status.as_str(), "indicator" | "reported_by_role")
+                    }
                     _ => false,
                 })
                 .map(|finding| FindingLogTarget::Finding(finding, status)),
