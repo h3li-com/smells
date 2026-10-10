@@ -1,7 +1,8 @@
 SHELL := /bin/sh
 
-.PHONY: benchmark-release-gate build check-tools crap-gate fmt gitleaks install-hooks osv-scan \
-	pre-commit pre-commit-push pre-push release-check self-smell-check test
+.PHONY: benchmark-release-gate build check-tools crap-gate fmt gitleaks install-hooks \
+	mutation-diff mutation-full mutation-test-core osv-scan pre-commit pre-commit-push \
+	pre-push release-check self-smell-check test
 
 # Both Git hooks deliberately run the same fail-closed gate. This makes a manual
 # invocation identical to the checks performed immediately before commit/push.
@@ -12,6 +13,32 @@ pre-push: pre-commit-push
 benchmark-release-gate:
 	cargo test --locked --test multilanguage alternative_interface_budget_charges_only_surviving_exact_comparisons -- --exact
 	@./scripts/benchmark-release-gate.sh
+
+mutation-test-core:
+	mkdir -p target/mutants
+	PROPTEST_DISABLE_FAILURE_PERSISTENCE=1 cargo mutants \
+		--file src/core/migration.rs --in-place \
+		--output target/mutants/core-migration \
+		-- --lib core::migration::tests
+	python3 scripts/mutation-summary.py \
+		target/mutants/core-migration/mutants.out/outcomes.json
+
+mutation-diff:
+	@test -n "$(MUTATION_DIFF)" || \
+		(echo 'MUTATION_DIFF must name a Git patch file' >&2; exit 2)
+	mkdir -p target/mutants
+	PROPTEST_DISABLE_FAILURE_PERSISTENCE=1 cargo mutants \
+		--in-diff "$(MUTATION_DIFF)" --in-place \
+		--output target/mutants/diff
+	python3 scripts/mutation-summary.py \
+		target/mutants/diff/mutants.out/outcomes.json
+
+mutation-full:
+	mkdir -p target/mutants
+	PROPTEST_DISABLE_FAILURE_PERSISTENCE=1 cargo mutants \
+		--in-place --output target/mutants/full
+	python3 scripts/mutation-summary.py \
+		target/mutants/full/mutants.out/outcomes.json
 
 pre-commit-push: check-tools fmt build test release-check self-smell-check crap-gate gitleaks osv-scan
 
@@ -51,7 +78,8 @@ release-check:
 	@node --check npm/build-package.mjs
 	@node --check npm/publish-packages.mjs
 	@PYTHONPYCACHEPREFIX="$${TMPDIR:-/tmp}/smells-pycache" \
-		python3 -m py_compile scripts/verify-pypi-release.py
+		python3 -m py_compile \
+			scripts/mutation-summary.py scripts/verify-pypi-release.py
 	@version=$$(sed -n '/^\[package\]/,/^\[/ s/^version = "\([^"]*\)"/\1/p' Cargo.toml); \
 		./scripts/verify-release-tag.sh "v$$version" >/dev/null
 	@./scripts/verify-release-actor.sh mindful-time mindful-time mindful-time >/dev/null

@@ -1,0 +1,82 @@
+name: Mutation testing
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/mutation.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "Makefile"
+      - "scripts/mutation-summary.py"
+      - "src/**"
+      - "tests/**"
+  schedule:
+    - cron: "23 3 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mutation-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  changed-code:
+    name: changed code
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install the pinned mutation runner
+        run: cargo install --locked cargo-mutants --version 27.1.0
+
+      - name: Build the pull-request patch
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          mkdir -p target
+          git diff --binary "$BASE_SHA...$HEAD_SHA" > target/mutation.patch
+
+      - name: Mutate changed Rust code
+        run: make mutation-diff MUTATION_DIFF=target/mutation.patch
+
+      - name: Preserve mutation evidence
+        if: always() && hashFiles('target/mutants/diff/mutants.out/outcomes.json') != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mutation-diff-results
+          path: target/mutants/diff/mutants.out
+          if-no-files-found: error
+          retention-days: 14
+
+  full:
+    name: full source tree
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned mutation runner
+        run: cargo install --locked cargo-mutants --version 27.1.0
+
+      - name: Mutate the full Rust source tree
+        run: make mutation-full
+
+      - name: Preserve mutation evidence
+        if: always() && hashFiles('target/mutants/full/mutants.out/outcomes.json') != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mutation-full-results
+          path: target/mutants/full/mutants.out
+          if-no-files-found: error
+          retention-days: 14

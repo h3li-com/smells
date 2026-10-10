@@ -48,6 +48,8 @@ pub(crate) fn reported_role(
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
 
     fn source_role() -> ResolvedSourceRole {
@@ -97,5 +99,66 @@ mod tests {
         assert_eq!(context.path_scope, "/backend/migrations/*.py");
         assert_eq!(context.evidence, ["policy.source_roles[0]"]);
         assert_eq!(context.disposition, "reported_by_role");
+    }
+
+    proptest! {
+        #[test]
+        fn namespace_qualification_does_not_change_a_known_function_role(
+            prefix in "[A-Za-z_][A-Za-z0-9_]{0,20}",
+            separator in prop::sample::select(vec!["::", "."]),
+            (framework, symbol, expected) in prop::sample::select(vec![
+                ("alembic", "upgrade", "migration_up"),
+                ("alembic", "downgrade", "migration_down"),
+                ("typeorm", "up", "migration_up"),
+                ("typeorm", "down", "migration_down"),
+                ("prisma_8", "operations", "migration_operations"),
+                ("refinery", "migration", "migration_sql_builder"),
+            ]),
+        ) {
+            let qualified = format!("{prefix}{separator}{symbol}");
+            prop_assert_eq!(function_declaration_role(framework, &qualified), Some(expected));
+        }
+
+        #[test]
+        fn the_canonicality_gate_always_fails_closed(
+            declaration_role in "[a-z_]{1,24}",
+        ) {
+            prop_assert_eq!(reported_role(&source_role(), &declaration_role, false), None);
+        }
+
+        #[test]
+        fn reported_context_preserves_arbitrary_role_provenance(
+            role in "[a-z_]{1,24}",
+            framework in "[a-z0-9_]{1,24}",
+            implementation_id in "[A-Za-z0-9_./-]{1,32}",
+            path_scope in "/[A-Za-z0-9_./*-]{1,40}",
+            source in "[a-z_]{1,16}",
+            confidence in "[a-z_]{1,16}",
+            evidence in prop::collection::vec("[A-Za-z0-9_:./-]{1,40}", 0..8),
+            declaration_role in "[a-z_]{1,24}",
+        ) {
+            let source_role = ResolvedSourceRole {
+                role: role.clone(),
+                framework: framework.clone(),
+                implementation_id: implementation_id.clone(),
+                path: "unused-by-classification".into(),
+                path_scope: path_scope.clone(),
+                source: source.clone(),
+                confidence: confidence.clone(),
+                evidence: evidence.clone(),
+            };
+
+            let context = reported_role(&source_role, &declaration_role, true).unwrap();
+
+            prop_assert_eq!(context.source_role, role);
+            prop_assert_eq!(context.declaration_role, declaration_role);
+            prop_assert_eq!(context.framework, framework);
+            prop_assert_eq!(context.implementation_id, implementation_id);
+            prop_assert_eq!(context.path_scope, path_scope);
+            prop_assert_eq!(context.source, source);
+            prop_assert_eq!(context.confidence, confidence);
+            prop_assert_eq!(context.evidence, evidence);
+            prop_assert_eq!(context.disposition, "reported_by_role");
+        }
     }
 }
