@@ -5,8 +5,13 @@ use std::{
 };
 
 use crate::{
-    core::{ScanEngine, ports::inbound::Scanner},
-    input, metrics, policy, report,
+    adapters::outbound::repository::LocalRepository,
+    core::{
+        ScanEngine,
+        model::{ScanRequest, ScanTarget},
+        ports::inbound::Scanner,
+    },
+    metrics, policy, report,
 };
 
 const USAGE: &str = "smells --version\nsmells check (--path DIR | --staged) --policy FILE [--evidence FILE] [--format table|json] [--report FILE] [--log FILE] [policy group selectors]\nsmells policy show --policy FILE [--format table|json] [policy group selectors]\nsmells contracts validate --policy FILE\nsmells rules [--rule-pack rust-v1|python-v1|typescript-v1]\n\npolicy group selectors: --group NAME | --only-group NAME | --all-groups | --no-default-groups | --no-group NAME";
@@ -424,30 +429,6 @@ fn show_policy(options: ShowOptions) -> Result<u8, String> {
     Ok(0)
 }
 
-fn capture(options: &CheckOptions) -> Result<(input::CapturedInput, Option<Vec<u8>>), String> {
-    let captured = match &options.source {
-        Some(source) => {
-            let captured = input::working_tree(source, &options.policy_path, &options.selection)?;
-            let evidence = options
-                .evidence_path
-                .as_ref()
-                .map(|path| {
-                    fs::read(path)
-                        .map_err(|error| format!("cannot read provider evidence: {error}"))
-                })
-                .transpose()?;
-            (captured, evidence)
-        }
-        None if options.staged => input::staged(
-            &options.policy_path,
-            options.evidence_path.as_deref(),
-            &options.selection,
-        )?,
-        None => return Err("select exactly one of --staged and --path".into()),
-    };
-    Ok(captured)
-}
-
 fn emit_report(report: &report::Report, options: &CheckOptions) -> Result<usize, String> {
     let saved_json_bytes = options
         .report_path
@@ -473,9 +454,18 @@ fn emit_report(report: &report::Report, options: &CheckOptions) -> Result<usize,
 
 fn check(options: CheckOptions) -> Result<u8, String> {
     metrics::reset();
-    let (captured, evidence_bytes) = capture(&options)?;
-    metrics::add(metrics::Counter::Files, captured.input.files.len());
-    let report = ScanEngine.check(&captured, evidence_bytes.as_deref())?;
+    let target = match options.source.as_deref() {
+        Some(source) => ScanTarget::WorkingTree(source),
+        None if options.staged => ScanTarget::Staged,
+        None => return Err("select exactly one of --staged and --path".into()),
+    };
+    let request = ScanRequest {
+        target,
+        policy_path: &options.policy_path,
+        evidence_path: options.evidence_path.as_deref(),
+        selection: &options.selection,
+    };
+    let report = ScanEngine.check(&LocalRepository, &request)?;
     metrics::write(emit_report(&report, &options)?)?;
     Ok(report.exit())
 }
