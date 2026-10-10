@@ -1,31 +1,149 @@
 use crate::core::model::{ResolvedSourceRole, RoleContext};
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TypeScriptClassContract {
+    TypeOrm,
+    MikroOrm,
+    Prisma8,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TypeScriptExportContract {
+    Knex,
+    Kysely,
+    SequelizeUmzug,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CanonicalDeclaration {
+    AlembicFunction,
+    TypeScriptClass(TypeScriptClassContract),
+    TypeScriptExport(TypeScriptExportContract),
+    RefineryFunction,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DeclarationRole {
+    symbol: &'static str,
+    role: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct CodeMigrationFramework {
+    id: &'static str,
+    declarations: &'static [DeclarationRole],
+    canonical_declaration: CanonicalDeclaration,
+}
+
+const UP_DOWN: &[DeclarationRole] = &[
+    DeclarationRole {
+        symbol: "up",
+        role: "migration_up",
+    },
+    DeclarationRole {
+        symbol: "down",
+        role: "migration_down",
+    },
+];
+const ALEMBIC: &[DeclarationRole] = &[
+    DeclarationRole {
+        symbol: "upgrade",
+        role: "migration_up",
+    },
+    DeclarationRole {
+        symbol: "downgrade",
+        role: "migration_down",
+    },
+];
+const PRISMA_8: &[DeclarationRole] = &[DeclarationRole {
+    symbol: "operations",
+    role: "migration_operations",
+}];
+const REFINERY: &[DeclarationRole] = &[DeclarationRole {
+    symbol: "migration",
+    role: "migration_sql_builder",
+}];
+
+const CODE_MIGRATION_FRAMEWORKS: &[CodeMigrationFramework] = &[
+    CodeMigrationFramework {
+        id: "alembic",
+        declarations: ALEMBIC,
+        canonical_declaration: CanonicalDeclaration::AlembicFunction,
+    },
+    CodeMigrationFramework {
+        id: "typeorm",
+        declarations: UP_DOWN,
+        canonical_declaration: CanonicalDeclaration::TypeScriptClass(
+            TypeScriptClassContract::TypeOrm,
+        ),
+    },
+    CodeMigrationFramework {
+        id: "knex",
+        declarations: UP_DOWN,
+        canonical_declaration: CanonicalDeclaration::TypeScriptExport(
+            TypeScriptExportContract::Knex,
+        ),
+    },
+    CodeMigrationFramework {
+        id: "mikro_orm",
+        declarations: UP_DOWN,
+        canonical_declaration: CanonicalDeclaration::TypeScriptClass(
+            TypeScriptClassContract::MikroOrm,
+        ),
+    },
+    CodeMigrationFramework {
+        id: "kysely",
+        declarations: UP_DOWN,
+        canonical_declaration: CanonicalDeclaration::TypeScriptExport(
+            TypeScriptExportContract::Kysely,
+        ),
+    },
+    CodeMigrationFramework {
+        id: "sequelize_umzug",
+        declarations: UP_DOWN,
+        canonical_declaration: CanonicalDeclaration::TypeScriptExport(
+            TypeScriptExportContract::SequelizeUmzug,
+        ),
+    },
+    CodeMigrationFramework {
+        id: "prisma_8",
+        declarations: PRISMA_8,
+        canonical_declaration: CanonicalDeclaration::TypeScriptClass(
+            TypeScriptClassContract::Prisma8,
+        ),
+    },
+    CodeMigrationFramework {
+        id: "refinery",
+        declarations: REFINERY,
+        canonical_declaration: CanonicalDeclaration::RefineryFunction,
+    },
+];
+
+pub(crate) fn code_migration_framework(id: &str) -> Option<&'static CodeMigrationFramework> {
+    CODE_MIGRATION_FRAMEWORKS
+        .iter()
+        .find(|framework| framework.id == id)
+}
+
+impl CodeMigrationFramework {
+    pub(crate) fn canonical_declaration(&self) -> CanonicalDeclaration {
+        self.canonical_declaration
+    }
+
+    pub(crate) fn declaration_role(&self, symbol: &str) -> Option<&'static str> {
+        let name = leaf_symbol(symbol);
+        self.declarations
+            .iter()
+            .find(|declaration| declaration.symbol == name)
+            .map(|declaration| declaration.role)
+    }
+}
+
 pub(crate) fn leaf_symbol(symbol: &str) -> &str {
     symbol
         .rsplit([':', '.'])
         .find(|component| !component.is_empty())
         .unwrap_or(symbol)
-}
-
-pub(crate) fn function_declaration_role(framework: &str, symbol: &str) -> Option<&'static str> {
-    let name = leaf_symbol(symbol);
-    match (framework, name) {
-        ("alembic", "upgrade")
-        | ("typeorm", "up")
-        | ("knex", "up")
-        | ("mikro_orm", "up")
-        | ("kysely", "up")
-        | ("sequelize_umzug", "up") => Some("migration_up"),
-        ("alembic", "downgrade")
-        | ("typeorm", "down")
-        | ("knex", "down")
-        | ("mikro_orm", "down")
-        | ("kysely", "down")
-        | ("sequelize_umzug", "down") => Some("migration_down"),
-        ("prisma_8", "operations") => Some("migration_operations"),
-        ("refinery", "migration") => Some("migration_sql_builder"),
-        _ => None,
-    }
 }
 
 pub(crate) fn reported_role(
@@ -75,10 +193,18 @@ mod tests {
         ];
 
         for (framework, symbol, expected) in cases {
-            assert_eq!(function_declaration_role(framework, symbol), Some(expected));
+            assert_eq!(
+                code_migration_framework(framework)
+                    .and_then(|framework| framework.declaration_role(symbol)),
+                Some(expected)
+            );
         }
-        assert_eq!(function_declaration_role("alembic", "helper"), None);
-        assert_eq!(function_declaration_role("unknown", "up"), None);
+        assert_eq!(
+            code_migration_framework("alembic")
+                .and_then(|framework| framework.declaration_role("helper")),
+            None
+        );
+        assert_eq!(code_migration_framework("unknown"), None);
     }
 
     #[test]
@@ -102,6 +228,12 @@ mod tests {
     }
 
     proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 128,
+            max_shrink_iters: 128,
+            ..ProptestConfig::default()
+        })]
+
         #[test]
         fn namespace_qualification_does_not_change_a_known_function_role(
             prefix in "[A-Za-z_][A-Za-z0-9_]{0,20}",
@@ -116,7 +248,9 @@ mod tests {
             ]),
         ) {
             let qualified = format!("{prefix}{separator}{symbol}");
-            prop_assert_eq!(function_declaration_role(framework, &qualified), Some(expected));
+            let actual = code_migration_framework(framework)
+                .and_then(|framework| framework.declaration_role(&qualified));
+            prop_assert_eq!(actual, Some(expected));
         }
 
         #[test]

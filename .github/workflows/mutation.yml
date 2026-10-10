@@ -37,14 +37,17 @@ jobs:
         run: cargo install --locked cargo-mutants --version 27.1.0
 
       - name: Build the pull-request patch
+        id: patch
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           mkdir -p target
-          git diff --binary "$BASE_SHA...$HEAD_SHA" > target/mutation.patch
+          ./scripts/prepare-mutation-diff.sh \
+            "$BASE_SHA" "$HEAD_SHA" target/mutation.patch >> "$GITHUB_OUTPUT"
 
       - name: Mutate changed Rust code
+        if: steps.patch.outputs.has_mutable_source == 'true'
         run: make mutation-diff MUTATION_DIFF=target/mutation.patch
 
       - name: Preserve mutation evidence

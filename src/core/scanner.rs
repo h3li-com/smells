@@ -8,15 +8,19 @@ use crate::{
     scan, suppressions,
 };
 
-pub(crate) struct ScanEngine;
+pub(crate) struct ScanEngine<'a> {
+    repository: &'a dyn Repository,
+}
 
-impl Scanner for ScanEngine {
-    fn check(
-        &self,
-        repository: &dyn Repository,
-        request: &ScanRequest<'_>,
-    ) -> Result<Report, String> {
-        let captured_repository = repository.capture(request)?;
+impl<'a> ScanEngine<'a> {
+    pub(crate) fn new(repository: &'a dyn Repository) -> Self {
+        Self { repository }
+    }
+}
+
+impl Scanner for ScanEngine<'_> {
+    fn check(&self, request: &ScanRequest<'_>) -> Result<Report, String> {
+        let captured_repository = self.repository.capture(request)?;
         metrics::add(
             metrics::Counter::Files,
             captured_repository.captured.input.files.len(),
@@ -176,7 +180,8 @@ mod tests {
         let repository = InMemoryRepository::snapshot();
         let selection = SelectionOptions::default();
 
-        let report = ScanEngine.check(&repository, &request(&selection)).unwrap();
+        let scanner = ScanEngine::new(&repository);
+        let report = scanner.check(&request(&selection)).unwrap();
         let report = serde_json::to_value(report).unwrap();
 
         assert_eq!(repository.captures.get(), 1);
@@ -191,7 +196,8 @@ mod tests {
         let repository = InMemoryRepository::failing("snapshot unavailable");
         let selection = SelectionOptions::default();
 
-        let error = match ScanEngine.check(&repository, &request(&selection)) {
+        let scanner = ScanEngine::new(&repository);
+        let error = match scanner.check(&request(&selection)) {
             Ok(_) => panic!("repository failure must stop the scan"),
             Err(error) => error,
         };
@@ -205,7 +211,8 @@ mod tests {
         let repository = InMemoryRepository::with_evidence(b"not JSON");
         let selection = SelectionOptions::default();
 
-        let error = match ScanEngine.check(&repository, &request(&selection)) {
+        let scanner = ScanEngine::new(&repository);
+        let error = match scanner.check(&request(&selection)) {
             Ok(_) => panic!("invalid evidence must stop the scan"),
             Err(error) => error,
         };

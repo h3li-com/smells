@@ -5,9 +5,7 @@ use std::{
 };
 
 use crate::{
-    adapters::outbound::repository::LocalRepository,
     core::{
-        ScanEngine,
         model::{ScanRequest, ScanTarget},
         ports::inbound::Scanner,
     },
@@ -452,7 +450,7 @@ fn emit_report(report: &report::Report, options: &CheckOptions) -> Result<usize,
     Ok(saved_json_bytes.unwrap_or(stdout_json_bytes))
 }
 
-fn check(options: CheckOptions) -> Result<u8, String> {
+fn check(options: CheckOptions, scanner: &dyn Scanner) -> Result<u8, String> {
     metrics::reset();
     let target = match options.source.as_deref() {
         Some(source) => ScanTarget::WorkingTree(source),
@@ -465,7 +463,7 @@ fn check(options: CheckOptions) -> Result<u8, String> {
         evidence_path: options.evidence_path.as_deref(),
         selection: &options.selection,
     };
-    let report = ScanEngine.check(&LocalRepository, &request)?;
+    let report = scanner.check(&request)?;
     metrics::write(emit_report(&report, &options)?)?;
     Ok(report.exit())
 }
@@ -550,7 +548,7 @@ fn write_finding_log(report: &report::Report, path: &std::path::Path) -> Result<
         .map_err(|error| format!("cannot write finding log {}: {error}", path.display()))
 }
 
-pub(crate) fn run(args: Vec<String>) -> Result<u8, String> {
+pub(crate) fn run(args: Vec<String>, scanner: &dyn Scanner) -> Result<u8, String> {
     match command(&args)? {
         Command::Help => {
             println!("{USAGE}");
@@ -567,6 +565,6 @@ pub(crate) fn run(args: Vec<String>) -> Result<u8, String> {
         }
         Command::Validate(policy_path) => validate_contracts(&policy_path),
         Command::Show(options) => show_policy(options),
-        Command::Check(options) => check(options),
+        Command::Check(options) => check(options, scanner),
     }
 }

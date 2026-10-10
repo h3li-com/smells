@@ -1,5 +1,8 @@
 use crate::{
-    core::migration::{function_declaration_role, leaf_symbol, reported_role},
+    core::migration::{
+        CanonicalDeclaration, CodeMigrationFramework, TypeScriptClassContract,
+        TypeScriptExportContract, code_migration_framework, leaf_symbol, reported_role,
+    },
     core::model::{
         Implementation, Input, MigrationArtifact, ResolvedSourceRole, RoleContext,
         SourceRoleCandidate,
@@ -548,7 +551,7 @@ fn parameter_is_exact_import(
 }
 
 fn typescript_export_parameter_matches(
-    framework: &str,
+    contract: TypeScriptExportContract,
     code: &str,
     imports: &[String],
     name: &str,
@@ -560,18 +563,26 @@ fn typescript_export_parameter_matches(
     if declared {
         return !parameters.is_empty();
     }
-    package_bound_parameter(framework, &parameters, imports)
-        || (framework == "sequelize_umzug" && umzug_migration_annotation(code, imports, name))
+    package_bound_parameter(contract, &parameters, imports)
+        || (contract == TypeScriptExportContract::SequelizeUmzug
+            && umzug_migration_annotation(code, imports, name))
 }
 
-fn package_bound_parameter(framework: &str, parameters: &str, imports: &[String]) -> bool {
-    match framework {
-        "knex" => parameter_uses_import(parameters, imports, "knex", "Knex"),
-        "kysely" => parameter_uses_import(parameters, imports, "kysely", "Kysely"),
-        "sequelize_umzug" => {
+fn package_bound_parameter(
+    contract: TypeScriptExportContract,
+    parameters: &str,
+    imports: &[String],
+) -> bool {
+    match contract {
+        TypeScriptExportContract::Knex => {
+            parameter_uses_import(parameters, imports, "knex", "Knex")
+        }
+        TypeScriptExportContract::Kysely => {
+            parameter_uses_import(parameters, imports, "kysely", "Kysely")
+        }
+        TypeScriptExportContract::SequelizeUmzug => {
             parameter_uses_import(parameters, imports, "sequelize", "QueryInterface")
         }
-        _ => false,
     }
 }
 
@@ -605,36 +616,63 @@ fn code_constructs_import(
 
 fn inferred_typeorm(imports: &[String], classes: &[TypescriptClassShape], source: &str) -> bool {
     imported_from(imports, "typeorm")
-        && classes
-            .iter()
-            .any(|class| class_shell_matches("typeorm", source, &class.name, false))
+        && classes.iter().any(|class| {
+            class_shell_matches(TypeScriptClassContract::TypeOrm, source, &class.name, false)
+        })
 }
 
 fn inferred_mikro_orm(imports: &[String], classes: &[TypescriptClassShape], source: &str) -> bool {
     imported_from(imports, "@mikro-orm/migrations")
-        && classes
-            .iter()
-            .any(|class| class_shell_matches("mikro_orm", source, &class.name, false))
+        && classes.iter().any(|class| {
+            class_shell_matches(
+                TypeScriptClassContract::MikroOrm,
+                source,
+                &class.name,
+                false,
+            )
+        })
 }
 
 fn inferred_kysely(imports: &[String], code: &str) -> bool {
     imported_from(imports, "kysely")
         && exported_typescript_function(code, "up")
-        && typescript_export_parameter_matches("kysely", code, imports, "up", false)
+        && typescript_export_parameter_matches(
+            TypeScriptExportContract::Kysely,
+            code,
+            imports,
+            "up",
+            false,
+        )
 }
 
 fn inferred_knex(imports: &[String], code: &str) -> bool {
     imported_from(imports, "knex")
         && exported_typescript_function(code, "up")
         && exported_typescript_function(code, "down")
-        && typescript_export_parameter_matches("knex", code, imports, "up", false)
-        && typescript_export_parameter_matches("knex", code, imports, "down", false)
+        && typescript_export_parameter_matches(
+            TypeScriptExportContract::Knex,
+            code,
+            imports,
+            "up",
+            false,
+        )
+        && typescript_export_parameter_matches(
+            TypeScriptExportContract::Knex,
+            code,
+            imports,
+            "down",
+            false,
+        )
 }
 
 fn sequelize_entrypoints_use_query_interface(imports: &[String], code: &str) -> bool {
     ["up", "down"].iter().all(|name| {
         exported_typescript_parameters(code, name).is_some_and(|parameters| {
-            package_bound_parameter("sequelize_umzug", &parameters, imports)
+            package_bound_parameter(
+                TypeScriptExportContract::SequelizeUmzug,
+                &parameters,
+                imports,
+            )
         })
     })
 }
@@ -1047,18 +1085,23 @@ fn prisma_class_shell(
 }
 
 fn class_shell_matches(
-    framework: &str,
+    contract: TypeScriptClassContract,
     source: &str,
     symbol: &str,
     allow_declared_alias: bool,
 ) -> bool {
     let imports = actual_imports("migration.ts", source).unwrap_or_default();
     let classes = typescript_class_shapes(source).unwrap_or_default();
-    let matches = |class: &TypescriptClassShape| match framework {
-        "typeorm" => typeorm_class_shell(class, &imports, allow_declared_alias),
-        "mikro_orm" => mikro_orm_class_shell(class, &imports, allow_declared_alias),
-        "prisma_8" => prisma_class_shell(class, &imports, allow_declared_alias),
-        _ => false,
+    let matches = |class: &TypescriptClassShape| match contract {
+        TypeScriptClassContract::TypeOrm => {
+            typeorm_class_shell(class, &imports, allow_declared_alias)
+        }
+        TypeScriptClassContract::MikroOrm => {
+            mikro_orm_class_shell(class, &imports, allow_declared_alias)
+        }
+        TypeScriptClassContract::Prisma8 => {
+            prisma_class_shell(class, &imports, allow_declared_alias)
+        }
     };
     if allow_declared_alias && classes.iter().filter(|class| matches(class)).count() != 1 {
         return false;
@@ -1084,16 +1127,16 @@ fn canonical_alembic(source: &str, name: &str, owner: Option<&str>) -> bool {
 }
 
 fn canonical_typescript_class(
-    framework: &str,
+    contract: TypeScriptClassContract,
     source: &str,
     owner: Option<&str>,
     declared: bool,
 ) -> bool {
-    owner.is_some_and(|owner| class_shell_matches(framework, source, leaf_symbol(owner), declared))
+    owner.is_some_and(|owner| class_shell_matches(contract, source, leaf_symbol(owner), declared))
 }
 
 fn canonical_typescript_export(
-    framework: &str,
+    contract: TypeScriptExportContract,
     source: &str,
     name: &str,
     owner: Option<&str>,
@@ -1107,7 +1150,7 @@ fn canonical_typescript_export(
     };
     owner.is_none()
         && exported_typescript_function(&code, name)
-        && typescript_export_parameter_matches(framework, &code, &imports, name, declared)
+        && typescript_export_parameter_matches(contract, &code, &imports, name, declared)
 }
 
 fn canonical_refinery(source: &str, name: &str, owner: Option<&str>) -> bool {
@@ -1125,23 +1168,22 @@ fn canonical_refinery(source: &str, name: &str, owner: Option<&str>) -> bool {
 }
 
 fn canonical_function(
-    framework: &str,
+    framework: &CodeMigrationFramework,
     source: &str,
     symbol: &str,
     owner: Option<&str>,
     declared: bool,
 ) -> bool {
     let name = leaf_symbol(symbol);
-    match framework {
-        "alembic" => canonical_alembic(source, name, owner),
-        "typeorm" | "mikro_orm" | "prisma_8" => {
-            canonical_typescript_class(framework, source, owner, declared)
+    match framework.canonical_declaration() {
+        CanonicalDeclaration::AlembicFunction => canonical_alembic(source, name, owner),
+        CanonicalDeclaration::TypeScriptClass(contract) => {
+            canonical_typescript_class(contract, source, owner, declared)
         }
-        "knex" | "kysely" | "sequelize_umzug" => {
-            canonical_typescript_export(framework, source, name, owner, declared)
+        CanonicalDeclaration::TypeScriptExport(contract) => {
+            canonical_typescript_export(contract, source, name, owner, declared)
         }
-        "refinery" => canonical_refinery(source, name, owner),
-        _ => false,
+        CanonicalDeclaration::RefineryFunction => canonical_refinery(source, name, owner),
     }
 }
 
@@ -1153,26 +1195,21 @@ pub fn function_role(
 ) -> Option<RoleContext> {
     let role = input.source_roles.iter().find(|role| role.path == path)?;
     let source = input.files.get(path)?;
-    let declaration_role = function_declaration_role(&role.framework, symbol)?;
-    let canonical = canonical_function(
-        &role.framework,
-        source,
-        symbol,
-        owner,
-        role.source == "declared",
-    );
+    let framework = code_migration_framework(&role.framework)?;
+    let declaration_role = framework.declaration_role(symbol)?;
+    let canonical = canonical_function(framework, source, symbol, owner, role.source == "declared");
     reported_role(role, declaration_role, canonical)
 }
 
 pub fn class_role(input: &Input, path: &str, symbol: &str) -> Option<RoleContext> {
     let source_role = input.source_roles.iter().find(|role| role.path == path)?;
     let source = input.files.get(path)?;
-    let canonical = class_shell_matches(
-        &source_role.framework,
-        source,
-        symbol,
-        source_role.source == "declared",
-    );
+    let CanonicalDeclaration::TypeScriptClass(contract) =
+        code_migration_framework(&source_role.framework)?.canonical_declaration()
+    else {
+        return None;
+    };
+    let canonical = class_shell_matches(contract, source, symbol, source_role.source == "declared");
     reported_role(source_role, "migration_shell", canonical)
 }
 
@@ -1659,6 +1696,11 @@ mod tests {
             "  async down(queryRunner: QueryRunner) {}\n",
             "}\n",
         );
-        assert!(class_shell_matches("typeorm", source, "Accounts", true));
+        assert!(class_shell_matches(
+            TypeScriptClassContract::TypeOrm,
+            source,
+            "Accounts",
+            true
+        ));
     }
 }

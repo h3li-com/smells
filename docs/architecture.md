@@ -39,6 +39,10 @@ in behavior-preserving slices. They are internal implementation called by `core`
 external technology dependencies must enter through an adapter instead of expanding
 that transitional layout.
 
+`lib.rs` is the composition root: it connects the CLI adapter, scan engine, and local
+repository adapter. Neither adapter imports or constructs the other, and the inbound
+`Scanner` port does not expose the core's outbound dependencies to its caller.
+
 This follows the original pattern's inside/outside asymmetry and its primary/driving
 versus secondary/driven terminology:
 

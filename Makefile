@@ -16,29 +16,19 @@ benchmark-release-gate:
 
 mutation-test-core:
 	mkdir -p target/mutants
-	PROPTEST_DISABLE_FAILURE_PERSISTENCE=1 cargo mutants \
-		--file src/core/migration.rs --in-place \
-		--output target/mutants/core-migration \
-		-- --lib core::migration::tests
-	python3 scripts/mutation-summary.py \
-		target/mutants/core-migration/mutants.out/outcomes.json
+	@./scripts/run-mutation-test.sh target/mutants/core-migration \
+		--file src/core/migration.rs -- --lib core::migration::tests
 
 mutation-diff:
 	@test -n "$(MUTATION_DIFF)" || \
 		(echo 'MUTATION_DIFF must name a Git patch file' >&2; exit 2)
 	mkdir -p target/mutants
-	PROPTEST_DISABLE_FAILURE_PERSISTENCE=1 cargo mutants \
-		--in-diff "$(MUTATION_DIFF)" --in-place \
-		--output target/mutants/diff
-	python3 scripts/mutation-summary.py \
-		target/mutants/diff/mutants.out/outcomes.json
+	@./scripts/run-mutation-test.sh target/mutants/diff \
+		--in-diff "$(MUTATION_DIFF)"
 
 mutation-full:
 	mkdir -p target/mutants
-	PROPTEST_DISABLE_FAILURE_PERSISTENCE=1 cargo mutants \
-		--in-place --output target/mutants/full
-	python3 scripts/mutation-summary.py \
-		target/mutants/full/mutants.out/outcomes.json
+	@./scripts/run-mutation-test.sh target/mutants/full
 
 real-repository-e2e:
 	cargo build --locked --release
@@ -66,8 +56,10 @@ release-check:
 		scripts/publish-crate.sh scripts/bootstrap-npm-release.sh \
 		scripts/configure-main-protection.sh scripts/verify-release-actor.sh \
 		scripts/verify-registry-release.sh scripts/dispatch-registry-publications.sh \
-		scripts/benchmark-release-gate.sh \
+		scripts/benchmark-release-gate.sh scripts/prepare-mutation-diff.sh \
+		scripts/run-mutation-test.sh \
 		scripts/collect-release-artifacts.sh tests/release-artifacts.sh \
+		tests/mutation-runner.sh tests/mutation-workflow.sh \
 		tests/real-repositories.sh \
 		tests/npm-packages.sh tests/npm-publisher.sh tests/npm-bootstrap.sh \
 		tests/crate-package.sh tests/registry-publication.sh \
@@ -79,6 +71,8 @@ release-check:
 	@sh tests/crate-package.sh
 	@sh tests/registry-publication.sh
 	@sh tests/release-workflow.sh
+	@sh tests/mutation-runner.sh
+	@sh tests/mutation-workflow.sh
 	@node --check npm/smells.js
 	@node --check npm/build-package.mjs
 	@node --check npm/publish-packages.mjs
