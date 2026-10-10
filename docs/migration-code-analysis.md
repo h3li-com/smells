@@ -9,7 +9,7 @@ framework facts on which they depend.
 
 ## Implementation status
 
-The initial recommendation is implemented on `feat/migration-source-roles`:
+The initial recommendation is implemented:
 
 - optional, validated, repository-root-anchored `source_roles` policy declarations;
 - high-confidence built-in source classifiers for Alembic, Django, TypeORM,
@@ -29,6 +29,11 @@ The dialect-aware SQL rule pack, trusted applied-state/provider evidence, and
 Prisma 8 package-version resolution, declaration-level `rusqlite_migration` sequence
 extraction, framework-configuration resolution, and role-local declaration spans are
 also deferred; Prisma 8 and `rusqlite_migration` can currently be declared explicitly.
+
+The code follows the repository's [hexagonal architecture](architecture.md): the
+scanner and migration policy are inside `core`, the CLI is a driving/inbound adapter,
+and filesystem/Git capture is a driven/outbound adapter. Cockburn's “application” is
+the whole inside; it is not represented by another `application/` directory.
 
 ## Executive decision
 
@@ -299,3 +304,26 @@ Alembic `versions` exception should not become a global directory exclusion. The
 mistake would miss configured TypeScript layouts, hide SeaORM and Refinery Rust source,
 misclassify Kysely or Umzug functions, and still leave the shared SQL migration bodies
 entirely unexamined.
+
+## Verification strategy
+
+Tests follow architectural responsibility rather than framework branding:
+
+- Core unit tests exercise classification, disposition, report state, and scan
+  orchestration through in-memory ports. They do not boot Alembic, TypeORM, Drizzle,
+  or SeaORM.
+- Property tests exercise domain invariants such as fail-closed canonicality and
+  provenance preservation.
+- Integration tests feed framework-shaped source, manifests, policies, working-tree
+  snapshots, and staged snapshots through the public scanner boundary.
+- Mutation tests run against changed Rust on pull requests and the full source tree on
+  a weekly/manual schedule. Reports separate caught, survived, unviable, and timed-out
+  mutants instead of hiding untested outcomes in one score.
+- `make real-repository-e2e` performs static scans of pinned FastAPI/Alembic,
+  SeaORM, TypeORM, and Drizzle repositories. It evaluates all 23 smell categories,
+  verifies both positive and fail-closed migration behavior, installs no repository
+  dependencies, and never executes a migration.
+
+Database upgrade/downgrade/replay tests belong to applications that own a schema and
+database. Smells verifies its static interpretation of those artifacts; it must not
+turn a source scan into an implicit framework or database execution.

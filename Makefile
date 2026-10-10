@@ -2,7 +2,7 @@ SHELL := /bin/sh
 
 .PHONY: benchmark-release-gate build check-tools crap-gate fmt gitleaks install-hooks \
 	mutation-diff mutation-full mutation-test-core osv-scan pre-commit pre-commit-push \
-	pre-push release-check self-smell-check test
+	pre-push real-repository-e2e release-check self-smell-check test
 
 # Both Git hooks deliberately run the same fail-closed gate. This makes a manual
 # invocation identical to the checks performed immediately before commit/push.
@@ -40,6 +40,10 @@ mutation-full:
 	python3 scripts/mutation-summary.py \
 		target/mutants/full/mutants.out/outcomes.json
 
+real-repository-e2e:
+	cargo build --locked --release
+	SMELLS_BIN="$(CURDIR)/target/release/smells" ./tests/real-repositories.sh
+
 pre-commit-push: check-tools fmt build test release-check self-smell-check crap-gate gitleaks osv-scan
 
 check-tools:
@@ -64,6 +68,7 @@ release-check:
 		scripts/verify-registry-release.sh scripts/dispatch-registry-publications.sh \
 		scripts/benchmark-release-gate.sh \
 		scripts/collect-release-artifacts.sh tests/release-artifacts.sh \
+		tests/real-repositories.sh \
 		tests/npm-packages.sh tests/npm-publisher.sh tests/npm-bootstrap.sh \
 		tests/crate-package.sh tests/registry-publication.sh \
 		tests/release-workflow.sh

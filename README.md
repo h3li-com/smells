@@ -467,6 +467,8 @@ See [package distribution](docs/package-distribution.md) and the [release proces
 
 ## Reference documentation
 
+- [Hexagonal architecture](docs/architecture.md)
+- [Migration design and framework evidence](docs/migration-code-analysis.md)
 - [Project integration](docs/project-integration.md)
 - [Report interface](docs/report-interface.md)
 - [Provider evidence](docs/provider-evidence.md)
@@ -485,6 +487,18 @@ make pre-commit-push
 ```
 
 It runs formatting, build, Clippy, the offline test suite, the scanner against itself, CRAP analysis, Gitleaks, and OSV. Pull requests run the same fail-closed gate and must originate from a fork.
+
+Run the focused mutation test for the migration domain or the pinned, static
+real-repository E2E suite explicitly:
+
+```sh
+make mutation-test-core
+make real-repository-e2e
+```
+
+The real-repository suite installs no fixture dependencies and never executes a
+migration. Changed-code mutation testing runs on pull requests; full-source mutation
+testing runs weekly or on manual dispatch.
 
 The optional live test exercises the complete finding-to-Refactoring.Guru research path:
 

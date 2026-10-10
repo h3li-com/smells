@@ -35,6 +35,7 @@ include = [
     "docs/typescript-rule-contracts.md",
     "docs/report-interface.md",
     "docs/migration-code-analysis.md",
+    "docs/architecture.md",
     "docs/provider-evidence.md",
     "/Cargo.toml",
     "/Cargo.lock",
