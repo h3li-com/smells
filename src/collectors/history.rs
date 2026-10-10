@@ -1,5 +1,5 @@
 use super::common::{location_at, observation};
-use crate::{evidence::Observation, input::Input};
+use crate::{core::model::Input, evidence::Observation};
 use serde_json::json;
 use std::{collections::BTreeSet, path::Path};
 

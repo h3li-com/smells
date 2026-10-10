@@ -1,7 +1,7 @@
 use crate::{
     collectors,
+    core::model::Input,
     evidence_evaluators::evaluate,
-    input::Input,
     policy::{Registry, Rule},
     report::{FindingRelations, Location, Report},
 };

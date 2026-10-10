@@ -2,7 +2,7 @@ use super::{
     Finding, ImplementationResult, Location, Report, ReportError, SourceExcerpt,
     finding_in_source_files, path_in_source_files,
 };
-use crate::input::Implementation;
+use crate::core::model::Implementation;
 use std::io::{self, Write};
 
 struct FindingLogEntry {

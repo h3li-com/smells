@@ -1,6 +1,8 @@
 use crate::{
-    input::{History, Implementation, Input},
-    migration::{MigrationArtifact, ResolvedSourceRole, RoleContext, SourceRoleCandidate},
+    core::model::{
+        History, Implementation, Input, MigrationArtifact, ResolvedSourceRole, RoleContext,
+        SourceRoleCandidate,
+    },
     policy::{Policy, Registry, ResolvedSelection},
 };
 use serde::Serialize;
@@ -28,6 +30,24 @@ use model::{ImplementationSummary, SmellStateInputs, smell_state, source_excerpt
 const IMPLEMENTATION_INPUTS: &[&[u8]] = &[
     include_bytes!("../Cargo.lock"),
     include_bytes!("../Cargo.toml"),
+    include_bytes!("lib.rs"),
+    include_bytes!("adapters/mod.rs"),
+    include_bytes!("adapters/inbound/mod.rs"),
+    include_bytes!("adapters/inbound/cli.rs"),
+    include_bytes!("adapters/outbound/mod.rs"),
+    include_bytes!("adapters/outbound/repository/mod.rs"),
+    include_bytes!("core/mod.rs"),
+    include_bytes!("core/migration.rs"),
+    include_bytes!("core/model/mod.rs"),
+    include_bytes!("core/model/migration.rs"),
+    include_bytes!("core/model/scan.rs"),
+    include_bytes!("core/model/snapshot.rs"),
+    include_bytes!("core/ports/mod.rs"),
+    include_bytes!("core/ports/inbound/mod.rs"),
+    include_bytes!("core/ports/inbound/scanner.rs"),
+    include_bytes!("core/ports/outbound/mod.rs"),
+    include_bytes!("core/ports/outbound/repository.rs"),
+    include_bytes!("core/scanner.rs"),
     include_bytes!("catalog.rs"),
     include_bytes!("policy.rs"),
     include_bytes!("scan.rs"),
@@ -39,6 +59,7 @@ const IMPLEMENTATION_INPUTS: &[&[u8]] = &[
     include_bytes!("portable/rules.rs"),
     include_bytes!("patterns.rs"),
     include_bytes!("similarity.rs"),
+    include_bytes!("suppressions.rs"),
     include_bytes!("input.rs"),
     include_bytes!("collectors/mod.rs"),
     include_bytes!("collectors/common.rs"),
@@ -1121,7 +1142,7 @@ mod tests {
         model::{CoverageStatus, SmellStateInputs},
         smell_state, write_finding_log,
     };
-    use crate::input::History;
+    use crate::core::model::History;
     use serde_json::json;
 
     #[test]

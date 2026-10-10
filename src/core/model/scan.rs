@@ -1,6 +1,8 @@
 use std::path::Path;
 
-use crate::{input::CapturedInput, policy::SelectionOptions};
+use crate::policy::SelectionOptions;
+
+use super::CapturedInput;
 
 /// Repository state selected for one scan.
 #[derive(Clone, Copy)]

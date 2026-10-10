@@ -3,7 +3,7 @@ use super::{
     model::{ClassFact, SourceModel},
     syntax::code_only,
 };
-use crate::{evidence::Observation, input::Input, policy::Rule};
+use crate::{core::model::Input, evidence::Observation, policy::Rule};
 use regex::Regex;
 use serde_json::json;
 use std::{

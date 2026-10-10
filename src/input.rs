@@ -1,4 +1,7 @@
-use crate::policy::{Policy, Registry, SelectionOptions};
+use crate::{
+    core::model::{CapturedInput, History, HistoryCommit, Implementation, Input},
+    policy::{Policy, Registry, SelectionOptions},
+};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -6,45 +9,6 @@ use std::{
     path::{Component, Path, PathBuf},
     process::Command,
 };
-
-pub struct Input {
-    pub files: BTreeMap<String, String>,
-    pub artifacts: BTreeMap<String, Vec<u8>>,
-    pub implementations: Vec<Implementation>,
-    pub source_roles: Vec<crate::migration::ResolvedSourceRole>,
-    pub history: History,
-    pub policy: Policy,
-    pub digest: String,
-    pub mode: &'static str,
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct History {
-    pub available: bool,
-    pub commits: Vec<HistoryCommit>,
-}
-
-#[derive(Clone, Debug)]
-pub struct HistoryCommit {
-    pub id: String,
-    pub files: Vec<String>,
-}
-
-#[derive(Clone, Debug)]
-pub struct Implementation {
-    pub id: String,
-    pub root: Option<String>,
-    pub ownership: &'static str,
-    pub implementation_types: Vec<String>,
-    pub runtime_types: Vec<String>,
-    pub runtime_manifests: Vec<String>,
-    pub source_files: Vec<String>,
-}
-
-pub struct CapturedInput {
-    pub input: Input,
-    pub registry: Registry,
-}
 
 pub fn digest(parts: &[&[u8]]) -> String {
     let mut hash = Sha256::new();

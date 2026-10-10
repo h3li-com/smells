@@ -9,8 +9,8 @@ mod syntax;
 pub(crate) use syntax::{code_only, import_statements};
 
 use crate::{
+    core::model::Input,
     evidence::Observation,
-    input::Input,
     policy::Rule,
     rule_runtime::{CollectorDomain, ContractCollector, RuleKind, StructuralCollector},
 };

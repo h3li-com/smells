@@ -2,7 +2,7 @@ use super::{
     common::simple_names,
     syntax::{code_only, code_only_from_tree},
 };
-use crate::{input::Input, policy::Rule, report::Location};
+use crate::{core::model::Input, policy::Rule, report::Location};
 use quote::ToTokens;
 use rayon::prelude::*;
 use regex::Regex;

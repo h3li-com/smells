@@ -1,5 +1,5 @@
 use crate::{
-    input::Input,
+    core::model::Input,
     metrics::{self, Counter},
     policy::{Policy, Registry},
     report::{FindingRelations, Location, Report},

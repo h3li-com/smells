@@ -1,11 +1,9 @@
 use crate::{
     core::{
-        model::ScanRequest,
+        model::{CapturedInput, ScanRequest},
         ports::{inbound::Scanner, outbound::Repository},
     },
-    evidence,
-    input::CapturedInput,
-    metrics, portable,
+    evidence, metrics, portable,
     report::Report,
     scan, suppressions,
 };
@@ -78,7 +76,7 @@ mod tests {
     use super::*;
     use crate::{
         core::model::{CapturedRepository, ScanTarget},
-        input::{History, Implementation, Input},
+        core::model::{History, Implementation, Input},
         policy::SelectionOptions,
     };
 

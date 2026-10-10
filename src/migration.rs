@@ -1,9 +1,12 @@
 use crate::{
-    input::{Implementation, Input},
+    core::migration::{function_declaration_role, leaf_symbol, reported_role},
+    core::model::{
+        Implementation, Input, MigrationArtifact, ResolvedSourceRole, RoleContext,
+        SourceRoleCandidate,
+    },
     policy::{Policy, SourceRoleDeclaration},
 };
 use regex::Regex;
-use serde::Serialize;
 use std::sync::OnceLock;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -11,52 +14,9 @@ use std::{
 };
 use tree_sitter::{Node, Parser};
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
-pub struct ResolvedSourceRole {
-    pub role: String,
-    pub framework: String,
-    pub implementation_id: String,
-    pub path: String,
-    pub path_scope: String,
-    pub source: String,
-    pub confidence: String,
-    pub evidence: Vec<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize)]
-pub struct RoleContext {
-    pub source_role: String,
-    pub declaration_role: String,
-    pub framework: String,
-    pub implementation_id: String,
-    pub source: String,
-    pub confidence: String,
-    pub path_scope: String,
-    pub evidence: Vec<String>,
-    pub disposition: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize)]
-pub struct MigrationArtifact {
-    pub role: String,
-    pub framework: String,
-    pub implementation_id: String,
-    pub path: String,
-    pub status: String,
-    pub evidence: Vec<String>,
-}
-
 #[derive(Default)]
 pub struct MigrationArtifactIndex {
     drizzle_directories: BTreeMap<String, BTreeSet<String>>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize)]
-pub struct SourceRoleCandidate {
-    pub role: String,
-    pub path: String,
-    pub confidence: String,
-    pub evidence: Vec<String>,
 }
 
 fn glob_regex(scope: &str) -> Result<Regex, String> {
@@ -1016,34 +976,6 @@ fn inferred_source_role(
     }
 }
 
-fn leaf_symbol(symbol: &str) -> &str {
-    symbol
-        .rsplit([':', '.'])
-        .find(|component| !component.is_empty())
-        .unwrap_or(symbol)
-}
-
-fn declaration_role(framework: &str, symbol: &str) -> Option<&'static str> {
-    let name = leaf_symbol(symbol);
-    match (framework, name) {
-        ("alembic", "upgrade")
-        | ("typeorm", "up")
-        | ("knex", "up")
-        | ("mikro_orm", "up")
-        | ("kysely", "up")
-        | ("sequelize_umzug", "up") => Some("migration_up"),
-        ("alembic", "downgrade")
-        | ("typeorm", "down")
-        | ("knex", "down")
-        | ("mikro_orm", "down")
-        | ("kysely", "down")
-        | ("sequelize_umzug", "down") => Some("migration_down"),
-        ("prisma_8", "operations") => Some("migration_operations"),
-        ("refinery", "migration") => Some("migration_sql_builder"),
-        _ => None,
-    }
-}
-
 fn typeorm_class_shell(
     class: &TypescriptClassShape,
     imports: &[String],
@@ -1221,51 +1153,27 @@ pub fn function_role(
 ) -> Option<RoleContext> {
     let role = input.source_roles.iter().find(|role| role.path == path)?;
     let source = input.files.get(path)?;
-    let declaration_role = declaration_role(&role.framework, symbol)?;
-    if !canonical_function(
+    let declaration_role = function_declaration_role(&role.framework, symbol)?;
+    let canonical = canonical_function(
         &role.framework,
         source,
         symbol,
         owner,
         role.source == "declared",
-    ) {
-        return None;
-    }
-    Some(RoleContext {
-        source_role: role.role.clone(),
-        declaration_role: declaration_role.into(),
-        framework: role.framework.clone(),
-        implementation_id: role.implementation_id.clone(),
-        source: role.source.clone(),
-        confidence: role.confidence.clone(),
-        path_scope: role.path_scope.clone(),
-        evidence: role.evidence.clone(),
-        disposition: "reported_by_role".into(),
-    })
+    );
+    reported_role(role, declaration_role, canonical)
 }
 
 pub fn class_role(input: &Input, path: &str, symbol: &str) -> Option<RoleContext> {
     let source_role = input.source_roles.iter().find(|role| role.path == path)?;
     let source = input.files.get(path)?;
-    if !class_shell_matches(
+    let canonical = class_shell_matches(
         &source_role.framework,
         source,
         symbol,
         source_role.source == "declared",
-    ) {
-        return None;
-    }
-    Some(RoleContext {
-        source_role: source_role.role.clone(),
-        declaration_role: "migration_shell".into(),
-        framework: source_role.framework.clone(),
-        implementation_id: source_role.implementation_id.clone(),
-        source: source_role.source.clone(),
-        confidence: source_role.confidence.clone(),
-        path_scope: source_role.path_scope.clone(),
-        evidence: source_role.evidence.clone(),
-        disposition: "reported_by_role".into(),
-    })
+    );
+    reported_role(source_role, "migration_shell", canonical)
 }
 
 pub fn type_role(input: &Input, path: &str, symbol: &str) -> Option<RoleContext> {
@@ -1275,21 +1183,9 @@ pub fn type_role(input: &Input, path: &str, symbol: &str) -> Option<RoleContext>
     }
     let source = input.files.get(path)?;
     let code = code_only(path, source)?;
-    if !code.contains("impl MigrationTrait for Migration") || !unique_sea_orm_migration_type(&code)
-    {
-        return None;
-    }
-    Some(RoleContext {
-        source_role: source_role.role.clone(),
-        declaration_role: "migration_shell".into(),
-        framework: source_role.framework.clone(),
-        implementation_id: source_role.implementation_id.clone(),
-        source: source_role.source.clone(),
-        confidence: source_role.confidence.clone(),
-        path_scope: source_role.path_scope.clone(),
-        evidence: source_role.evidence.clone(),
-        disposition: "reported_by_role".into(),
-    })
+    let canonical =
+        code.contains("impl MigrationTrait for Migration") && unique_sea_orm_migration_type(&code);
+    reported_role(source_role, "migration_shell", canonical)
 }
 
 fn artifact(

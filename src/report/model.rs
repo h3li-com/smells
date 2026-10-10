@@ -1,4 +1,4 @@
-use crate::migration::RoleContext;
+use crate::core::model::RoleContext;
 use crate::policy::Mode;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, value::RawValue};
