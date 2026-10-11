@@ -438,6 +438,180 @@ pub(super) fn smell_state(inputs: SmellStateInputs) -> SmellStatus {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn location(path: &str, line: usize, column: usize) -> Location {
+        Location {
+            path: path.into(),
+            line,
+            column,
+        }
+    }
+
+    #[test]
+    fn source_excerpt_rejects_unknown_and_out_of_range_locations() {
+        let files = BTreeMap::from([("sample.rs".into(), "first\nsecond".into())]);
+        assert!(source_excerpt(&files, &location("missing.rs", 1, 1)).is_none());
+        assert!(source_excerpt(&files, &location("sample.rs", 0, 1)).is_none());
+        assert!(source_excerpt(&files, &location("sample.rs", 3, 1)).is_none());
+        assert!(source_excerpt(&files, &location("sample.rs", 2, 1)).is_some());
+    }
+
+    #[test]
+    fn source_excerpt_uses_one_context_line_and_one_based_display_columns() {
+        let files = BTreeMap::from([("sample.rs".into(), "zero\none\ntwo\nthree\nfour".into())]);
+        let excerpt = source_excerpt(&files, &location("sample.rs", 3, 2)).unwrap();
+        assert_eq!(excerpt.path, "sample.rs");
+        assert_eq!(excerpt.focus_line, 3);
+        assert_eq!(excerpt.focus_column, 2);
+        assert_eq!(
+            excerpt
+                .lines
+                .iter()
+                .map(|line| (line.line, line.display_start_column, line.text.as_str()))
+                .collect::<Vec<_>>(),
+            [(2, 1, "one"), (3, 1, "two"), (4, 1, "three")]
+        );
+        assert!(
+            excerpt
+                .lines
+                .iter()
+                .all(|line| !line.truncated_before && !line.truncated_after)
+        );
+    }
+
+    #[test]
+    fn source_excerpt_truncation_keeps_the_focus_visible_at_start_middle_and_end() {
+        let long = "é".repeat(500);
+        let files = BTreeMap::from([("long.py".into(), long)]);
+        let cases = [
+            (1, 1, false, true),
+            (251, 171, true, true),
+            (500, 181, true, false),
+        ];
+        for (focus_column, display_start, before, after) in cases {
+            let excerpt = source_excerpt(&files, &location("long.py", 1, focus_column)).unwrap();
+            let line = &excerpt.lines[0];
+            assert_eq!(line.line, 1);
+            assert_eq!(line.display_start_column, display_start);
+            assert_eq!(line.text.chars().count(), 320);
+            assert_eq!(line.truncated_before, before);
+            assert_eq!(line.truncated_after, after);
+            assert!(focus_column >= line.display_start_column);
+            assert!(focus_column < line.display_start_column + line.text.chars().count());
+        }
+    }
+
+    #[test]
+    fn measurement_serialization_keeps_compact_evaluation_and_raw_evidence() {
+        let measurement = Measurement {
+            rule_id: "rust.rule".into(),
+            symbol: "src/lib.rs::run".into(),
+            location: location("src/lib.rs", 2, 3),
+            related_symbols: vec!["src/lib.rs::other".into()],
+            related_locations: vec![location("src/lib.rs", 4, 1)],
+            observed: json!({"lines": 10}),
+            matched: true,
+            role_context: None,
+            evidence: serde_json::value::to_raw_value(&json!({"collector": "test"})).unwrap(),
+        };
+        let value = serde_json::to_value(&measurement).unwrap();
+        assert_eq!(value["rule_id"], "rust.rule");
+        assert_eq!(value["location"]["line"], 2);
+        assert_eq!(value["evaluation"]["observed"]["lines"], 10);
+        assert_eq!(value["evaluation"]["matched"], true);
+        assert_eq!(value["evidence"]["collector"], "test");
+        assert!(value.get("matched").is_none());
+    }
+
+    #[test]
+    fn state_labels_interpretations_and_display_are_stable_report_contracts() {
+        let states = [
+            (
+                SmellState::BlockingMatch,
+                "blocking_match",
+                "One or more required deterministic rules matched this smell pattern.",
+            ),
+            (
+                SmellState::IgnoredMatch,
+                "ignored_match",
+                "One or more deterministic matches were explicitly accepted by audited source-local suppressions.",
+            ),
+            (
+                SmellState::ReviewMatch,
+                "review_match",
+                "One or more report-only deterministic rules matched; semantic review is required before deciding whether to refactor.",
+            ),
+            (
+                SmellState::CheckedNoMatchInMeasuredScope,
+                "checked_no_match_in_measured_scope",
+                "No enabled implemented rule matched in its defined source scope; this is not proof that the semantic smell is absent.",
+            ),
+            (
+                SmellState::Pending,
+                "pending",
+                "No detector for this smell ran because its registered rules are not implemented yet.",
+            ),
+            (
+                SmellState::Excluded,
+                "excluded",
+                "All registered detectors for this smell were excluded by the resolved policy groups.",
+            ),
+            (
+                SmellState::Disabled,
+                "disabled",
+                "All registered detectors for this smell are disabled by policy.",
+            ),
+            (
+                SmellState::NotApplicable,
+                "not_applicable",
+                "This canonical smell does not apply to the selected language model.",
+            ),
+            (
+                SmellState::Error,
+                "error",
+                "Measurement is incomplete; do not infer that this smell is absent.",
+            ),
+        ];
+        for (state, label, interpretation) in states {
+            assert_eq!(state.as_str(), label);
+            assert_eq!(state.to_string(), label);
+            assert_eq!(state.interpretation(), interpretation);
+            assert_eq!(
+                serde_json::to_string(&state).unwrap(),
+                format!("\"{label}\"")
+            );
+        }
+
+        let coverage = [
+            (
+                CoverageStatus::MeasuredWithPendingRules,
+                "measured_with_pending_rules",
+            ),
+            (
+                CoverageStatus::MeasuredDefinedScope,
+                "measured_defined_scope",
+            ),
+            (CoverageStatus::Pending, "pending"),
+            (CoverageStatus::Excluded, "excluded"),
+            (CoverageStatus::Disabled, "disabled"),
+            (CoverageStatus::NotApplicable, "not_applicable"),
+            (CoverageStatus::Incomplete, "incomplete"),
+        ];
+        for (status, label) in coverage {
+            assert_eq!(status.as_str(), label);
+            assert_eq!(status.to_string(), label);
+            assert_eq!(
+                serde_json::to_string(&status).unwrap(),
+                format!("\"{label}\"")
+            );
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct ImplementationSummary {
     pub verdict: String,

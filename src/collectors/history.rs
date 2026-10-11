@@ -92,3 +92,16 @@ pub(super) fn shotgun_surgery(input: &Input) -> Vec<Observation> {
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::responsibility;
+
+    #[test]
+    fn responsibility_uses_top_level_owner_for_nested_paths_and_stem_for_root_files() {
+        assert_eq!(responsibility("backend/src/domain.rs"), "backend");
+        assert_eq!(responsibility("frontend/app.ts"), "frontend");
+        assert_eq!(responsibility("Cargo.toml"), "Cargo");
+        assert_eq!(responsibility("README"), "README");
+    }
+}

@@ -76,14 +76,6 @@ pub fn syntax<T: ToTokens>(value: &T) -> String {
     value.to_token_stream().to_string()
 }
 
-fn validate_required_rules(registry: &Registry, input: &Input, report: &mut Report) {
-    for rule in &registry.rules {
-        if rule.implementation == "not_implemented" && input.policy.required(&rule.id) {
-            report.error(format!("required detector not implemented: {}", rule.id));
-        }
-    }
-}
-
 pub fn check(input: &Input, registry: &Registry) -> Report {
     let mut report = Report::new(
         registry,
@@ -93,7 +85,9 @@ pub fn check(input: &Input, registry: &Registry) -> Report {
         &input.history,
     );
     report.begin_scan(input);
-    validate_required_rules(registry, input, &mut report);
+    for rule_id in crate::policy::required_unimplemented_rule_ids(registry, &input.policy) {
+        report.error(format!("required detector not implemented: {rule_id}"));
+    }
     let parsed = graph::parse_sources(input, &mut report);
     if parsed.len() != input.files.len() {
         return report;
@@ -115,7 +109,9 @@ pub fn check(input: &Input, registry: &Registry) -> Report {
         aliases: BTreeMap::new(),
     };
     facts.modules = graph::collect_modules(roots, &parsed, &mut report);
-    graph::validate_module_coverage(&facts.modules, &parsed, &mut report);
+    if let Err(error) = graph::validate_module_coverage(&facts.modules, &parsed) {
+        report.error(error);
+    }
     if report.has_errors() {
         return report;
     }

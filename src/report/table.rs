@@ -60,6 +60,22 @@ fn print_smell_results(implementation: &ImplementationResult) {
     }
 }
 
+fn matched_finding_in_scope(matched: bool, in_scope: bool) -> bool {
+    matched && in_scope
+}
+
+fn has_omitted_related_excerpts(count: usize) -> bool {
+    count > 0
+}
+
+fn guidance_reference_matches(candidate: &str, expected: &str) -> bool {
+    candidate == expected
+}
+
+fn source_line_marker(line: usize, focus_line: usize) -> &'static str {
+    if line == focus_line { ">" } else { " " }
+}
+
 fn print_matched_findings(
     report: &Report,
     implementation: &ImplementationResult,
@@ -74,7 +90,10 @@ fn print_matched_findings(
         .iter()
         .enumerate()
         .filter(|(_, finding)| {
-            finding.evaluation.matched && finding_in_source_files(finding, &scope.source_files)
+            matched_finding_in_scope(
+                finding.evaluation.matched,
+                finding_in_source_files(finding, &scope.source_files),
+            )
         })
         .collect();
     for (index, finding) in &matched_findings {
@@ -164,7 +183,7 @@ fn print_actionable_finding(report: &Report, index: usize, finding: &Finding) {
             Some(excerpt),
         );
     }
-    if finding.omitted_related_excerpts > 0 {
+    if has_omitted_related_excerpts(finding.omitted_related_excerpts) {
         println!(
             "  Related source excerpts omitted: {} (all locations remain in the evidence row and JSON report)",
             finding.omitted_related_excerpts
@@ -178,7 +197,7 @@ fn print_actionable_finding(report: &Report, index: usize, finding: &Finding) {
     let guidance = report
         .guidance_catalog
         .iter()
-        .find(|guidance| guidance.guidance_ref == finding.guidance_ref)
+        .find(|guidance| guidance_reference_matches(&guidance.guidance_ref, &finding.guidance_ref))
         .expect("finding guidance reference must resolve");
     println!("  When to ignore [{}]:", guidance.guidance_ref);
     println!(
@@ -204,11 +223,7 @@ fn print_source_excerpt(label: &str, excerpt: Option<&SourceExcerpt>) {
         excerpt.path, excerpt.focus_line, excerpt.focus_column
     );
     for line in &excerpt.lines {
-        let marker = if line.line == excerpt.focus_line {
-            ">"
-        } else {
-            " "
-        };
+        let marker = source_line_marker(line.line, excerpt.focus_line);
         println!("    {marker} {:>6} | {}", line.line, line.text);
     }
 }
@@ -324,11 +339,7 @@ fn finding_log_entry(report: &Report, finding: &Finding, status: &'static str) -
             excerpt.path, excerpt.focus_line, excerpt.focus_column
         ));
         for line in &excerpt.lines {
-            let marker = if line.line == excerpt.focus_line {
-                ">"
-            } else {
-                " "
-            };
+            let marker = source_line_marker(line.line, excerpt.focus_line);
             detail.push(format!("  {marker} {:>6} | {}", line.line, line.text));
         }
     } else {
@@ -493,5 +504,32 @@ impl Report {
         for error in &self.errors {
             eprintln!("ERROR: {}", error.message);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        guidance_reference_matches, has_omitted_related_excerpts, matched_finding_in_scope,
+        source_line_marker,
+    };
+
+    #[test]
+    fn table_includes_only_matched_findings_owned_by_the_current_scope() {
+        assert!(matched_finding_in_scope(true, true));
+        assert!(!matched_finding_in_scope(true, false));
+        assert!(!matched_finding_in_scope(false, true));
+        assert!(!matched_finding_in_scope(false, false));
+    }
+
+    #[test]
+    fn actionable_output_uses_exact_boundaries_and_identity() {
+        assert!(!has_omitted_related_excerpts(0));
+        assert!(has_omitted_related_excerpts(1));
+        assert!(guidance_reference_matches("guidance-a", "guidance-a"));
+        assert!(!guidance_reference_matches("guidance-a", "guidance-b"));
+        assert_eq!(source_line_marker(7, 7), ">");
+        assert_eq!(source_line_marker(6, 7), " ");
+        assert_eq!(source_line_marker(8, 7), " ");
     }
 }

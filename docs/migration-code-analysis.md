@@ -21,14 +21,19 @@ The initial recommendation is implemented:
   rules remain unchanged;
 - identical, Implementation-scoped role resolution in working-tree and staged
   snapshots; and
-- SQL artifact inventory with `migration_body_not_analyzed` for recognized Drizzle,
-  Prisma 7, SQLx, Diesel, and Refinery SQL bodies.
+- SQL and bundle artifact inventory for recognized Drizzle, Prisma 7/8, SQLx,
+  Diesel, and Refinery migrations, including unresolved-candidate reporting,
+  versioned contracts, statically located ownership provenance, and SQLx checksum
+  normalization metadata. Refinery literal paths are resolved from Rust APIs/macros
+  and a root checked-in Justfile launcher when no working-directory override is
+  present. Just runs recipes from the Justfile's directory by default
+  ([working-directory contract](https://just.systems/man/en/working-directory.html)).
 
-The dialect-aware SQL rule pack, trusted applied-state/provider evidence, and
-`pre_existing_migration_modified` lifecycle rule remain future phases. Automatic
-Prisma 8 package-version resolution, declaration-level `rusqlite_migration` sequence
-extraction, framework-configuration resolution, and role-local declaration spans are
-also deferred; Prisma 8 and `rusqlite_migration` can currently be declared explicitly.
+The dialect-aware SQL rule pack, trusted applied-state/provider evidence,
+`pre_existing_migration_modified` lifecycle rule, and declaration-level
+`rusqlite_migration` sequence extraction remain future phases. Prisma 8 RC is
+package-version gated; literal framework configuration and role-local declaration
+spans are resolved where the captured repository provides static evidence.
 
 The code follows the repository's [hexagonal architecture](architecture.md): the
 scanner and migration policy are inside `core`, the CLI is a driving/inbound adapter,
@@ -327,3 +332,110 @@ Tests follow architectural responsibility rather than framework branding:
 Database upgrade/downgrade/replay tests belong to applications that own a schema and
 database. Smells verifies its static interpretation of those artifacts; it must not
 turn a source scan into an implicit framework or database execution.
+
+## Remaining gaps audit (2026-10-11)
+
+This audit compares the implemented classifiers and report schema with current
+upstream documentation. It supersedes earlier descriptions in this document where
+Drizzle, Prisma 8, or SQLx have changed. “Must fix” means either a supported framework
+has a documented form that Smells currently misses, or the report can imply stronger
+coverage than the evidence supports. It does not mean Smells should execute a
+migration.
+
+### Resolved gaps required for current migration coverage
+
+The following findings drove the 2026-10-11 implementation. They are retained as
+the evidence ledger; each recommended change is now covered by repository tests.
+
+| Gap | Original false-negative or contract risk | Implemented change |
+| --- | --- | --- |
+| Drizzle v1 layout | Inventory recognizes legacy flat files such as `0000_name.sql`, while the current v1 upgrade and generate documentation uses `<out>/<14-digit timestamp>_<name>/migration.sql`; v1 also removed `journal.json`. ([v0-to-v1 changes](https://orm.drizzle.team/docs/v0-v1-changes), [generate](https://orm.drizzle.team/docs/drizzle-kit-generate)) | Recognize legacy and v1 layouts, resolve a literal [`out` setting](https://orm.drizzle.team/docs/drizzle-config-file), and record the matched layout version. |
+| Prisma 8 contract | Prisma 8 is currently RC, and its documented imports are `@prisma/orm-postgres/migration` and `@prisma/orm-mongo/target/migration`, not the fixture's `@prisma/migrations`. Production applies `ops.json`; `migration.ts` is authoring input and `migration.json` carries metadata/integrity information. ([release status](https://www.prisma.io/docs/orm/release-status), [Migration API](https://www.prisma.io/docs/orm/reference/migration-api), [how migrations work](https://docs.prisma.io/docs/orm/migrations/how-migrations-work)) | Keep detection explicitly version-gated/preview-aware; update imports and inventory the whole migration bundle. Report authored TypeScript separately from executed operations. |
+| Configured Prisma 7 paths | SQL inventory is hard-coded to `prisma/migrations`, but Prisma 7 supports a literal `migrations.path` in `prisma.config.ts`. ([configuration reference](https://www.prisma.io/docs/orm/v7/reference/prisma-config-reference), [migration histories](https://www.prisma.io/docs/orm/v7/prisma-migrate/understanding-prisma-migrate/migration-histories)) | Resolve statically provable paths; report dynamic expressions as unresolved instead of silently omitting their artifacts. |
+| SQLx discovery | SQLx migrations are only attributed after an embedded macro is found. Official SQLx also supports CLI migrations and an `[migrate] migrations-dir` in `sqlx.toml`; the directory can be supplied at runtime. ([configuration](https://docs.rs/sqlx/latest/sqlx/_config/_reference/index.html), [`migrate!`](https://docs.rs/sqlx/latest/sqlx/macro.migrate.html), [CLI](https://docs.rs/crate/sqlx-cli/latest)) | Add literal `sqlx.toml`, CLI/default-directory, and resolvable runtime-path evidence. Preserve SQLx's ignored-character checksum mode as integrity metadata rather than claiming a byte-exact digest. |
+| Diesel and Refinery CLI/file migrations | Both SQL inventories currently depend on embedded-migration evidence. Diesel documents file-based discovery and `from_path`; Refinery's CLI accepts a migration path without embedding. ([Diesel `FileBasedMigrations`](https://docs.rs/diesel_migrations/latest/diesel_migrations/struct.FileBasedMigrations.html), [Diesel guide](https://diesel.rs/guides/getting-started.html), [Refinery CLI](https://docs.rs/crate/refinery_cli/latest/source/README.md)) | Discover standard/default and literal configured paths without requiring an embed macro. Keep unresolved dynamic paths visible in the report. |
+| Umzug module shape | In the official TypeScript example, bootstrap exports `type Migration = typeof umzug._types.migration` and files import that local alias. `up` is required and `down` is optional. Direct `umzug`/Sequelize imports plus mandatory `down` therefore miss valid migrations. ([Umzug README](https://github.com/sequelize/umzug), [type contract](https://github.com/sequelize/umzug/blob/main/src/types.ts)) | Resolve the local alias from a configured/bootstrap module or require an explicit declaration; accept optional `down`. Preserve fail-closed handling for generic task files. |
+| Alembic multidatabase template | Python inference requires a zero-argument `upgrade()`, while Alembic's multidatabase template generates per-engine `upgrade_<engine>()`/`downgrade_<engine>()` entrypoints behind a dispatcher. ([Alembic tutorial](https://alembic.sqlalchemy.org/en/latest/tutorial.html), [autogenerate with multiple engines](https://alembic.sqlalchemy.org/en/latest/api/autogenerate.html)) | Recognize the dispatcher plus per-engine functions only when revision metadata and real Alembic imports are also present. |
+| SeaORM disposition parity | The classifier recognizes the `MigrationTrait` shell, but only the aggregate class role changes disposition; a canonical `up`/`down` body can still block as an ordinary long Rust function. SeaORM requires `up` and provides a default `down`. ([`MigrationTrait`](https://docs.rs/sea-orm-migration/latest/sea_orm_migration/trait.MigrationTrait.html), [writing migrations](https://www.sea-ql.org/SeaORM/docs/migration/writing-migration/)) | Attach declaration roles to canonical trait methods and apply the same narrow linear-DDL disposition used for other frameworks. Complexity and helper/data-transform findings remain normal. |
+
+### Resolved report-contract and false-positive gaps
+
+- SQL files that look like migration artifacts but lack ownership evidence currently
+  disappear. Add `migration_artifact_candidates` (or an explicit limitation) with
+  matched convention, evidence sought, and unresolved reason.
+- Explicit policy `configuration` paths are currently echoed as evidence but are not
+  proved to exist, parsed, or tied to discovered artifacts. Label them
+  `declared_unverified` until validation succeeds.
+- Source and artifact records need a detector/contract version (for example,
+  `drizzle:v1` or `prisma:8-rc`), plus the declaration span used to make the decision.
+  Otherwise a report cannot explain which changing convention it evaluated.
+- Package discovery uses raw source substrings in candidate generation. Comments and
+  string literals can create noisy candidates; use parsed imports/dependencies for
+  ownership evidence. Django's `dependencies` and `operations` checks should likewise
+  be scoped to the detected class rather than searched across the whole file.
+- “TypeScript migration support” must not imply JavaScript/CommonJS coverage: the
+  scanner does not scan `.js`, `.mjs`, or `.cjs`, although the official
+  [Knex](https://knexjs.org/guide/migrations) and
+  [Umzug](https://github.com/sequelize/umzug) workflows support JavaScript. State this
+  scope explicitly or add a JavaScript parser path.
+
+### High-priority extensions and watch list
+
+- **Tortoise ORM 1.x (Python):** its native migration system is now documented as the
+  recommended approach and uses Python migration classes with dependencies and
+  operations. Add it before describing Python coverage as broader than Alembic and
+  Django. ([Tortoise migrations](https://tortoise.github.io/migration.html))
+- **node-pg-migrate (TypeScript/JavaScript/SQL):** official migrations export
+  `up(pgm: MigrationBuilder)`; `down` may be omitted, inferred, or set to `false`.
+  This is a useful high-confidence TypeScript extension. ([migration files](https://salsita.github.io/node-pg-migrate/migrations/),
+  [official template](https://github.com/salsita/node-pg-migrate/blob/main/templates/migration-template.ts))
+- **MikroORM MongoDB:** the supported MikroORM classifier covers the SQL package but
+  not the separately documented `@mikro-orm/migrations-mongodb` package. Add only if
+  “MikroORM” is intended to mean both stores. ([MikroORM migrations](https://mikro-orm.io/docs/migrations))
+- **Yoyo (Python):** Python and SQL migrations use `steps`/`step` and may declare
+  dependencies. Treat as an optional ecosystem extension. ([Yoyo documentation](https://ollycope.com/software/yoyo/latest/))
+- **Kysely prerelease watch:** the v0.30 prerelease adds a `defineMigration` default
+  export form. Do not make a stable contract depend on it yet, but retain a fixture
+  when v0.30 becomes stable. ([official releases](https://github.com/kysely-org/kysely/releases),
+  [file provider source](https://github.com/kysely-org/kysely/blob/master/src/migration/file-migration-provider.ts))
+
+### Verification additions completed
+
+Pinned, static integration/E2E fixtures cover current Drizzle v1, the Prisma 8 RC
+bundle, SQLx 0.9 configuration, standard Diesel and Refinery CLI layouts, Umzug's
+local type alias, and Alembic multidatabase revisions. Keep the existing legacy
+Drizzle fixture as a compatibility case. These tests should verify classification,
+artifact inventory, provenance, and fail-closed behavior; they should not install a
+framework or apply a database migration.
+
+The existing TypeORM, Django, Knex, stable Kysely named-export, Refinery source, and
+basic Alembic single-database signatures remain consistent with their current
+official contracts. The gaps above are therefore targeted corrections, not a reason
+to weaken generic smell rules or exclude migration directories.
+
+### Implemented compatibility corrections
+
+The 2026-10-11 implementation closes the “must fix” compatibility and report-honesty
+items above:
+
+- Drizzle legacy and v1 layouts have distinct detector contracts.
+- Prisma 7 resolves literal configured paths, while Prisma 8 requires a captured
+  `8.0.0-rc.*` Postgres/Mongo package version before applying the RC contract and
+  inventories `ops.json` separately from `migration.json`.
+- SQLx, Diesel, and Refinery recognize dependency-backed default file layouts;
+  SQLx also resolves literal `sqlx.toml` paths without treating that configuration
+  as an Implementation owner, records configured checksum character normalization,
+  SQLx/Diesel resolve supported literal runtime paths, and Refinery recognizes
+  literal `load_sql_migrations` paths.
+- Umzug accepts a database-backed local `Migration` alias only when the import
+  resolves to the verified bootstrap module, and accepts optional `down`;
+  Alembic recognizes paired multidatabase entrypoints; and SeaORM applies the narrow
+  role disposition to canonical methods as well as the aggregate migration type.
+- Reports retain unresolved artifact candidates and bind their bytes into the input
+  digest, label declared configuration as `declared_unverified`, identify detector
+  contract versions, and attach exact declaration spans when statically located.
+  Candidate package evidence and Django class members
+  are syntax-scoped, and JavaScript/CommonJS exclusion is explicit.
+
+The ecosystem extensions in the preceding section remain separate additions. They
+do not weaken or block the supported-framework contracts implemented here.

@@ -10,6 +10,8 @@ use std::{
     process::Command,
 };
 
+type CapturedMigrationArtifacts = (BTreeMap<String, Vec<u8>>, BTreeMap<String, Vec<u8>>);
+
 pub fn digest(parts: &[&[u8]]) -> String {
     let mut hash = Sha256::new();
     for part in parts {
@@ -59,10 +61,31 @@ fn migration_artifact_candidate(path: &Path, registry: &Registry) -> bool {
 fn runtime_manifest(path: &Path) -> Option<(&'static str, &'static str)> {
     match path.file_name().and_then(|value| value.to_str()) {
         Some("Cargo.toml") => Some(("rust_cargo_project", "rust")),
+        Some("sqlx.toml") => Some(("sqlx_configuration", "rust")),
         Some("pyproject.toml") => Some(("python_project", "python")),
         Some("package.json") => Some(("javascript_typescript_package", "javascript_typescript")),
         _ => None,
     }
+}
+
+fn migration_command_manifest(path: &Path, registry: &Registry) -> bool {
+    registry.rule_pack == "rust-v1"
+        && path.components().count() == 1
+        && matches!(
+            path.file_name().and_then(|value| value.to_str()),
+            Some("Justfile" | "justfile")
+        )
+}
+
+fn captured_manifest(path: &Path, registry: &Registry) -> bool {
+    runtime_manifest(path).is_some() || migration_command_manifest(path, registry)
+}
+
+fn establishes_implementation_ownership(path: &Path) -> bool {
+    matches!(
+        path.file_name().and_then(|value| value.to_str()),
+        Some("Cargo.toml" | "pyproject.toml" | "package.json")
+    )
 }
 
 #[derive(Default)]
@@ -78,7 +101,10 @@ fn implementations(
     manifests: &BTreeMap<String, String>,
 ) -> Vec<Implementation> {
     let mut builders: BTreeMap<String, ImplementationBuilder> = BTreeMap::new();
-    for manifest in manifests.keys() {
+    for manifest in manifests
+        .keys()
+        .filter(|manifest| establishes_implementation_ownership(Path::new(manifest)))
+    {
         let path = Path::new(manifest);
         let root = path
             .parent()
@@ -95,6 +121,23 @@ fn implementations(
         builder.runtime_manifests.push(manifest.clone());
     }
     let roots: Vec<_> = builders.keys().cloned().collect();
+    for manifest in manifests
+        .keys()
+        .filter(|manifest| !establishes_implementation_ownership(Path::new(manifest)))
+    {
+        let path = Path::new(manifest);
+        let owner = roots
+            .iter()
+            .filter(|root| root.is_empty() || path.starts_with(Path::new(root)))
+            .max_by_key(|root| Path::new(root).components().count());
+        if let Some(root) = owner {
+            builders
+                .get_mut(root)
+                .expect("captured implementation root")
+                .runtime_manifests
+                .push(manifest.clone());
+        }
+    }
     let mut unowned = vec![];
     for file in files.keys() {
         let path = Path::new(file);
@@ -166,7 +209,7 @@ fn reject_symlink(path: &Path, relative: &Path, registry: &Registry) -> Result<(
     if source_file(path, &registry.language) {
         return Err(format!("symlink in source corpus: {}", relative.display()));
     }
-    if runtime_manifest(path).is_some() {
+    if captured_manifest(relative, registry) {
         return Err(format!("symlink runtime manifest: {}", relative.display()));
     }
     Ok(())
@@ -178,6 +221,7 @@ fn capture_working_file(
     policy: &Policy,
     files: &mut BTreeMap<String, String>,
     manifests: &mut BTreeMap<String, String>,
+    is_manifest: bool,
 ) -> Result<(), String> {
     let name = relative
         .to_str()
@@ -188,7 +232,7 @@ fn capture_working_file(
     }
     let bytes = fs::read(path).map_err(|e| format!("cannot read {name}: {e}"))?;
     let source = text(bytes, &name)?;
-    if runtime_manifest(path).is_some() {
+    if is_manifest {
         manifests.insert(name, source);
     } else {
         if files.len() >= policy.limits.maximum_files {
@@ -223,8 +267,9 @@ fn walk_entry(
     if kind.is_dir() {
         return walk(root, &path, policy, registry, files, manifests);
     }
-    if source_file(&path, &registry.language) || runtime_manifest(&path).is_some() {
-        capture_working_file(&path, relative, policy, files, manifests)?;
+    let is_manifest = captured_manifest(relative, registry);
+    if source_file(&path, &registry.language) || is_manifest {
+        capture_working_file(&path, relative, policy, files, manifests, is_manifest)?;
     }
     Ok(())
 }
@@ -232,6 +277,7 @@ fn walk_entry(
 struct ArtifactRecognizer<'a> {
     rule_pack: &'a str,
     files: &'a BTreeMap<String, String>,
+    manifests: &'a BTreeMap<String, String>,
     implementations: &'a [Implementation],
     index: &'a crate::migration::MigrationArtifactIndex,
 }
@@ -241,11 +287,16 @@ impl ArtifactRecognizer<'_> {
         crate::migration::is_recognized_migration_artifact(
             self.rule_pack,
             self.files,
+            self.manifests,
             self.index,
             self.implementations,
             path,
         )
     }
+}
+
+fn maximum_file_budget_reached(files: usize, artifacts: usize, maximum: usize) -> bool {
+    files.saturating_add(artifacts) >= maximum
 }
 
 fn walk_migration_artifacts(
@@ -255,6 +306,7 @@ fn walk_migration_artifacts(
     registry: &Registry,
     recognizer: &ArtifactRecognizer<'_>,
     artifacts: &mut BTreeMap<String, Vec<u8>>,
+    candidates: &mut BTreeMap<String, Vec<u8>>,
 ) -> Result<(), String> {
     let mut entries = fs::read_dir(dir)
         .map_err(|e| format!("cannot enumerate migration artifact directory: {e}"))?
@@ -262,7 +314,9 @@ fn walk_migration_artifacts(
         .map_err(|e| format!("cannot enumerate migration artifact entry: {e}"))?;
     entries.sort_by_key(|entry| entry.file_name());
     for entry in entries {
-        walk_migration_artifact_entry(root, entry, policy, registry, recognizer, artifacts)?;
+        walk_migration_artifact_entry(
+            root, entry, policy, registry, recognizer, artifacts, candidates,
+        )?;
     }
     Ok(())
 }
@@ -274,6 +328,7 @@ fn walk_migration_artifact_entry(
     registry: &Registry,
     recognizer: &ArtifactRecognizer<'_>,
     artifacts: &mut BTreeMap<String, Vec<u8>>,
+    candidates: &mut BTreeMap<String, Vec<u8>>,
 ) -> Result<(), String> {
     let path = entry.path();
     let relative = path
@@ -286,7 +341,9 @@ fn walk_migration_artifact_entry(
         .file_type()
         .map_err(|error| format!("cannot inspect migration artifact entry: {error}"))?;
     if kind.is_dir() {
-        return walk_migration_artifacts(root, &path, policy, registry, recognizer, artifacts);
+        return walk_migration_artifacts(
+            root, &path, policy, registry, recognizer, artifacts, candidates,
+        );
     }
     capture_migration_artifact(
         &path,
@@ -296,6 +353,7 @@ fn walk_migration_artifact_entry(
         registry,
         recognizer,
         artifacts,
+        candidates,
     )
 }
 
@@ -308,6 +366,7 @@ fn capture_migration_artifact(
     registry: &Registry,
     recognizer: &ArtifactRecognizer<'_>,
     artifacts: &mut BTreeMap<String, Vec<u8>>,
+    candidates: &mut BTreeMap<String, Vec<u8>>,
 ) -> Result<(), String> {
     if !migration_artifact_candidate(relative, registry) {
         return Ok(());
@@ -316,12 +375,64 @@ fn capture_migration_artifact(
         .to_str()
         .ok_or("migration artifact path is not UTF-8")?;
     if !recognizer.recognizes(name) {
-        return Ok(());
+        return capture_unresolved_migration_candidate(
+            path,
+            name,
+            symlink,
+            policy,
+            recognizer.files.len(),
+            artifacts.len(),
+            candidates,
+        );
     }
+    capture_recognized_migration_artifact(
+        path,
+        name,
+        symlink,
+        policy,
+        recognizer.files.len(),
+        artifacts,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn capture_unresolved_migration_candidate(
+    path: &Path,
+    name: &str,
+    symlink: bool,
+    policy: &Policy,
+    source_count: usize,
+    artifact_count: usize,
+    candidates: &mut BTreeMap<String, Vec<u8>>,
+) -> Result<(), String> {
+    if source_count
+        .saturating_add(artifact_count)
+        .saturating_add(candidates.len())
+        >= policy.limits.maximum_files
+    {
+        return Err("maximum_files budget exceeded".into());
+    }
+    if symlink {
+        return Err(format!("symlink migration artifact candidate: {name}"));
+    }
+    let bytes = fs::read(path)
+        .map_err(|error| format!("cannot read migration artifact candidate {name}: {error}"))?;
+    candidates.insert(name.to_string(), bytes);
+    Ok(())
+}
+
+fn capture_recognized_migration_artifact(
+    path: &Path,
+    name: &str,
+    symlink: bool,
+    policy: &Policy,
+    source_count: usize,
+    artifacts: &mut BTreeMap<String, Vec<u8>>,
+) -> Result<(), String> {
     if symlink {
         return Err(format!("symlink migration artifact: {name}"));
     }
-    if recognizer.files.len() + artifacts.len() >= policy.limits.maximum_files {
+    if maximum_file_budget_reached(source_count, artifacts.len(), policy.limits.maximum_files) {
         return Err("maximum_files budget exceeded".into());
     }
     let bytes = fs::read(path).map_err(|error| format!("cannot read {name}: {error}"))?;
@@ -333,6 +444,7 @@ fn snapshot_digest(
     files: &BTreeMap<String, String>,
     manifests: &BTreeMap<String, String>,
     artifacts: &BTreeMap<String, Vec<u8>>,
+    artifact_candidates: &BTreeMap<String, Vec<u8>>,
     history: &History,
     policy: &str,
     resolved_selection: &[u8],
@@ -357,6 +469,11 @@ fn snapshot_digest(
         parts.push(path.as_bytes());
         parts.push(source.as_slice());
     }
+    for (path, source) in artifact_candidates {
+        parts.push(b"migration_artifact_candidate");
+        parts.push(path.as_bytes());
+        parts.push(source.as_slice());
+    }
     parts.push(b"git_history_available");
     parts.push(if history.available { b"true" } else { b"false" });
     for commit in &history.commits {
@@ -369,13 +486,18 @@ fn snapshot_digest(
     digest(&parts)
 }
 
+fn reports_inside_work_tree(success: bool, stdout: &[u8]) -> bool {
+    success && stdout == b"true\n"
+}
+
 fn captured_history(root: &Path, files: &BTreeMap<String, String>) -> History {
     let inside = Command::new("git")
         .arg("--no-replace-objects")
         .args(["rev-parse", "--is-inside-work-tree"])
         .current_dir(root)
         .output();
-    if !inside.is_ok_and(|output| output.status.success() && output.stdout == b"true\n") {
+    if !inside.is_ok_and(|output| reports_inside_work_tree(output.status.success(), &output.stdout))
+    {
         return History::default();
     }
     let head = Command::new("git")
@@ -491,21 +613,36 @@ fn working_snapshot(
     walk(root, root, policy, registry, &mut files, &mut manifests)?;
     let history = captured_history(root, &files);
     let implementations = implementations(&files, &manifests);
-    let artifact_index =
-        crate::migration::migration_artifact_index(&policy.rule_pack, &files, &implementations);
+    let artifact_index = crate::migration::migration_artifact_index(
+        &policy.rule_pack,
+        &files,
+        &manifests,
+        &implementations,
+    );
     let recognizer = ArtifactRecognizer {
         rule_pack: &policy.rule_pack,
         files: &files,
+        manifests: &manifests,
         implementations: &implementations,
         index: &artifact_index,
     };
     let mut artifacts = BTreeMap::new();
-    walk_migration_artifacts(root, root, policy, registry, &recognizer, &mut artifacts)?;
+    let mut artifact_candidates = BTreeMap::new();
+    walk_migration_artifacts(
+        root,
+        root,
+        policy,
+        registry,
+        &recognizer,
+        &mut artifacts,
+        &mut artifact_candidates,
+    )?;
     Ok(CapturedSnapshot {
         files,
         manifests,
         implementations,
         artifacts,
+        artifact_candidates,
         history,
     })
 }
@@ -628,12 +765,12 @@ fn staged_corpus(
     for (name, (mode, oid)) in entries {
         let path = Path::new(name);
         if excluded(path, policy)
-            || (!source_file(path, &registry.language) && runtime_manifest(path).is_none())
+            || (!source_file(path, &registry.language) && !captured_manifest(path, registry))
         {
             continue;
         }
         validate_staged_path(name, path)?;
-        let is_manifest = runtime_manifest(path).is_some();
+        let is_manifest = captured_manifest(path, registry);
         let source = capture_staged_blob(root, name, mode, oid, is_manifest)?;
         if is_manifest {
             manifests.insert(name.clone(), source);
@@ -653,35 +790,104 @@ fn staged_migration_artifacts(
     registry: &Registry,
     policy: &Policy,
     files: &BTreeMap<String, String>,
+    manifests: &BTreeMap<String, String>,
     implementations: &[Implementation],
-) -> Result<BTreeMap<String, Vec<u8>>, String> {
-    let artifact_index =
-        crate::migration::migration_artifact_index(&policy.rule_pack, files, implementations);
+) -> Result<CapturedMigrationArtifacts, String> {
+    let artifact_index = crate::migration::migration_artifact_index(
+        &policy.rule_pack,
+        files,
+        manifests,
+        implementations,
+    );
     let recognizer = ArtifactRecognizer {
         rule_pack: &policy.rule_pack,
         files,
+        manifests,
         implementations,
         index: &artifact_index,
     };
     let mut artifacts = BTreeMap::new();
+    let mut candidates = BTreeMap::new();
     for (name, (mode, oid)) in entries {
-        let path = Path::new(name);
-        if excluded(path, policy)
-            || !migration_artifact_candidate(path, registry)
-            || !recognizer.recognizes(name)
-        {
-            continue;
-        }
-        validate_staged_path(name, path)?;
-        if files.len() + artifacts.len() >= policy.limits.maximum_files {
-            return Err("maximum_files budget exceeded".into());
-        }
-        artifacts.insert(
-            name.clone(),
-            capture_staged_artifact(root, name, mode, oid)?,
+        capture_staged_migration_artifact(
+            root,
+            name,
+            mode,
+            oid,
+            registry,
+            policy,
+            &recognizer,
+            files.len(),
+            &mut artifacts,
+            &mut candidates,
+        )?;
+    }
+    Ok((artifacts, candidates))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn capture_staged_migration_artifact(
+    root: &Path,
+    name: &str,
+    mode: &str,
+    oid: &str,
+    registry: &Registry,
+    policy: &Policy,
+    recognizer: &ArtifactRecognizer<'_>,
+    source_count: usize,
+    artifacts: &mut BTreeMap<String, Vec<u8>>,
+    candidates: &mut BTreeMap<String, Vec<u8>>,
+) -> Result<(), String> {
+    let path = Path::new(name);
+    if excluded(path, policy) || !migration_artifact_candidate(path, registry) {
+        return Ok(());
+    }
+    validate_staged_path(name, path)?;
+    if !recognizer.recognizes(name) {
+        return capture_staged_candidate(
+            root,
+            name,
+            mode,
+            oid,
+            policy,
+            source_count,
+            artifacts.len(),
+            candidates,
         );
     }
-    Ok(artifacts)
+    if maximum_file_budget_reached(source_count, artifacts.len(), policy.limits.maximum_files) {
+        return Err("maximum_files budget exceeded".into());
+    }
+    artifacts.insert(
+        name.to_string(),
+        capture_staged_artifact(root, name, mode, oid)?,
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn capture_staged_candidate(
+    root: &Path,
+    name: &str,
+    mode: &str,
+    oid: &str,
+    policy: &Policy,
+    source_count: usize,
+    artifact_count: usize,
+    candidates: &mut BTreeMap<String, Vec<u8>>,
+) -> Result<(), String> {
+    if source_count
+        .saturating_add(artifact_count)
+        .saturating_add(candidates.len())
+        >= policy.limits.maximum_files
+    {
+        return Err("maximum_files budget exceeded".into());
+    }
+    candidates.insert(
+        name.to_string(),
+        capture_staged_artifact(root, name, mode, oid)?,
+    );
+    Ok(())
 }
 
 fn validate_stable_index(root: &Path, initial: &[u8]) -> Result<(), String> {
@@ -697,6 +903,7 @@ struct CapturedSnapshot {
     manifests: BTreeMap<String, String>,
     implementations: Vec<Implementation>,
     artifacts: BTreeMap<String, Vec<u8>>,
+    artifact_candidates: BTreeMap<String, Vec<u8>>,
     history: History,
 }
 
@@ -713,6 +920,7 @@ fn captured_input(
         manifests,
         implementations,
         artifacts,
+        artifact_candidates,
         history,
     } = snapshot;
     if files.is_empty() {
@@ -724,6 +932,7 @@ fn captured_input(
     let source_roles = crate::migration::resolve_source_roles(
         &policy,
         &files,
+        &manifests,
         &registry.language,
         &implementations,
     )?;
@@ -733,14 +942,17 @@ fn captured_input(
                 &files,
                 &manifests,
                 &artifacts,
+                &artifact_candidates,
                 &history,
                 policy_text,
                 &serde_json::to_vec(&policy.resolved).expect("resolved selection serializes"),
             ),
+            manifests,
             implementations,
             source_roles,
             history,
             artifacts,
+            artifact_candidates,
             files,
             policy,
             mode,
@@ -801,12 +1013,13 @@ fn staged_snapshot(capture: &StagedCapture) -> Result<CapturedSnapshot, String> 
         &capture.policy,
     )?;
     let implementations = implementations(&files, &manifests);
-    let artifacts = staged_migration_artifacts(
+    let (artifacts, artifact_candidates) = staged_migration_artifacts(
         &capture.root,
         &capture.entries,
         &capture.registry,
         &capture.policy,
         &files,
+        &manifests,
         &implementations,
     )?;
     let history = captured_history(&capture.root, &files);
@@ -815,6 +1028,7 @@ fn staged_snapshot(capture: &StagedCapture) -> Result<CapturedSnapshot, String> 
         manifests,
         implementations,
         artifacts,
+        artifact_candidates,
         history,
     })
 }
@@ -837,4 +1051,159 @@ pub fn staged(
         "staged corpus",
     )?;
     Ok((input, evidence))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    struct TempRepository(PathBuf);
+
+    impl TempRepository {
+        fn new() -> Self {
+            let unique = format!(
+                "smells-index-test-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            );
+            let path = std::env::temp_dir().join(unique);
+            fs::create_dir(&path).unwrap();
+            let output = Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(&path)
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            Self(path)
+        }
+
+        fn stage(&self, contents: &str) {
+            fs::write(self.0.join("tracked.txt"), contents).unwrap();
+            let output = Command::new("git")
+                .args(["add", "--", "tracked.txt"])
+                .current_dir(&self.0)
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+        }
+    }
+
+    impl Drop for TempRepository {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+
+    #[test]
+    fn migration_artifact_prefilter_and_recognizer_fail_closed_independently() {
+        let registry = crate::policy::registry("rust-v1").unwrap();
+        assert!(migration_artifact_candidate(
+            Path::new("migrations/V1__create_accounts.sql"),
+            &registry
+        ));
+        assert!(!migration_artifact_candidate(
+            Path::new("docs/migration-notes.md"),
+            &registry
+        ));
+
+        let files = BTreeMap::new();
+        let manifests = BTreeMap::new();
+        let implementations = Vec::new();
+        let index = crate::migration::MigrationArtifactIndex::default();
+        let recognizer = ArtifactRecognizer {
+            rule_pack: "rust-v1",
+            files: &files,
+            manifests: &manifests,
+            implementations: &implementations,
+            index: &index,
+        };
+        assert!(!recognizer.recognizes("migrations/V1__create_accounts.sql"));
+    }
+
+    #[test]
+    fn combined_file_budget_counts_sources_and_artifacts_at_the_exact_boundary() {
+        assert!(!maximum_file_budget_reached(2, 2, 5));
+        assert!(maximum_file_budget_reached(2, 3, 5));
+        assert!(maximum_file_budget_reached(usize::MAX, 1, usize::MAX));
+    }
+
+    #[test]
+    fn git_work_tree_probe_requires_both_success_and_the_exact_true_response() {
+        assert!(reports_inside_work_tree(true, b"true\n"));
+        assert!(!reports_inside_work_tree(true, b"false\n"));
+        assert!(!reports_inside_work_tree(false, b"true\n"));
+    }
+
+    #[test]
+    fn staged_index_requires_three_fields_and_stage_zero_independently() {
+        let parsed = parse_index(b"100644 abc 0\tsrc/lib.rs\0").unwrap();
+        assert_eq!(
+            parsed.get("src/lib.rs"),
+            Some(&("100644".into(), "abc".into()))
+        );
+        for malformed in [
+            &b"100644 abc\tsrc/lib.rs\0"[..],
+            &b"100644 abc 1\tsrc/lib.rs\0"[..],
+        ] {
+            assert_eq!(
+                parse_index(malformed).unwrap_err(),
+                "unmerged or malformed staged snapshot"
+            );
+        }
+    }
+
+    #[test]
+    fn staged_paths_reject_backslashes_and_escaping_components_independently() {
+        validate_staged_path("src/lib.rs", Path::new("src/lib.rs")).unwrap();
+        for (name, path) in [
+            ("src\\lib.rs", Path::new("src\\lib.rs")),
+            ("../lib.rs", Path::new("../lib.rs")),
+        ] {
+            assert_eq!(
+                validate_staged_path(name, path).unwrap_err(),
+                "non-portable or escaping staged source path"
+            );
+        }
+    }
+
+    #[test]
+    fn stable_index_validation_detects_a_real_index_change() {
+        let repository = TempRepository::new();
+        repository.stage("first\n");
+        let initial = git(&repository.0, &["ls-files", "--stage", "-z"]).unwrap();
+        validate_stable_index(&repository.0, &initial).unwrap();
+
+        repository.stage("second\n");
+
+        assert_eq!(
+            validate_stable_index(&repository.0, &initial).unwrap_err(),
+            "Git index changed during snapshot capture"
+        );
+    }
+
+    proptest! {
+        #[test]
+        fn unresolved_migration_candidate_bytes_are_part_of_snapshot_identity(
+            first in proptest::collection::vec(any::<u8>(), 0..128),
+            second in proptest::collection::vec(any::<u8>(), 0..128),
+        ) {
+            prop_assume!(first != second);
+            let digest_for = |body: Vec<u8>| {
+                snapshot_digest(
+                    &BTreeMap::new(),
+                    &BTreeMap::new(),
+                    &BTreeMap::new(),
+                    &BTreeMap::from([("drizzle/0000_accounts.sql".into(), body)]),
+                    &History::default(),
+                    "policy",
+                    b"selection",
+                )
+            };
+            prop_assert_ne!(digest_for(first), digest_for(second));
+        }
+    }
 }

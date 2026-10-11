@@ -695,14 +695,7 @@ impl<'ast> Visit<'ast> for RustModelVisitor<'_> {
         self.model.functions.extend(functions);
         for method in &implementation.items {
             if let ImplItem::Fn(method) = method {
-                let parent = rust_function(
-                    &self.path,
-                    Some(&owner),
-                    &method.sig,
-                    Some(&method.block),
-                    private && matches!(method.vis, syn::Visibility::Inherited),
-                )
-                .symbol;
+                let parent = format!("{}::{}.{}", self.path, owner, method.sig.ident);
                 self.record_nested_functions(&parent, &method.block);
             }
         }
@@ -901,5 +894,345 @@ pub(super) fn source_model(rule: &Rule, input: &Input) -> Result<SourceModel, St
         rust_source_model(input)
     } else {
         portable_source_model(language, input)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        core::model::History,
+        policy::{Limits, Policy, ResolvedSelection},
+    };
+
+    fn rule(id: &str) -> Rule {
+        Rule {
+            id: id.into(),
+            version: 1,
+            smell: "test".into(),
+            kind: "threshold".into(),
+            implementation: "test".into(),
+            inputs: Vec::new(),
+            parameters: BTreeMap::new(),
+            contract: "test".into(),
+        }
+    }
+
+    fn input(rule_pack: &str, files: &[(&str, &str)]) -> Input {
+        Input {
+            files: files
+                .iter()
+                .map(|(path, source)| ((*path).into(), (*source).into()))
+                .collect(),
+            manifests: BTreeMap::new(),
+            artifacts: BTreeMap::new(),
+            artifact_candidates: BTreeMap::new(),
+            implementations: Vec::new(),
+            source_roles: Vec::new(),
+            history: History::default(),
+            policy: Policy {
+                schema_version: 1,
+                rule_pack: rule_pack.into(),
+                scanner_version: env!("CARGO_PKG_VERSION").into(),
+                scope: "repository".into(),
+                default_groups: vec!["all".into()],
+                exclude_directories: Vec::new(),
+                source_roles: Vec::new(),
+                limits: Limits {
+                    maximum_files: 10,
+                    maximum_pairs: 10,
+                    maximum_group_combinations: 10,
+                },
+                rules: BTreeMap::new(),
+                exceptions: Vec::new(),
+                resolved: ResolvedSelection::default(),
+            },
+            digest: "0".repeat(64),
+            mode: "test",
+        }
+    }
+
+    #[test]
+    fn authored_field_flags_have_independent_temporary_and_private_boundaries() {
+        for (whole, authored_type, expected) in [
+            ("value?: string", "string", true),
+            ("value: Optional[str]", "Optional[str]", true),
+            ("value: str | None", "str | None", true),
+            ("value: string | null", "string | null", true),
+            ("value: string | undefined", "string | undefined", true),
+            ("value: string", "string", false),
+        ] {
+            assert_eq!(authored_slot_temporary(whole, authored_type), expected);
+        }
+        for (name, whole, expected) in [
+            ("_value", "_value: str", true),
+            ("value", "private value: string", true),
+            ("value", "#value: string", true),
+            ("value", "public value: string", false),
+        ] {
+            assert_eq!(authored_slot_private(name, whole), expected);
+        }
+    }
+
+    #[test]
+    fn python_source_model_preserves_classes_fields_methods_and_locations() {
+        let source = concat!(
+            "class _Account(Protocol):\n",
+            "    pending: Optional[str]\n",
+            "    count: int\n",
+            "    def __init__(self):\n        self.runtime = None\n",
+            "    def load(self):\n        return self.count\n",
+            "\n",
+            "def top_level():\n    return 1\n",
+        );
+        let model = source_model(
+            &rule("python.temporary_fields"),
+            &input("python-v1", &[("account.py", source)]),
+        )
+        .unwrap();
+
+        assert_eq!(model.classes.len(), 1);
+        let account = &model.classes[0];
+        assert_eq!(account.name, "_Account");
+        assert_eq!(account.location.line, 1);
+        assert_eq!(account.location.column, 1);
+        assert!(account.interface);
+        assert!(account.private);
+        assert_eq!(account.methods.len(), 2);
+        assert_eq!(
+            account
+                .fields
+                .iter()
+                .map(|field| (field.name.as_str(), field.temporary))
+                .collect::<BTreeMap<_, _>>(),
+            BTreeMap::from([("count", false), ("pending", true), ("runtime", true)])
+        );
+        assert_eq!(
+            model
+                .functions
+                .iter()
+                .map(|function| function.name.as_str())
+                .collect::<Vec<_>>(),
+            ["__init__", "load", "top_level"]
+        );
+    }
+
+    #[test]
+    fn typescript_source_model_uses_tsx_grammar_and_constructor_parameter_properties() {
+        let source = concat!(
+            "export class ViewModel<T> {\n",
+            "  constructor(private id: string, readonly pending?: T) {}\n",
+            "  render(): JSX.Element { return <section>{this.id}</section>; }\n",
+            "}\n",
+            "export const Standalone = () => <aside />;\n",
+        );
+        let model = source_model(
+            &rule("typescript.temporary_fields"),
+            &input("typescript-v1", &[("view.tsx", source)]),
+        )
+        .unwrap();
+
+        let view = &model.classes[0];
+        assert_eq!(view.type_parameters, ["T"]);
+        assert_eq!(view.methods.len(), 2);
+        assert_eq!(
+            view.fields
+                .iter()
+                .map(|field| {
+                    (
+                        field.name.as_str(),
+                        field.authored_type.as_str(),
+                        field.temporary,
+                        field.private,
+                    )
+                })
+                .collect::<Vec<_>>(),
+            [("id", "string", false, true), ("pending", "T", true, false),]
+        );
+        assert!(
+            model
+                .functions
+                .iter()
+                .any(|function| function.name == "anonymous@5")
+        );
+        assert!(
+            model
+                .functions
+                .iter()
+                .all(|function| function.location.line > 0)
+        );
+        assert!(
+            model
+                .functions
+                .iter()
+                .all(|function| function.location.column > 0)
+        );
+    }
+
+    #[test]
+    fn typescript_parser_uses_ts_grammar_for_angle_bracket_assertions() {
+        let source = "const value = <string>input;\n";
+        assert!(parse_portable_tree("typescript", "value.ts", source).is_ok());
+        assert!(parse_portable_tree("typescript", "value.tsx", source).is_err());
+        assert!(parse_portable_tree("python", "value.py", "value: int = 1\n").is_ok());
+        assert!(parser_language("unknown", "value.ts").is_err());
+    }
+
+    #[test]
+    fn typescript_parameter_properties_keep_temporary_type_signals_independent() {
+        let source = concat!(
+            "class Model {\n",
+            "  constructor(\n",
+            "    readonly nullable: string | null,\n",
+            "    readonly undefinable: string | undefined,\n",
+            "    readonly optional?: string,\n",
+            "    readonly stable: string,\n",
+            "    readonly _internal: string,\n",
+            "    private visible: string,\n",
+            "    plain: string,\n",
+            "  ) {}\n",
+            "  build(readonly leaked: string) {}\n",
+            "}\n",
+        );
+        let model = source_model(
+            &rule("typescript.temporary_fields"),
+            &input("typescript-v1", &[("model.ts", source)]),
+        )
+        .unwrap();
+
+        assert_eq!(
+            model.classes[0]
+                .fields
+                .iter()
+                .map(|field| (field.name.as_str(), field.temporary))
+                .collect::<BTreeMap<_, _>>(),
+            BTreeMap::from([
+                ("_internal", false),
+                ("nullable", true),
+                ("optional", true),
+                ("stable", false),
+                ("undefinable", true),
+                ("visible", false),
+            ])
+        );
+        assert_eq!(
+            model.classes[0]
+                .fields
+                .iter()
+                .map(|field| (field.name.as_str(), field.private))
+                .collect::<BTreeMap<_, _>>(),
+            BTreeMap::from([
+                ("_internal", true),
+                ("nullable", false),
+                ("optional", false),
+                ("stable", false),
+                ("undefinable", false),
+                ("visible", true),
+            ])
+        );
+    }
+
+    #[test]
+    fn rust_source_model_keeps_struct_enum_trait_and_impl_contracts_distinct() {
+        let source = concat!(
+            "pub trait Port<T> { fn load(&self) -> T; }\n",
+            "pub struct Account<T> { pub id: String, pending: Option<T> }\n",
+            "pub enum State<T> { Ready(T), Empty }\n",
+            "impl<T: Clone> Port<T> for Account<T> {\n",
+            " fn load(&self) -> T { fn nested() {} nested(); self.pending.clone().unwrap() }\n",
+            "}\n",
+            "impl<T> Account<T> { pub fn id(&self) -> &str { &self.id } }\n",
+        );
+        let model = source_model(
+            &rule("rust.temporary_fields"),
+            &input("rust-v1", &[("src/domain.rs", source)]),
+        )
+        .unwrap();
+
+        assert_eq!(
+            model
+                .classes
+                .iter()
+                .map(|class| class.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Account", "Port", "State"]
+        );
+        let account = model
+            .classes
+            .iter()
+            .find(|class| class.name == "Account")
+            .unwrap();
+        assert_eq!(account.type_parameters, ["T"]);
+        assert_eq!(account.bases, ["Port"]);
+        assert_eq!(account.methods.len(), 2);
+        assert_eq!(
+            account
+                .fields
+                .iter()
+                .map(|field| {
+                    (
+                        field.name.as_str(),
+                        field.authored_type.as_str(),
+                        field.temporary,
+                        field.private,
+                    )
+                })
+                .collect::<Vec<_>>(),
+            [
+                ("id", "String", false, false),
+                ("pending", "Option<T>", true, true),
+            ]
+        );
+        let port = model
+            .classes
+            .iter()
+            .find(|class| class.name == "Port")
+            .unwrap();
+        assert!(port.interface);
+        assert_eq!(port.methods.len(), 1);
+        let state = model
+            .classes
+            .iter()
+            .find(|class| class.name == "State")
+            .unwrap();
+        assert_eq!(state.type_parameters, ["T"]);
+        assert!(
+            model
+                .functions
+                .iter()
+                .any(|function| function.symbol.contains("nested@"))
+        );
+    }
+
+    #[test]
+    fn rust_impl_method_privacy_distinguishes_visibility_and_trait_ownership() {
+        let source = concat!(
+            "pub trait Port { fn trait_method(&self); }\n",
+            "pub struct Service;\n",
+            "impl Service {\n",
+            "    pub fn public_method(&self) {}\n",
+            "    fn private_method(&self) {}\n",
+            "}\n",
+            "impl Port for Service {\n",
+            "    fn trait_method(&self) {}\n",
+            "}\n",
+        );
+        let model = source_model(
+            &rule("rust.temporary_fields"),
+            &input("rust-v1", &[("src/lib.rs", source)]),
+        )
+        .unwrap();
+        let private = |suffix: &str| {
+            model
+                .functions
+                .iter()
+                .find(|function| function.symbol.ends_with(suffix))
+                .unwrap_or_else(|| panic!("missing Rust function ending in {suffix}"))
+                .private
+        };
+
+        assert!(!private("::Service.public_method"));
+        assert!(private("::Service.private_method"));
+        assert!(!private("::Service.trait_method"));
     }
 }

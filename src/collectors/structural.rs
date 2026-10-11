@@ -530,3 +530,299 @@ pub(super) fn unused_type_parameters(model: &SourceModel) -> Vec<Observation> {
     }
     observations
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::collectors::model::{ClassFact, FieldFact};
+    use proptest::prelude::*;
+    use std::sync::Arc;
+
+    fn location(line: usize) -> Location {
+        Location {
+            path: "src/domain.rs".into(),
+            line,
+            column: 1,
+        }
+    }
+
+    fn function(name: &str, body: Option<&str>) -> FunctionFact {
+        FunctionFact {
+            name: name.into(),
+            symbol: format!("src/domain.rs::{name}"),
+            location: location(1),
+            type_parameters: Vec::new(),
+            body: body.map(Arc::from),
+            source: Arc::from(body.unwrap_or_default()),
+            private: false,
+        }
+    }
+
+    fn class(name: &str, methods: Vec<FunctionFact>) -> ClassFact {
+        ClassFact {
+            name: name.into(),
+            symbol: format!("src/domain.rs::{name}"),
+            location: location(1),
+            type_parameters: Vec::new(),
+            source: Arc::from(""),
+            bases: Vec::new(),
+            interface: false,
+            private: false,
+            fields: Vec::new(),
+            methods,
+            range: (0, 0),
+        }
+    }
+
+    #[test]
+    fn token_multisets_preserve_control_flow_and_count_normalized_values() {
+        let first = normalized_tokens("if account == 42 { return account; }");
+        let second = normalized_tokens("if customer == 7 { return other; }");
+        assert_eq!(first, second);
+        assert_eq!(first["identifier"], 2);
+        assert_eq!(first["number"], 1);
+        assert_eq!(first["if"], 1);
+
+        let different = normalized_tokens("while account != 1 { account = account + 1; }");
+        assert_eq!(token_similarity(&first, &first), (9, 9));
+        let (intersection, union) = token_similarity(&first, &different);
+        assert!(intersection > 0);
+        assert!(union > intersection);
+    }
+
+    #[test]
+    fn prefix_filter_counts_repeated_features_and_keeps_exact_threshold_boundaries() {
+        let maps = vec![
+            BTreeMap::from([("identifier".into(), 2), ("return".into(), 1)]),
+            BTreeMap::from([("identifier".into(), 1), ("number".into(), 1)]),
+        ];
+        assert_eq!(
+            feature_frequencies(&maps),
+            BTreeMap::from([
+                (("identifier".into(), 0), 2),
+                (("identifier".into(), 1), 1),
+                (("number".into(), 0), 1),
+                (("return".into(), 0), 1),
+            ])
+        );
+        let interfaces = vec![BTreeSet::from(["run"]), BTreeSet::from(["execute"])];
+        let prefixes = similarity_prefixes(&interfaces, &maps, &[3, 2], 2, 5_000);
+        assert_eq!(prefixes[0].len(), 2);
+        assert_eq!(prefixes[1].len(), 2);
+        assert!(candidate_pairs(&prefixes).is_empty());
+
+        let complete_prefixes = similarity_prefixes(&interfaces, &maps, &[3, 2], 2, 0);
+        assert_eq!(
+            candidate_pairs(&complete_prefixes),
+            BTreeSet::from([(0, 1)])
+        );
+    }
+
+    #[test]
+    fn forwarding_and_complexity_contracts_reject_near_misses() {
+        assert!(forwarding_method(
+            "return self.client.load(value)",
+            "python"
+        ));
+        assert!(forwarding_method(
+            "{ return this.client.load(value); }",
+            "typescript"
+        ));
+        assert!(!forwarding_method("return client.load(value)", "python"));
+        assert!(!forwarding_method(
+            "return self.client.load(value); self.audit()",
+            "python"
+        ));
+        assert_eq!(
+            complexity("if a && b { for value in values {} }", "rust"),
+            4
+        );
+        assert_eq!(complexity("match value { A => 1, B => 2 }", "rust"), 3);
+        assert_eq!(complexity("match value { A => 1 }", "typescript"), 1);
+    }
+
+    #[test]
+    fn forwarding_share_counts_only_concrete_non_constructor_methods() {
+        let model = SourceModel {
+            classes: vec![class(
+                "Gateway",
+                vec![
+                    function("constructor", Some("this.client.load(value)")),
+                    function("declared_only", None),
+                    function("load", Some("this.client.load(value)")),
+                ],
+            )],
+            ..SourceModel::default()
+        };
+        let rule = Rule {
+            id: "typescript.forwarding_share".into(),
+            version: 1,
+            smell: "middle_man".into(),
+            kind: "ratio".into(),
+            implementation: "forwarding_share".into(),
+            inputs: Vec::new(),
+            parameters: BTreeMap::new(),
+            contract: "test".into(),
+        };
+
+        let observations = forwarding_share(&rule, &model);
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].measurements["methods"], 1);
+        assert_eq!(observations[0].measurements["forwarders"], 1);
+    }
+
+    #[test]
+    fn temporary_field_observation_counts_the_full_use_matrix() {
+        let mut account = class(
+            "Account",
+            vec![
+                function("first", Some("self.pending = 1")),
+                function("second", Some("return self.other")),
+                function("abstract", None),
+            ],
+        );
+        account.fields = vec![
+            FieldFact {
+                name: "pending".into(),
+                authored_type: "Optional[int]".into(),
+                temporary: true,
+                private: false,
+            },
+            FieldFact {
+                name: "other".into(),
+                authored_type: "int".into(),
+                temporary: false,
+                private: false,
+            },
+        ];
+        let model = SourceModel {
+            classes: vec![account],
+            ..SourceModel::default()
+        };
+        let rule = Rule {
+            id: "python.temporary_fields".into(),
+            version: 1,
+            smell: "temporary_field".into(),
+            kind: "ratio".into(),
+            implementation: "temporary_fields".into(),
+            inputs: Vec::new(),
+            parameters: BTreeMap::new(),
+            contract: "test".into(),
+        };
+        let observations = temporary_fields(&rule, &model);
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].measurements["fields"], 1);
+        assert_eq!(observations[0].measurements["methods"], 2);
+        assert_eq!(observations[0].measurements["uses"], 1);
+        assert_eq!(observations[0].measurements["possible_uses"], 2);
+    }
+
+    #[test]
+    fn unused_declarations_and_type_parameters_require_exactly_one_corpus_occurrence() {
+        let mut hidden = function("_hidden", Some("return 1"));
+        hidden.private = true;
+        hidden.source = Arc::from("fn _hidden<T>() { return 1; }");
+        hidden.type_parameters = vec!["T".into()];
+        let mut used = function("_used", Some("return 2"));
+        used.private = true;
+        let model = SourceModel {
+            functions: vec![hidden, used],
+            code_by_path: BTreeMap::from([(
+                "src/domain.rs".into(),
+                Arc::from("fn _hidden() {} fn _used() {} fn call() { _used(); }") as Arc<str>,
+            )]),
+            ..SourceModel::default()
+        };
+
+        let unused = unused_code(&model);
+        assert_eq!(unused.len(), 1);
+        assert_eq!(unused[0].measurements["findings"], 1);
+        assert_eq!(unused[0].evidence["symbols"][0], "src/domain.rs::_hidden");
+        let unused_parameters = unused_type_parameters(&model);
+        assert_eq!(unused_parameters.len(), 1);
+        assert_eq!(unused_parameters[0].evidence["unused_parameters"][0], "T");
+    }
+
+    #[test]
+    fn unused_code_applies_the_same_privacy_name_and_reference_contract_to_classes() {
+        let mut unused = class("_Unused", Vec::new());
+        unused.private = true;
+        let mut referenced = class("_Referenced", Vec::new());
+        referenced.private = true;
+        let mut public = class("Public", Vec::new());
+        public.private = false;
+        let mut dunder = class("__Generated", Vec::new());
+        dunder.private = true;
+        let model = SourceModel {
+            classes: vec![unused, referenced, public, dunder],
+            code_by_path: BTreeMap::from([(
+                "src/domain.rs".into(),
+                Arc::from(concat!(
+                    "class _Unused: pass\n",
+                    "class _Referenced: pass\n",
+                    "use(_Referenced)\n",
+                    "class Public: pass\n",
+                    "class __Generated: pass\n",
+                )) as Arc<str>,
+            )]),
+            ..SourceModel::default()
+        };
+
+        let observations = unused_code(&model);
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].measurements["findings"], 1);
+        assert_eq!(
+            observations[0].evidence["symbols"],
+            json!(["src/domain.rs::_Unused"])
+        );
+    }
+
+    #[test]
+    fn unused_type_parameters_are_reported_for_classes_only_when_unreferenced() {
+        let mut generic = class("Envelope", Vec::new());
+        generic.type_parameters = vec!["Unused".into(), "Value".into()];
+        generic.source = Arc::from("class Envelope<Unused, Value> { value: Value }");
+        let mut complete = class("Pair", Vec::new());
+        complete.type_parameters = vec!["Left".into(), "Right".into()];
+        complete.source = Arc::from("class Pair<Left, Right> { left: Left; right: Right }");
+        let model = SourceModel {
+            classes: vec![generic, complete],
+            ..SourceModel::default()
+        };
+
+        let observations = unused_type_parameters(&model);
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].symbol, "src/domain.rs::Envelope");
+        assert_eq!(observations[0].measurements["findings"], 1);
+        assert_eq!(
+            observations[0].evidence["unused_parameters"],
+            json!(["Unused"])
+        );
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 96,
+            max_shrink_iters: 128,
+            ..ProptestConfig::default()
+        })]
+
+        #[test]
+        fn length_filter_matches_the_exact_ratio_contract(
+            first in 0_u64..10_000,
+            second in 0_u64..10_000,
+            similarity in 0_u64..=10_000,
+        ) {
+            let smaller = first.min(second) as u128;
+            let larger = first.max(second) as u128;
+            prop_assert_eq!(
+                lengths_can_match(first, second, similarity),
+                smaller * 10_000 >= similarity as u128 * larger,
+            );
+            prop_assert_eq!(
+                lengths_can_match(first, second, similarity),
+                lengths_can_match(second, first, similarity),
+            );
+        }
+    }
+}

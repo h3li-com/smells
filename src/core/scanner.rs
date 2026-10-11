@@ -143,7 +143,9 @@ mod tests {
         CapturedInput {
             input: Input {
                 files,
+                manifests: BTreeMap::new(),
                 artifacts: BTreeMap::new(),
+                artifact_candidates: BTreeMap::new(),
                 implementations: vec![Implementation {
                     id: ".".into(),
                     root: Some(".".into()),

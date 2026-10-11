@@ -6,7 +6,9 @@ use super::ResolvedSourceRole;
 
 pub struct Input {
     pub files: BTreeMap<String, String>,
+    pub manifests: BTreeMap<String, String>,
     pub artifacts: BTreeMap<String, Vec<u8>>,
+    pub artifact_candidates: BTreeMap<String, Vec<u8>>,
     pub implementations: Vec<Implementation>,
     pub source_roles: Vec<ResolvedSourceRole>,
     pub history: History,

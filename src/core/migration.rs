@@ -20,6 +20,7 @@ pub(crate) enum CanonicalDeclaration {
     TypeScriptClass(TypeScriptClassContract),
     TypeScriptExport(TypeScriptExportContract),
     RefineryFunction,
+    SeaOrmFunction,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -117,6 +118,11 @@ const CODE_MIGRATION_FRAMEWORKS: &[CodeMigrationFramework] = &[
         declarations: REFINERY,
         canonical_declaration: CanonicalDeclaration::RefineryFunction,
     },
+    CodeMigrationFramework {
+        id: "sea_orm",
+        declarations: UP_DOWN,
+        canonical_declaration: CanonicalDeclaration::SeaOrmFunction,
+    },
 ];
 
 pub(crate) fn code_migration_framework(id: &str) -> Option<&'static CodeMigrationFramework> {
@@ -136,6 +142,25 @@ impl CodeMigrationFramework {
             .iter()
             .find(|declaration| declaration.symbol == name)
             .map(|declaration| declaration.role)
+            .or_else(|| {
+                (self.id == "alembic")
+                    .then(|| {
+                        if name
+                            .strip_prefix("upgrade_")
+                            .is_some_and(|suffix| !suffix.is_empty())
+                        {
+                            Some("migration_up")
+                        } else if name
+                            .strip_prefix("downgrade_")
+                            .is_some_and(|suffix| !suffix.is_empty())
+                        {
+                            Some("migration_down")
+                        } else {
+                            None
+                        }
+                    })
+                    .flatten()
+            })
     }
 }
 
@@ -158,6 +183,8 @@ pub(crate) fn reported_role(
         implementation_id: source_role.implementation_id.clone(),
         source: source_role.source.clone(),
         confidence: source_role.confidence.clone(),
+        contract_version: source_role.contract_version.clone(),
+        declaration_span: source_role.declaration_span.clone(),
         path_scope: source_role.path_scope.clone(),
         evidence: source_role.evidence.clone(),
         disposition: "reported_by_role".into(),
@@ -179,6 +206,9 @@ mod tests {
             path_scope: "/backend/migrations/*.py".into(),
             source: "declared".into(),
             confidence: "explicit".into(),
+            contract_version: "alembic:revision-v1".into(),
+            configuration_status: None,
+            declaration_span: None,
             evidence: vec!["policy.source_roles[0]".into()],
         }
     }
@@ -261,6 +291,21 @@ mod tests {
         }
 
         #[test]
+        fn alembic_multidatabase_suffixes_keep_their_direction(
+            suffix in "[A-Za-z_][A-Za-z0-9_]{0,24}",
+        ) {
+            let framework = code_migration_framework("alembic").unwrap();
+            prop_assert_eq!(
+                framework.declaration_role(&format!("upgrade_{suffix}")),
+                Some("migration_up")
+            );
+            prop_assert_eq!(
+                framework.declaration_role(&format!("downgrade_{suffix}")),
+                Some("migration_down")
+            );
+        }
+
+        #[test]
         fn reported_context_preserves_arbitrary_role_provenance(
             role in "[a-z_]{1,24}",
             framework in "[a-z0-9_]{1,24}",
@@ -279,6 +324,9 @@ mod tests {
                 path_scope: path_scope.clone(),
                 source: source.clone(),
                 confidence: confidence.clone(),
+                contract_version: "test:v1".into(),
+                configuration_status: None,
+                declaration_span: None,
                 evidence: evidence.clone(),
             };
 

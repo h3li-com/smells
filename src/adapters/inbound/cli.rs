@@ -30,7 +30,6 @@ struct CheckOptions {
     report_path: Option<PathBuf>,
     log_path: Option<PathBuf>,
     format: Option<String>,
-    staged: bool,
     selection: policy::SelectionOptions,
 }
 
@@ -114,7 +113,10 @@ fn set_once<T>(slot: &mut Option<T>, value: T, allowed: bool, flag: &str) -> Res
 fn operation_command(args: &[String], contracts: bool) -> Result<Command, String> {
     let mut index = if contracts { 2 } else { 1 };
     let mut options = PendingOptions::default();
-    while index < args.len() {
+    for _ in 0..args.len() {
+        if index >= args.len() {
+            break;
+        }
         consume_operation_option(args, &mut index, contracts, &mut options)?;
     }
     finish_operation(options, contracts)
@@ -161,7 +163,6 @@ fn finish_operation(options: PendingOptions, contracts: bool) -> Result<Command,
         report_path: options.report_path,
         log_path: options.log_path,
         format: options.format,
-        staged: options.staged,
         selection: options.selection,
     }))
 }
@@ -230,7 +231,10 @@ fn show_command(args: &[String]) -> Result<Command, String> {
     let mut policy_path = None;
     let mut format = None;
     let mut selection = policy::SelectionOptions::default();
-    while index < args.len() {
+    for _ in 0..args.len() {
+        if index >= args.len() {
+            break;
+        }
         consume_show_option(
             args,
             &mut index,
@@ -454,8 +458,7 @@ fn check(options: CheckOptions, scanner: &dyn Scanner) -> Result<u8, String> {
     metrics::reset();
     let target = match options.source.as_deref() {
         Some(source) => ScanTarget::WorkingTree(source),
-        None if options.staged => ScanTarget::Staged,
-        None => return Err("select exactly one of --staged and --path".into()),
+        None => ScanTarget::Staged,
     };
     let request = ScanRequest {
         target,
@@ -566,5 +569,64 @@ pub(crate) fn run(args: Vec<String>, scanner: &dyn Scanner) -> Result<u8, String
         Command::Validate(policy_path) => validate_contracts(&policy_path),
         Command::Show(options) => show_policy(options),
         Command::Check(options) => check(options, scanner),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn arguments(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).into()).collect()
+    }
+
+    struct FlushFails;
+
+    impl Write for FlushFails {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::Error::other("flush failed"))
+        }
+    }
+
+    #[test]
+    fn counting_writer_counts_delegated_writes_and_propagates_flush_failures() {
+        let mut writer = CountingWriter {
+            inner: FlushFails,
+            bytes: 0,
+        };
+
+        writer.write_all(b"report").unwrap();
+
+        assert_eq!(writer.bytes, 6);
+        assert_eq!(writer.flush().unwrap_err().to_string(), "flush failed");
+    }
+
+    #[test]
+    fn staged_is_rejected_in_contracts_mode_and_when_repeated() {
+        let Err(contracts) = command(&arguments(&[
+            "contracts",
+            "validate",
+            "--staged",
+            "--policy",
+            "quality-policy.json",
+        ])) else {
+            panic!("contracts mode accepted --staged");
+        };
+        assert_eq!(contracts, "unknown, repeated or invalid option: --staged");
+
+        let Err(repeated) = command(&arguments(&[
+            "check",
+            "--staged",
+            "--staged",
+            "--policy",
+            "quality-policy.json",
+        ])) else {
+            panic!("check mode accepted repeated --staged");
+        };
+        assert_eq!(repeated, "unknown, repeated or invalid option: --staged");
     }
 }

@@ -16,6 +16,604 @@ fn clean_path(path: &Path) -> Result<String, String> {
         .replace('\\', "/"))
 }
 
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod tests {
+    use super::{
+        Facts, Location, Module, ModuleWalker, TypeFacts, clean_path, conditional_path_attribute,
+        consume_resolution_budget, path_attribute, references, validate_module_coverage,
+    };
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        path::Path,
+    };
+
+    #[test]
+    fn clean_path_normalizes_local_segments_without_allowing_repository_escape() {
+        assert_eq!(clean_path(Path::new("./src/lib.rs")).unwrap(), "src/lib.rs");
+        assert_eq!(
+            clean_path(Path::new("src/./domain/../lib.rs")).unwrap(),
+            "src/lib.rs"
+        );
+        assert_eq!(clean_path(Path::new("src/../lib.rs")).unwrap(), "lib.rs");
+        assert_eq!(
+            clean_path(Path::new("../outside.rs")).unwrap_err(),
+            "module path escapes source corpus"
+        );
+        assert_eq!(
+            clean_path(Path::new("src/../../outside.rs")).unwrap_err(),
+            "module path escapes source corpus"
+        );
+        assert_eq!(
+            clean_path(Path::new("/absolute.rs")).unwrap_err(),
+            "module path escapes source corpus"
+        );
+    }
+
+    #[test]
+    fn module_path_attributes_are_literal_unique_portable_and_unconditional() {
+        let explicit: syn::ItemMod = syn::parse_quote!(
+            #[path = "custom/domain.rs"]
+            mod domain;
+        );
+        assert_eq!(
+            path_attribute(&explicit).unwrap().as_deref(),
+            Some("custom/domain.rs")
+        );
+
+        let duplicate: syn::ItemMod = syn::parse_quote!(
+            #[path = "first.rs"]
+            #[path = "second.rs"]
+            mod domain;
+        );
+        assert!(
+            path_attribute(&duplicate)
+                .unwrap_err()
+                .contains("ambiguous")
+        );
+
+        for item in [
+            syn::parse_quote!(
+                #[path = "..\\outside.rs"]
+                mod domain;
+            ),
+            syn::parse_quote!(
+                #[path = "/outside.rs"]
+                mod domain;
+            ),
+            syn::parse_quote!(
+                #[path("dynamic.rs")]
+                mod domain;
+            ),
+        ] {
+            assert!(path_attribute(&item).is_err());
+        }
+
+        let conditional: syn::ItemMod = syn::parse_quote!(
+            #[cfg_attr(unix, path = "unix.rs")]
+            mod domain;
+        );
+        assert!(conditional_path_attribute(&conditional.attrs[0]));
+        assert!(
+            path_attribute(&conditional)
+                .unwrap_err()
+                .contains("active-cfg")
+        );
+
+        let unrelated: syn::ItemMod = syn::parse_quote!(
+            #[cfg_attr(unix, allow(dead_code))]
+            mod domain;
+        );
+        assert!(!conditional_path_attribute(&unrelated.attrs[0]));
+        assert_eq!(path_attribute(&unrelated).unwrap(), None);
+
+        let nested_path_token: syn::ItemMod = syn::parse_quote!(
+            #[cfg_attr(any(unix, path), allow(dead_code))]
+            mod domain;
+        );
+        assert!(conditional_path_attribute(&nested_path_token.attrs[0]));
+    }
+
+    #[test]
+    fn inline_module_nesting_limit_is_strict_and_charged_per_level() {
+        let parsed = BTreeMap::new();
+        let mut found = BTreeSet::new();
+        assert!(
+            references(
+                &[],
+                Path::new("src"),
+                Path::new("src"),
+                &parsed,
+                &mut found,
+                128,
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            references(
+                &[],
+                Path::new("src"),
+                Path::new("src"),
+                &parsed,
+                &mut found,
+                129,
+            )
+            .unwrap_err(),
+            "module nesting limit exceeded"
+        );
+
+        let source = format!("{}{}", "mod nested {".repeat(3), "}".repeat(3));
+        let file = syn::parse_file(&source).unwrap();
+        assert_eq!(
+            references(
+                &file.items,
+                Path::new("src"),
+                Path::new("src"),
+                &parsed,
+                &mut found,
+                127,
+            )
+            .unwrap_err(),
+            "module nesting limit exceeded"
+        );
+    }
+
+    #[test]
+    fn module_walker_limits_file_cycles_and_inline_keys_independently() {
+        let parsed = BTreeMap::new();
+        let mut result = BTreeMap::new();
+        let mut walker = ModuleWalker {
+            root: "crate",
+            parsed: &parsed,
+            stack: vec!["path".into(); 129],
+            result: &mut result,
+        };
+        assert_eq!(
+            walker
+                .visit(
+                    "src/lib.rs",
+                    "crate",
+                    &[],
+                    Path::new("src"),
+                    Path::new("src"),
+                )
+                .unwrap_err(),
+            "module nesting limit exceeded"
+        );
+
+        let mut result = BTreeMap::new();
+        let mut walker = ModuleWalker {
+            root: "crate",
+            parsed: &parsed,
+            stack: Vec::new(),
+            result: &mut result,
+        };
+        let deep_key = format!("crate{}", "::nested".repeat(129));
+        assert_eq!(
+            walker
+                .visit(
+                    "src/lib.rs",
+                    &deep_key,
+                    &[],
+                    Path::new("src"),
+                    Path::new("src"),
+                )
+                .unwrap_err(),
+            "module nesting limit exceeded"
+        );
+
+        let mut result = BTreeMap::new();
+        let mut walker = ModuleWalker {
+            root: "crate",
+            parsed: &parsed,
+            stack: vec!["path".into(); 128],
+            result: &mut result,
+        };
+        let boundary_key = format!("crate{}", "::nested".repeat(128));
+        assert!(
+            walker
+                .visit(
+                    "src/lib.rs",
+                    &boundary_key,
+                    &[],
+                    Path::new("src"),
+                    Path::new("src"),
+                )
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn impl_owner_resolution_rejects_qualified_and_unsupported_targets_but_ignores_wrappers() {
+        let facts = Facts {
+            modules: BTreeMap::new(),
+            types: BTreeMap::new(),
+            functions: Vec::new(),
+            slots: Vec::new(),
+            aliases: BTreeMap::new(),
+        };
+        for wrapper in [
+            syn::parse_quote!([Account; 2]),
+            syn::parse_quote!([Account]),
+            syn::parse_quote!((Account, Invoice)),
+            syn::parse_quote!(&Account),
+            syn::parse_quote!(*const Account),
+        ] {
+            assert_eq!(facts.owner(&wrapper, "crate").unwrap(), None);
+        }
+
+        let qualified: syn::Type = syn::parse_quote!(<Account as Port>::Item);
+        assert!(
+            facts
+                .owner(&qualified, "crate")
+                .unwrap_err()
+                .contains("unsupported impl target")
+        );
+        let inferred: syn::Type = syn::parse_quote!(impl Port);
+        assert!(
+            facts
+                .owner(&inferred, "crate")
+                .unwrap_err()
+                .contains("unsupported impl target")
+        );
+    }
+
+    #[test]
+    fn type_resolution_distinguishes_crate_self_super_and_import_prefixes() {
+        let location = Location {
+            path: "src/lib.rs".into(),
+            line: 1,
+            column: 1,
+        };
+        let type_fact = || TypeFacts {
+            location: location.clone(),
+            fields: Vec::new(),
+            field_count: 0,
+            is_enum: false,
+            variants: BTreeSet::new(),
+            functions: Vec::new(),
+        };
+        let facts = Facts {
+            modules: BTreeMap::from([(
+                "crate::domain".into(),
+                Module {
+                    key: "crate::domain".into(),
+                    root: "crate".into(),
+                    path: "src/domain.rs".into(),
+                    items: Vec::new(),
+                    imports: BTreeMap::from([(
+                        "AccountAlias".into(),
+                        vec!["crate".into(), "model".into(), "Account".into()],
+                    )]),
+                },
+            )]),
+            types: BTreeMap::from([
+                ("crate::domain::Local".into(), type_fact()),
+                ("crate::model::Account".into(), type_fact()),
+                ("crate::Parent".into(), type_fact()),
+            ]),
+            functions: Vec::new(),
+            slots: Vec::new(),
+            aliases: BTreeMap::new(),
+        };
+
+        for (path, expected) in [
+            (&["self", "Local"][..], "crate::domain::Local"),
+            (&["crate", "model", "Account"][..], "crate::model::Account"),
+            (&["super", "Parent"][..], "crate::Parent"),
+            (&["AccountAlias"][..], "crate::model::Account"),
+        ] {
+            let path = path.iter().map(|part| (*part).into()).collect::<Vec<_>>();
+            assert_eq!(
+                facts.resolve(&path, "crate::domain", 0).unwrap().as_deref(),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn alias_resolution_rejects_qualified_targets() {
+        let location = Location {
+            path: "src/lib.rs".into(),
+            line: 1,
+            column: 1,
+        };
+        let facts = Facts {
+            modules: BTreeMap::from([(
+                "crate".into(),
+                Module {
+                    key: "crate".into(),
+                    root: "crate".into(),
+                    path: "src/lib.rs".into(),
+                    items: Vec::new(),
+                    imports: BTreeMap::new(),
+                },
+            )]),
+            types: BTreeMap::from([(
+                "crate::Port::Item".into(),
+                TypeFacts {
+                    location,
+                    fields: Vec::new(),
+                    field_count: 0,
+                    is_enum: false,
+                    variants: BTreeSet::new(),
+                    functions: Vec::new(),
+                },
+            )]),
+            functions: Vec::new(),
+            slots: Vec::new(),
+            aliases: BTreeMap::from([(
+                "crate::Alias".into(),
+                ("crate".into(), syn::parse_quote!(<Account as Port>::Item)),
+            )]),
+        };
+
+        assert_eq!(facts.resolve(&["Alias".into()], "crate", 0).unwrap(), None);
+    }
+
+    #[test]
+    fn cyclic_imports_charge_each_recursive_resolution_step() {
+        let facts = Facts {
+            modules: BTreeMap::from([(
+                "crate".into(),
+                Module {
+                    key: "crate".into(),
+                    root: "crate".into(),
+                    path: "src/lib.rs".into(),
+                    items: Vec::new(),
+                    imports: BTreeMap::from([("Alias".into(), vec!["Alias".into()])]),
+                },
+            )]),
+            types: BTreeMap::new(),
+            functions: Vec::new(),
+            slots: Vec::new(),
+            aliases: BTreeMap::new(),
+        };
+        let mut visits = 0;
+
+        let error = facts
+            .resolve_bounded(&["Alias".into()], "crate", 63, &mut visits)
+            .unwrap_err();
+
+        assert!(error.contains("cycle/budget"));
+        assert_eq!(visits, 3);
+    }
+
+    #[test]
+    fn cyclic_aliases_and_nested_imports_charge_their_own_resolution_step() {
+        let module = Module {
+            key: "crate".into(),
+            root: "crate".into(),
+            path: "src/lib.rs".into(),
+            items: Vec::new(),
+            imports: BTreeMap::new(),
+        };
+        let aliases = Facts {
+            modules: BTreeMap::from([("crate".into(), module.clone())]),
+            types: BTreeMap::new(),
+            functions: Vec::new(),
+            slots: Vec::new(),
+            aliases: BTreeMap::from([(
+                "crate::Alias".into(),
+                ("crate".into(), syn::parse_quote!(Alias)),
+            )]),
+        };
+        let mut alias_visits = 0;
+        assert!(
+            aliases
+                .exact_owner("crate::Alias", 63, &mut alias_visits)
+                .err()
+                .unwrap()
+                .contains("cycle/budget")
+        );
+        assert_eq!(alias_visits, 2);
+
+        let imports = Facts {
+            modules: BTreeMap::from([(
+                "crate".into(),
+                Module {
+                    imports: BTreeMap::from([("Alias".into(), vec!["Alias".into()])]),
+                    ..module
+                },
+            )]),
+            types: BTreeMap::new(),
+            functions: Vec::new(),
+            slots: Vec::new(),
+            aliases: BTreeMap::new(),
+        };
+        let mut import_visits = 0;
+        assert!(
+            imports
+                .imported_owner("crate", &["Alias".into()], 63, &mut import_visits)
+                .err()
+                .unwrap()
+                .contains("cycle/budget")
+        );
+        assert_eq!(import_visits, 2);
+    }
+
+    #[test]
+    fn glob_resolution_propagates_only_budget_and_ambiguity_errors() {
+        let module = |imports| Module {
+            key: "crate".into(),
+            root: "crate".into(),
+            path: "src/lib.rs".into(),
+            items: Vec::new(),
+            imports,
+        };
+        let empty = Facts {
+            modules: BTreeMap::from([("crate".into(), module(BTreeMap::new()))]),
+            types: BTreeMap::new(),
+            functions: Vec::new(),
+            slots: Vec::new(),
+            aliases: BTreeMap::new(),
+        };
+        assert_eq!(
+            empty
+                .glob_match(&[], "Missing", "crate", 0, &mut 0)
+                .unwrap(),
+            None
+        );
+
+        let cyclic = Facts {
+            modules: BTreeMap::from([(
+                "crate".into(),
+                module(BTreeMap::from([("Alias".into(), vec!["Alias".into()])])),
+            )]),
+            types: BTreeMap::new(),
+            functions: Vec::new(),
+            slots: Vec::new(),
+            aliases: BTreeMap::new(),
+        };
+        let mut cyclic_visits = 0;
+        assert!(
+            cyclic
+                .glob_match(&[], "Alias", "crate", 63, &mut cyclic_visits)
+                .unwrap_err()
+                .contains("cycle/budget")
+        );
+        assert_eq!(cyclic_visits, 2);
+
+        let location = Location {
+            path: "src/lib.rs".into(),
+            line: 1,
+            column: 1,
+        };
+        let type_fact = || TypeFacts {
+            location: location.clone(),
+            fields: Vec::new(),
+            field_count: 0,
+            is_enum: false,
+            variants: BTreeSet::new(),
+            functions: Vec::new(),
+        };
+        let ambiguous = Facts {
+            modules: BTreeMap::from([(
+                "crate".into(),
+                module(BTreeMap::from([
+                    ("*0".into(), vec!["crate".into(), "first".into()]),
+                    ("*1".into(), vec!["crate".into(), "second".into()]),
+                ])),
+            )]),
+            types: BTreeMap::from([
+                ("crate::first::Thing".into(), type_fact()),
+                ("crate::second::Thing".into(), type_fact()),
+            ]),
+            functions: Vec::new(),
+            slots: Vec::new(),
+            aliases: BTreeMap::new(),
+        };
+        assert!(
+            ambiguous
+                .glob_match(&[], "Thing", "crate", 0, &mut 0)
+                .unwrap_err()
+                .starts_with("ambiguous")
+        );
+    }
+
+    #[test]
+    fn unresolved_owner_distinguishes_primitives_external_paths_and_local_paths() {
+        let module = |key: &str| Module {
+            key: key.into(),
+            root: "crate".into(),
+            path: "src/lib.rs".into(),
+            items: Vec::new(),
+            imports: BTreeMap::new(),
+        };
+        let facts = Facts {
+            modules: BTreeMap::from([
+                ("crate".into(), module("crate")),
+                ("crate::local".into(), module("crate::local")),
+            ]),
+            types: BTreeMap::new(),
+            functions: Vec::new(),
+            slots: Vec::new(),
+            aliases: BTreeMap::new(),
+        };
+
+        assert_eq!(
+            facts
+                .unresolved_owner("i32", &["i32".into()], "crate")
+                .unwrap(),
+            None
+        );
+        for (first, path) in [
+            ("std", vec!["std".into()]),
+            ("core", vec!["core".into()]),
+            ("alloc", vec!["alloc".into()]),
+            ("dependency", vec!["dependency".into(), "Thing".into()]),
+        ] {
+            assert_eq!(facts.unresolved_owner(first, &path, "crate").unwrap(), None);
+        }
+        for (first, path) in [
+            ("Missing", vec!["Missing".into()]),
+            ("local", vec!["local".into(), "Thing".into()]),
+            ("crate", vec!["crate".into(), "Thing".into()]),
+            ("self", vec!["self".into(), "Thing".into()]),
+            ("super", vec!["super".into(), "Thing".into()]),
+        ] {
+            assert!(
+                facts
+                    .unresolved_owner(first, &path, "crate")
+                    .unwrap_err()
+                    .contains("unresolved local impl owner")
+            );
+        }
+    }
+
+    #[test]
+    fn resolution_budget_enforces_depth_and_visit_boundaries_independently() {
+        let mut visits = 4095;
+        consume_resolution_budget(64, &mut visits, "crate").unwrap();
+        assert_eq!(visits, 4096);
+
+        let mut depth_visits = 0;
+        assert!(
+            consume_resolution_budget(65, &mut depth_visits, "crate")
+                .unwrap_err()
+                .contains("cycle/budget")
+        );
+        assert_eq!(depth_visits, 1);
+
+        let mut visit_limit = 4096;
+        assert!(
+            consume_resolution_budget(0, &mut visit_limit, "crate")
+                .unwrap_err()
+                .contains("cycle/budget")
+        );
+        assert_eq!(visit_limit, 4097);
+    }
+
+    #[test]
+    fn module_coverage_requires_every_parsed_source_to_be_reachable() {
+        let parsed = BTreeMap::from([
+            ("src/lib.rs".into(), syn::parse_file("").unwrap()),
+            ("src/orphan.rs".into(), syn::parse_file("").unwrap()),
+        ]);
+        let module = |key: &str, path: &str| Module {
+            key: key.into(),
+            root: "crate".into(),
+            path: path.into(),
+            items: Vec::new(),
+            imports: BTreeMap::new(),
+        };
+        let incomplete = BTreeMap::from([("crate".into(), module("crate", "src/lib.rs"))]);
+        assert_eq!(
+            validate_module_coverage(&incomplete, &parsed).unwrap_err(),
+            "unreachable/cyclic module source omitted from traversal"
+        );
+
+        let complete = BTreeMap::from([
+            ("crate".into(), module("crate", "src/lib.rs")),
+            (
+                "crate::orphan".into(),
+                module("crate::orphan", "src/orphan.rs"),
+            ),
+        ]);
+        validate_module_coverage(&complete, &parsed).unwrap();
+    }
+}
+
 fn path_attribute(item: &ItemMod) -> Result<Option<String>, String> {
     let mut found = None;
     for attr in &item.attrs {
@@ -697,10 +1295,11 @@ pub(super) fn collect_modules(
 pub(super) fn validate_module_coverage(
     modules: &BTreeMap<String, Module>,
     parsed: &BTreeMap<String, syn::File>,
-    report: &mut Report,
-) {
+) -> Result<(), String> {
     let included: BTreeSet<_> = modules.values().map(|module| &module.path).collect();
     if included.len() != parsed.len() {
-        report.error("unreachable/cyclic module source omitted from traversal");
+        Err("unreachable/cyclic module source omitted from traversal".into())
+    } else {
+        Ok(())
     }
 }

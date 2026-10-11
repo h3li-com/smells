@@ -446,9 +446,17 @@ fn explicit_alembic_role_reports_long_entrypoint_without_removing_it_from_the_co
             "path_scope": "/backend/alembic/versions/**/*.py",
             "source": "declared",
             "confidence": "explicit",
+            "contract_version": "alembic:revision-v1",
+            "configuration_status": "declared_unverified",
+            "declaration_span": {
+                "start_line": 6,
+                "start_column": 1,
+                "end_line": 6,
+                "end_column": 15
+            },
             "evidence": [
                 "policy.source_roles[0]",
-                "policy_configuration_path:/backend/alembic.ini"
+                "policy_configuration_path_declared_unverified:/backend/alembic.ini"
             ]
         }])
     );
@@ -470,10 +478,17 @@ fn explicit_alembic_role_reports_long_entrypoint_without_removing_it_from_the_co
             "implementation_id": "__unowned__",
             "source": "declared",
             "confidence": "explicit",
+            "contract_version": "alembic:revision-v1",
+            "declaration_span": {
+                "start_line": 6,
+                "start_column": 1,
+                "end_line": 6,
+                "end_column": 15
+            },
             "path_scope": "/backend/alembic/versions/**/*.py",
             "evidence": [
                 "policy.source_roles[0]",
-                "policy_configuration_path:/backend/alembic.ini"
+                "policy_configuration_path_declared_unverified:/backend/alembic.ini"
             ],
             "disposition": "reported_by_role"
         })
@@ -659,6 +674,9 @@ fn explicit_typescript_roles_accept_structurally_bound_custom_providers() {
                 "  await database.execute('alter table accounts add name text');\n",
                 "}\n",
             ),
+            2,
+            "up",
+            "migration_up",
         ),
         (
             "typeorm",
@@ -675,10 +693,47 @@ fn explicit_typescript_roles_accept_structurally_bound_custom_providers() {
                 "  async down(database: WrappedDb) { await database.execute('drop table accounts'); }\n",
                 "}\n",
             ),
+            3,
+            "up",
+            "migration_up",
+        ),
+        (
+            "mikro_orm",
+            "db/custom/accounts-mikro.ts",
+            concat!(
+                "abstract class BaseChange {}\n",
+                "export class Accounts extends BaseChange {\n",
+                "  async up() {\n",
+                "    this.addSql('create table accounts(id int)');\n",
+                "    this.addSql('create index accounts_id on accounts(id)');\n",
+                "    this.addSql('alter table accounts add name text');\n",
+                "  }\n",
+                "}\n",
+            ),
+            2,
+            "up",
+            "migration_up",
+        ),
+        (
+            "prisma_8",
+            "db/custom/accounts-prisma.ts",
+            concat!(
+                "abstract class BaseChange {}\n",
+                "export class Accounts extends BaseChange {\n",
+                "  get operations() {\n",
+                "    const create = { kind: 'createTable' };\n",
+                "    const index = { kind: 'createIndex' };\n",
+                "    return [create, index];\n",
+                "  }\n",
+                "}\n",
+            ),
+            2,
+            "operations",
+            "migration_operations",
         ),
     ];
 
-    for (framework, path, source) in fixtures {
+    for (framework, path, source, declaration_line, symbol, declaration_role) in fixtures {
         let mut policy = portable_policy("typescript");
         require_only(&mut policy, &["typescript.function_lines"]);
         require_maximum(&mut policy, "typescript.function_lines", 2);
@@ -697,15 +752,19 @@ fn explicit_typescript_roles_accept_structurally_bound_custom_providers() {
             String::from_utf8_lossy(&output.stderr)
         );
         let data = report(&output);
+        assert_eq!(
+            data["source_roles"][0]["declaration_span"]["start_line"], declaration_line,
+            "{framework}"
+        );
         let finding = data["findings"]
             .as_array()
             .unwrap()
             .iter()
-            .find(|finding| finding["symbol"] == "up")
+            .find(|finding| finding["symbol"] == symbol)
             .expect("explicit custom-provider entrypoint remains reported");
         assert_eq!(finding["status"], "reported_by_role", "{framework}");
         assert_eq!(
-            finding["role_context"]["declaration_role"], "migration_up",
+            finding["role_context"]["declaration_role"], declaration_role,
             "{framework}"
         );
     }
@@ -801,6 +860,31 @@ fn alembic_role_is_inferred_from_framework_structure_outside_a_versions_director
     assert_eq!(finding["blocking"], false);
     assert_eq!(finding["role_context"]["source"], "inferred");
     assert_eq!(finding["role_context"]["confidence"], "high");
+}
+
+#[test]
+fn django_requires_dependencies_and_operations_on_the_migration_class() {
+    let policy = portable_policy("python");
+    let workspace = Workspace::new(
+        "orders/migrations/0002_accounts.py",
+        concat!(
+            "from django.db import migrations\n\n",
+            "dependencies = [('orders', '0001_initial')]\n",
+            "operations = [migrations.RunSQL('select 1')]\n\n",
+            "class Migration(migrations.Migration):\n",
+            "    pass\n",
+        ),
+        &policy,
+    );
+
+    let output = workspace.check_path();
+    assert_eq!(output.status.code(), Some(0));
+    let data = report(&output);
+    assert_eq!(data["source_roles"], json!([]));
+    assert_eq!(
+        data["source_role_candidates"][0]["path"],
+        "orders/migrations/0002_accounts.py"
+    );
 }
 
 #[test]
@@ -964,6 +1048,101 @@ fn typed_umzug_migrations_require_database_storage_context() {
     let data = report(&output);
     assert_eq!(data["source_roles"][0]["framework"], "sequelize_umzug");
     assert_eq!(data["findings"][0]["status"], "reported_by_role");
+}
+
+#[test]
+fn umzug_local_migration_alias_accepts_optional_down() {
+    let mut policy = portable_policy("typescript");
+    require_only(&mut policy, &["typescript.function_lines"]);
+    require_maximum(&mut policy, "typescript.function_lines", 2);
+    let workspace = Workspace::new(
+        "db/migrate.ts",
+        concat!(
+            "import { SequelizeStorage, Umzug } from 'umzug';\n",
+            "export const umzug = new Umzug({\n",
+            "  migrations: { glob: 'migrations/*.ts' },\n",
+            "  context: sequelize.getQueryInterface(),\n",
+            "  storage: new SequelizeStorage({ sequelize }),\n",
+            "  logger: console,\n",
+            "});\n",
+            "export type Migration = typeof umzug._types.migration;\n",
+        ),
+        &policy,
+    );
+    workspace.source(
+        "db/migrations/001-accounts.ts",
+        concat!(
+            "import type { Migration } from '../migrate';\n",
+            "export const up: Migration = async ({ context }) => {\n",
+            "  await context.createTable('accounts', {});\n",
+            "  await context.addIndex('accounts', ['id']);\n",
+            "  await context.sequelize.query('update accounts set id = id');\n",
+            "};\n",
+        ),
+    );
+
+    let output = workspace.check_path();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let data = report(&output);
+    let role = data["source_roles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|role| role["path"] == "db/migrations/001-accounts.ts")
+        .expect("Umzug migration using the bootstrap alias");
+    assert_eq!(role["framework"], "sequelize_umzug");
+    assert_eq!(role["source"], "inferred");
+    let finding = data["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| finding["symbol"] == "up")
+        .expect("long Umzug up remains visible");
+    assert_eq!(finding["status"], "reported_by_role");
+}
+
+#[test]
+fn umzug_local_alias_must_resolve_to_the_database_bootstrap_module() {
+    let policy = portable_policy("typescript");
+    let workspace = Workspace::new(
+        "db/migrate.ts",
+        concat!(
+            "import { SequelizeStorage, Umzug } from 'umzug';\n",
+            "export const umzug = new Umzug({\n",
+            "  migrations: { glob: 'migrations/*.ts' },\n",
+            "  context: sequelize.getQueryInterface(),\n",
+            "  storage: new SequelizeStorage({ sequelize }),\n",
+            "});\n",
+            "export type Migration = typeof umzug._types.migration;\n",
+        ),
+        &policy,
+    );
+    workspace.source(
+        "db/task-types.ts",
+        "export type Migration = (input: unknown) => Promise<void>;\n",
+    );
+    workspace.source(
+        "db/migrations/001-unrelated-task.ts",
+        concat!(
+            "import type { Migration } from '../task-types';\n",
+            "export const up: Migration = async (context) => { await runTask(context); };\n",
+        ),
+    );
+
+    let output = workspace.check_path();
+    assert_eq!(output.status.code(), Some(0));
+    let roles = report(&output)["source_roles"].as_array().unwrap().clone();
+    assert!(
+        roles
+            .iter()
+            .all(|role| role["path"] != "db/migrations/001-unrelated-task.ts"),
+        "an unrelated local Migration type must not inherit Umzug ownership: {roles:?}"
+    );
 }
 
 #[test]
@@ -1288,19 +1467,56 @@ fn prisma_7_sql_is_inventoried_from_its_canonical_bundle() {
 }
 
 #[test]
-fn explicit_prisma_8_migration_artifact_is_role_adjusted_without_inference() {
+fn prisma_7_sql_is_inventoried_from_a_literal_configured_path() {
+    let policy = portable_policy("typescript");
+    let workspace = Workspace::new(
+        "prisma.config.ts",
+        concat!(
+            "import { defineConfig } from 'prisma/config';\n",
+            "export default defineConfig({\n",
+            "  migrations: { path: './database/history' },\n",
+            "});\n",
+        ),
+        &policy,
+    );
+    workspace.source(
+        "database/history/20261011_accounts/migration.sql",
+        "CREATE TABLE accounts(id integer);\n",
+    );
+
+    let output = workspace.check_path();
+    assert_eq!(output.status.code(), Some(0));
+    let data = report(&output);
+    assert_eq!(data["migration_artifacts"][0]["framework"], "prisma_7");
+    assert_eq!(
+        data["migration_artifacts"][0]["path"],
+        "database/history/20261011_accounts/migration.sql"
+    );
+    assert!(
+        data["migration_artifacts"][0]["evidence"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("configuration_path:prisma_config"))
+    );
+    assert_eq!(
+        data["migration_artifacts"][0]["declaration_path"],
+        "prisma.config.ts"
+    );
+    assert_eq!(
+        data["migration_artifacts"][0]["declaration_span"]["start_line"],
+        2
+    );
+}
+
+#[test]
+fn prisma_8_bundle_is_inferred_and_inventoried() {
     let mut policy = portable_policy("typescript");
     require_only(&mut policy, &["typescript.class_method_lines"]);
     require_maximum(&mut policy, "typescript.class_method_lines", 2);
-    policy["source_roles"] = json!([{
-        "role": "database_migration",
-        "framework": "prisma_8",
-        "paths": ["/prisma/migrations/**/*.ts"]
-    }]);
     let workspace = Workspace::new(
-        "prisma/migrations/20261009_accounts/migration.ts",
+        "prisma/migrations/20261009T1230_accounts/migration.ts",
         concat!(
-            "import { Migration } from '@prisma/migrations';\n",
+            "import { Migration } from '@prisma/orm-postgres/migration';\n",
             "export default class extends Migration {\n",
             "  get operations() {\n",
             "    const table = 'accounts';\n",
@@ -1310,6 +1526,18 @@ fn explicit_prisma_8_migration_artifact_is_role_adjusted_without_inference() {
             "}\n",
         ),
         &policy,
+    );
+    workspace.source(
+        "package.json",
+        r#"{"dependencies":{"@prisma/orm-postgres":"8.0.0-rc.11"}}"#,
+    );
+    workspace.source(
+        "prisma/migrations/20261009T1230_accounts/ops.json",
+        "[{\"createTable\":\"accounts\"}]\n",
+    );
+    workspace.source(
+        "prisma/migrations/20261009T1230_accounts/migration.json",
+        "{\"name\":\"accounts\"}\n",
     );
 
     let output = workspace.check_path();
@@ -1321,7 +1549,30 @@ fn explicit_prisma_8_migration_artifact_is_role_adjusted_without_inference() {
     );
     let data = report(&output);
     assert_eq!(data["source_roles"][0]["framework"], "prisma_8");
-    assert_eq!(data["source_roles"][0]["source"], "declared");
+    assert_eq!(data["source_roles"][0]["source"], "inferred");
+    let artifacts = data["migration_artifacts"].as_array().unwrap();
+    assert_eq!(artifacts.len(), 2);
+    assert_eq!(
+        artifacts[0]["path"],
+        "prisma/migrations/20261009T1230_accounts/migration.json"
+    );
+    assert_eq!(artifacts[0]["role"], "database_migration_metadata");
+    assert_eq!(artifacts[0]["status"], "migration_metadata_inventoried");
+    assert_eq!(
+        artifacts[0]["declaration_path"],
+        "prisma/migrations/20261009T1230_accounts/migration.ts"
+    );
+    assert_eq!(artifacts[0]["declaration_span"]["start_line"], 2);
+    assert_eq!(
+        artifacts[1]["path"],
+        "prisma/migrations/20261009T1230_accounts/ops.json"
+    );
+    assert_eq!(artifacts[1]["role"], "database_migration_operations");
+    assert_eq!(artifacts[1]["status"], "migration_operations_not_analyzed");
+    assert_eq!(
+        artifacts[1]["declaration_path"],
+        "prisma/migrations/20261009T1230_accounts/migration.ts"
+    );
     let finding = data["findings"]
         .as_array()
         .unwrap()
@@ -1333,6 +1584,87 @@ fn explicit_prisma_8_migration_artifact_is_role_adjusted_without_inference() {
         finding["role_context"]["declaration_role"],
         "migration_shell"
     );
+}
+
+#[test]
+fn prisma_8_operations_only_bundle_discloses_the_unanalyzed_operations_limitation() {
+    let policy = portable_policy("typescript");
+    let workspace = Workspace::new(
+        "prisma/migrations/20261009T1230_accounts/migration.ts",
+        concat!(
+            "import { Migration } from '@prisma/orm-postgres/migration';\n",
+            "export default class extends Migration {\n",
+            "  get operations() { return [{ createTable: 'accounts' }]; }\n",
+            "}\n",
+        ),
+        &policy,
+    );
+    workspace.source(
+        "package.json",
+        r#"{"dependencies":{"@prisma/orm-postgres":"8.0.0-rc.11"}}"#,
+    );
+    workspace.source(
+        "prisma/migrations/20261009T1230_accounts/ops.json",
+        "[{\"createTable\":\"accounts\"}]\n",
+    );
+
+    let output = workspace.check_path();
+    assert_eq!(output.status.code(), Some(0));
+    let data = report(&output);
+    assert_eq!(data["migration_artifacts"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        data["migration_artifacts"][0]["status"],
+        "migration_operations_not_analyzed"
+    );
+    assert!(data["limitations"].as_array().unwrap().contains(&json!(
+        "migration_operation_bundles_are_inventoried_not_analyzed"
+    )));
+    assert!(
+        !data["limitations"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("migration_sql_bodies_are_inventoried_not_analyzed"))
+    );
+    assert!(
+        !data["limitations"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("migration_artifact_ownership_unresolved"))
+    );
+}
+
+#[test]
+fn prisma_8_rc_contract_requires_a_matching_installed_package_version() {
+    let policy = portable_policy("typescript");
+    for version in [None, Some("7.9.0"), Some("8.0.0-beta.1")] {
+        let workspace = Workspace::new(
+            "prisma/migrations/20261009T1230_accounts/migration.ts",
+            concat!(
+                "import { Migration } from '@prisma/orm-postgres/migration';\n",
+                "export default class extends Migration {\n",
+                "  get operations() { return [{ createTable: 'accounts' }]; }\n",
+                "}\n",
+            ),
+            &policy,
+        );
+        if let Some(version) = version {
+            workspace.source(
+                "package.json",
+                &format!(r#"{{"dependencies":{{"@prisma/orm-postgres":"{version}"}}}}"#),
+            );
+        }
+        workspace.source("prisma/migrations/20261009T1230_accounts/ops.json", "[]\n");
+
+        let output = workspace.check_path();
+        assert_eq!(output.status.code(), Some(0));
+        let data = report(&output);
+        assert_eq!(data["source_roles"], json!([]), "version: {version:?}");
+        assert_eq!(
+            data["migration_artifacts"],
+            json!([]),
+            "version: {version:?}"
+        );
+    }
 }
 
 #[test]
@@ -1374,6 +1706,50 @@ fn same_named_method_outside_the_typeorm_migration_shell_is_not_role_adjusted() 
         .expect("same-named non-migration method remains blocking");
     assert_eq!(finding["location"]["line"], 13);
     assert!(finding.get("role_context").is_none());
+}
+
+#[test]
+fn role_context_span_points_to_the_exact_migration_entrypoint() {
+    let mut policy = portable_policy("typescript");
+    require_only(&mut policy, &["typescript.function_lines"]);
+    require_maximum(&mut policy, "typescript.function_lines", 2);
+    let workspace = Workspace::new(
+        "database/changes/20261011_accounts.ts",
+        concat!(
+            "import { MigrationInterface, QueryRunner } from 'typeorm';\n",
+            "export class Accounts implements MigrationInterface {\n",
+            "  async up(queryRunner: QueryRunner): Promise<void> {\n",
+            "    await queryRunner.query('CREATE TABLE accounts (id integer)');\n",
+            "  }\n",
+            "\n",
+            "  async down(queryRunner: QueryRunner): Promise<void> {\n",
+            "    await queryRunner.query('DROP TABLE accounts');\n",
+            "    await queryRunner.query('DROP TYPE account_kind');\n",
+            "    await queryRunner.query('DROP TYPE account_state');\n",
+            "  }\n",
+            "}\n",
+        ),
+        &policy,
+    );
+
+    let output = workspace.check_path();
+    assert_eq!(output.status.code(), Some(0));
+    let data = report(&output);
+    let finding = data["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| finding["symbol"] == "down")
+        .expect("long down entrypoint remains reported");
+    assert_eq!(
+        finding["role_context"]["declaration_role"],
+        "migration_down"
+    );
+    assert_eq!(finding["role_context"]["declaration_span"]["start_line"], 7);
+    assert_eq!(
+        finding["role_context"]["declaration_span"]["start_column"],
+        3
+    );
 }
 
 #[test]
@@ -1520,6 +1896,23 @@ fn unresolved_framework_signal_is_annotated_without_changing_the_finding() {
 }
 
 #[test]
+fn framework_names_in_comments_and_strings_do_not_create_candidates() {
+    let policy = portable_policy("typescript");
+    let workspace = Workspace::new(
+        "src/ordinary.ts",
+        concat!(
+            "// typeorm is mentioned in documentation only\n",
+            "export const note = 'try knex or @prisma/orm-postgres/migration';\n",
+        ),
+        &policy,
+    );
+
+    let output = workspace.check_path();
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(report(&output)["source_role_candidates"], json!([]));
+}
+
+#[test]
 fn nested_alembic_name_is_not_a_canonical_migration_entrypoint() {
     let mut policy = portable_policy("python");
     require_only(&mut policy, &["python.function_lines"]);
@@ -1557,7 +1950,51 @@ fn nested_alembic_name_is_not_a_canonical_migration_entrypoint() {
 }
 
 #[test]
-fn sea_orm_adjusts_only_the_aggregate_migration_type() {
+fn alembic_multidatabase_entrypoints_are_inferred_and_role_adjusted() {
+    let mut policy = portable_policy("python");
+    require_only(&mut policy, &["python.function_lines"]);
+    require_maximum(&mut policy, "python.function_lines", 2);
+    let workspace = Workspace::new(
+        "alembic/versions/20261011_accounts.py",
+        concat!(
+            "from alembic import op\n",
+            "revision = '20261011'\n",
+            "down_revision = None\n\n",
+            "def upgrade(engine_name: str) -> None:\n",
+            "    globals()['upgrade_%s' % engine_name]()\n\n",
+            "def downgrade(engine_name: str) -> None:\n",
+            "    globals()['downgrade_%s' % engine_name]()\n\n",
+            "def upgrade_primary() -> None:\n",
+            "    op.create_table('accounts')\n",
+            "    op.create_index('ix_accounts_id', 'accounts', ['id'])\n",
+            "    op.add_column('accounts', 'name')\n\n",
+            "def downgrade_primary() -> None:\n",
+            "    op.drop_table('accounts')\n",
+        ),
+        &policy,
+    );
+
+    let output = workspace.check_path();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let data = report(&output);
+    assert_eq!(data["source_roles"][0]["framework"], "alembic");
+    let finding = data["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| finding["symbol"] == "upgrade_primary")
+        .expect("long per-engine Alembic entrypoint");
+    assert_eq!(finding["status"], "reported_by_role");
+    assert_eq!(finding["role_context"]["declaration_role"], "migration_up");
+}
+
+#[test]
+fn sea_orm_adjusts_the_aggregate_type_and_canonical_methods() {
     let mut policy: Value =
         serde_json::from_str(include_str!("../examples/quality-policy.json")).unwrap();
     require_only(
@@ -1604,7 +2041,7 @@ fn sea_orm_adjusts_only_the_aggregate_migration_type() {
     );
 
     let output = workspace.check_path();
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.status.code(), Some(0));
     let data = report(&output);
     assert_eq!(data["source_roles"][0]["framework"], "sea_orm");
     let function = data["findings"]
@@ -1612,10 +2049,11 @@ fn sea_orm_adjusts_only_the_aggregate_migration_type() {
         .unwrap()
         .iter()
         .find(|finding| finding["rule_id"] == "rust.function_lines")
-        .expect("SeaORM up remains a normal function finding");
+        .expect("SeaORM up remains visible as a role-adjusted finding");
     assert!(function["symbol"].as_str().unwrap().ends_with("::up"));
-    assert_eq!(function["status"], "violation");
-    assert!(function.get("role_context").is_none());
+    assert_eq!(function["status"], "reported_by_role");
+    assert_eq!(function["blocking"], false);
+    assert_eq!(function["role_context"]["declaration_role"], "migration_up");
     let aggregate = data["findings"]
         .as_array()
         .unwrap()
@@ -1782,7 +2220,18 @@ fn drizzle_directories_are_bound_to_canonical_configuration_calls() {
     );
     let output = dynamic_configuration.check_path();
     assert_eq!(output.status.code(), Some(0));
-    assert_eq!(report(&output)["migration_artifacts"], json!([]));
+    let data = report(&output);
+    assert_eq!(data["migration_artifacts"], json!([]));
+    assert_eq!(
+        data["migration_artifact_candidates"],
+        json!([{
+            "role": "possible_database_migration_artifact",
+            "path": "drizzle/0000_accounts.sql",
+            "matched_convention": "typescript_versioned_sql",
+            "evidence_sought": ["framework_configuration_or_runtime_path"],
+            "unresolved_reason": "framework_ownership_not_resolved"
+        }])
+    );
 
     let mixed_configuration = Workspace::new(
         "drizzle.config.ts",
@@ -1803,6 +2252,49 @@ fn drizzle_directories_are_bound_to_canonical_configuration_calls() {
     assert_eq!(
         report(&output)["migration_artifacts"][0]["path"],
         "database/generated/0000_accounts.sql"
+    );
+}
+
+#[test]
+fn drizzle_v1_timestamp_directory_is_inventoried() {
+    let policy = portable_policy("typescript");
+    let workspace = Workspace::new(
+        "drizzle.config.ts",
+        concat!(
+            "import { defineConfig } from 'drizzle-kit';\n",
+            "export default defineConfig({ out: './database/generated' });\n",
+        ),
+        &policy,
+    );
+    workspace.source(
+        "database/generated/20261011123045_accounts/migration.sql",
+        "CREATE TABLE accounts(id integer);\n",
+    );
+
+    let output = workspace.check_path();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let data = report(&output);
+    assert_eq!(data["migration_artifacts"][0]["framework"], "drizzle_kit");
+    assert_eq!(
+        data["migration_artifacts"][0]["path"],
+        "database/generated/20261011123045_accounts/migration.sql"
+    );
+    assert_eq!(
+        data["migration_artifacts"][0]["evidence"],
+        json!(["framework_source:drizzle", "layout:drizzle_v1"])
+    );
+    assert_eq!(
+        data["migration_artifacts"][0]["declaration_path"],
+        "drizzle.config.ts"
+    );
+    assert_eq!(
+        data["migration_artifacts"][0]["declaration_span"]["start_line"],
+        2
     );
 }
 
@@ -1908,6 +2400,44 @@ fn unrelated_sql_is_not_captured_or_charged_to_the_scan() {
 }
 
 #[test]
+fn unresolved_migration_candidate_contents_are_digest_bound() {
+    let policy = portable_policy("typescript");
+    let workspace = Workspace::new(
+        "drizzle.config.ts",
+        concat!(
+            "import { defineConfig } from 'drizzle-kit';\n",
+            "const outputDirectory = './drizzle';\n",
+            "export default defineConfig({ out: outputDirectory });\n",
+        ),
+        &policy,
+    );
+    workspace.source(
+        "drizzle/0000_accounts.sql",
+        "CREATE TABLE accounts (id integer);\n",
+    );
+    workspace.stage();
+
+    let staged_before = report(&workspace.check_staged());
+    let working_before = report(&workspace.check_path());
+    assert_eq!(
+        staged_before["input_sha256"], working_before["input_sha256"],
+        "identical unresolved candidate bytes have identical provenance"
+    );
+
+    workspace.source(
+        "drizzle/0000_accounts.sql",
+        "CREATE TABLE accounts (id integer, name text);\n",
+    );
+    let working_after = report(&workspace.check_path());
+    let staged_after = report(&workspace.check_staged());
+    assert_ne!(
+        working_after["input_sha256"],
+        working_before["input_sha256"]
+    );
+    assert_eq!(staged_after["input_sha256"], staged_before["input_sha256"]);
+}
+
+#[test]
 fn sql_migration_artifacts_are_digest_bound_and_obey_staged_snapshot_semantics() {
     let policy = portable_policy("typescript");
     let workspace = Workspace::new(
@@ -1923,8 +2453,15 @@ fn sql_migration_artifacts_are_digest_bound_and_obey_staged_snapshot_semantics()
         "drizzle/0001_unrelated.sql",
         "CREATE TABLE unrelated (id integer);\n",
     );
+    workspace.source(
+        "database/generated/node_modules/0002_excluded.sql",
+        "CREATE TABLE excluded (id integer);\n",
+    );
     workspace.stage();
 
+    let working_before = workspace.check_path();
+    assert_eq!(working_before.status.code(), Some(0));
+    let working_before = report(&working_before);
     let staged_before = workspace.check_staged();
     assert_eq!(staged_before.status.code(), Some(0));
     let staged_before = report(&staged_before);
@@ -1953,6 +2490,10 @@ fn sql_migration_artifacts_are_digest_bound_and_obey_staged_snapshot_semantics()
     assert_eq!(
         staged_before["migration_artifacts"][0]["path"],
         "database/generated/0000_accounts.sql"
+    );
+    assert_eq!(
+        staged_before["input_sha256"], working_before["input_sha256"],
+        "identical working and staged migration bytes must produce the same digest"
     );
 
     workspace.source(
@@ -3167,7 +3708,7 @@ fn runtime_manifests_partition_monorepo_results_by_repository_implementation() {
     let output = workspace.check_path();
     assert_eq!(output.status.code(), Some(0));
     let data = report(&output);
-    assert_eq!(data["report_schema_version"], 8);
+    assert_eq!(data["report_schema_version"], 11);
     assert_eq!(
         data["implementation_results"]
             .as_array()
@@ -3232,7 +3773,13 @@ fn nearest_runtime_manifest_owns_sources_in_path_and_staged_scans() {
         workspace.stage();
         workspace.check_staged()
     }] {
-        assert_eq!(output.status.code(), Some(0));
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "stderr: {}\nstdout: {}",
+            String::from_utf8_lossy(&output.stderr),
+            String::from_utf8_lossy(&output.stdout)
+        );
         let data = report(&output);
         assert_eq!(
             data["implementation_results"]
@@ -3245,6 +3792,49 @@ fn nearest_runtime_manifest_owns_sources_in_path_and_staged_scans() {
         );
         assert_eq!(implementation_result(&data, ".")["scanned_files"], 1);
         assert_eq!(implementation_result(&data, "backend")["scanned_files"], 1);
+    }
+}
+
+#[test]
+fn nested_sqlx_configuration_does_not_create_an_implementation_boundary() {
+    let mut policy: Value =
+        serde_json::from_str(include_str!("../examples/quality-policy.json")).unwrap();
+    policy["rules"]["rust.divergent_change"]["mode"] = json!("off");
+    policy["rules"]["rust.shotgun_surgery"]["mode"] = json!("off");
+    let workspace = Workspace::new("services/api/src/lib.rs", "pub fn root() {}\n", &policy);
+    workspace.source(
+        "services/api/Cargo.toml",
+        concat!(
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n",
+            "[dependencies]\nsqlx = \"0.9\"\n",
+        ),
+    );
+    workspace.source(
+        "services/api/database/sqlx.toml",
+        "[migrate]\nmigrations-dir = \"history\"\n",
+    );
+    workspace.source("services/api/database/helper.rs", "pub fn helper() {}\n");
+
+    for output in [workspace.check_path(), {
+        workspace.stage();
+        workspace.check_staged()
+    }] {
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "stderr: {}\nstdout: {}",
+            String::from_utf8_lossy(&output.stderr),
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let data = report(&output);
+        let implementations = data["implementation_results"].as_array().unwrap();
+        assert_eq!(implementations.len(), 1, "{implementations:?}");
+        assert_eq!(implementations[0]["implementation_id"], "services/api");
+        assert_eq!(implementations[0]["scanned_files"], 2);
+        assert_eq!(
+            implementations[0]["runtime_manifests"],
+            json!(["services/api/Cargo.toml", "services/api/database/sqlx.toml"])
+        );
     }
 }
 

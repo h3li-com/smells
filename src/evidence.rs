@@ -263,6 +263,77 @@ fn apply_observation(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::model::{History, Implementation};
+
+    fn input() -> (Input, Registry) {
+        let registry = crate::policy::registry("python-v1").unwrap();
+        let policy = crate::policy::parse(
+            include_str!("../examples/python-quality-policy.json"),
+            &registry,
+        )
+        .unwrap();
+        (
+            Input {
+                files: BTreeMap::from([("model.py".into(), "class Child:\n    pass\n".into())]),
+                manifests: BTreeMap::new(),
+                artifacts: BTreeMap::new(),
+                artifact_candidates: BTreeMap::new(),
+                implementations: vec![Implementation {
+                    id: ".".into(),
+                    root: Some(".".into()),
+                    ownership: "runtime_manifest",
+                    implementation_types: vec!["python_project".into()],
+                    runtime_types: vec!["python".into()],
+                    runtime_manifests: vec!["pyproject.toml".into()],
+                    source_files: vec!["model.py".into()],
+                }],
+                source_roles: Vec::new(),
+                history: History::default(),
+                policy,
+                digest: "captured-input-digest".into(),
+                mode: "working_tree",
+            },
+            registry,
+        )
+    }
+
+    fn observation() -> Observation {
+        Observation {
+            symbol: "Child".into(),
+            location: Location {
+                path: "model.py".into(),
+                line: 1,
+                column: 1,
+            },
+            related_symbols: Vec::new(),
+            related_locations: Vec::new(),
+            measurements: measurements(&[("inherited_members", 5), ("unused_members", 4)]),
+            evidence: json!({"inheritance_graph": "fixture"}),
+        }
+    }
+
+    fn provider() -> RuleEvidence {
+        RuleEvidence {
+            rule_id: "python.refused_bequest".into(),
+            provider: Provider {
+                name: "fixture-type-graph".into(),
+                version: "1".into(),
+                configuration_sha256: "a".repeat(64),
+            },
+            complete: true,
+            observations: vec![observation()],
+        }
+    }
+
+    fn bundle(input: &Input, registry: &Registry) -> EvidenceBundle {
+        EvidenceBundle {
+            schema_version: 1,
+            scanner_version: env!("CARGO_PKG_VERSION").into(),
+            rule_pack: registry.rule_pack.clone(),
+            input_sha256: input.digest.clone(),
+            providers: vec![provider()],
+        }
+    }
 
     fn measurements(values: &[(&str, u64)]) -> BTreeMap<String, u64> {
         values
@@ -391,5 +462,123 @@ mod tests {
             .unwrap()
             .matched
         );
+    }
+
+    #[test]
+    fn evidence_digests_and_locations_enforce_exact_boundaries() {
+        assert!(valid_sha256(&"a".repeat(64)));
+        assert!(valid_sha256(&"A".repeat(64)));
+        assert!(!valid_sha256(&"a".repeat(63)));
+        assert!(!valid_sha256(&format!("{}g", "a".repeat(63))));
+
+        let (input, _) = input();
+        let location = |path: &str, line, column| Location {
+            path: path.into(),
+            line,
+            column,
+        };
+        assert!(valid_location(&location("model.py", 1, 1), &input));
+        assert!(valid_location(&location("model.py", 1, 13), &input));
+        assert!(!valid_location(&location("model.py", 1, 14), &input));
+        assert!(!valid_location(&location("model.py", 0, 1), &input));
+        assert!(!valid_location(&location("model.py", 1, 0), &input));
+        assert!(!valid_location(&location("model.py", 4, 1), &input));
+        assert!(!valid_location(&location("missing.py", 1, 1), &input));
+    }
+
+    #[test]
+    fn evidence_header_is_bound_to_scanner_rule_pack_and_snapshot() {
+        let (input, registry) = input();
+        assert!(validate_header(&bundle(&input, &registry), &input, &registry).is_ok());
+
+        let invalid = |mutate: fn(&mut EvidenceBundle)| {
+            let mut bundle = bundle(&input, &registry);
+            mutate(&mut bundle);
+            validate_header(&bundle, &input, &registry).is_err()
+        };
+        assert!(invalid(|bundle| bundle.schema_version = 2));
+        assert!(invalid(|bundle| bundle.scanner_version = "0.0.0".into()));
+        assert!(invalid(|bundle| bundle.rule_pack = "typescript-v1".into()));
+        assert!(invalid(
+            |bundle| bundle.input_sha256 = "another-snapshot".into()
+        ));
+    }
+
+    #[test]
+    fn provider_rule_identity_is_unique_registered_and_complete() {
+        let mut seen = BTreeSet::new();
+        assert!(ensure_unique(&mut seen, "python.refused_bequest").is_ok());
+        assert!(ensure_unique(&mut seen, "python.refused_bequest").is_err());
+
+        let registered = BTreeSet::from(["python.refused_bequest"]);
+        assert!(ensure_registered(&registered, "python.refused_bequest").is_ok());
+        assert!(ensure_registered(&registered, "python.unknown").is_err());
+
+        let (input, _) = input();
+        let mut incomplete = provider();
+        incomplete.complete = false;
+        assert!(validate_rule_evidence(&incomplete, &input).is_err());
+    }
+
+    #[test]
+    fn provider_identity_requires_name_version_and_configuration_digest() {
+        assert!(validate_provider_identity(&provider()).is_ok());
+        let invalid = |mutate: fn(&mut RuleEvidence)| {
+            let mut provider = provider();
+            mutate(&mut provider);
+            validate_provider_identity(&provider).is_err()
+        };
+        assert!(invalid(|rule| rule.provider.name.clear()));
+        assert!(invalid(|rule| rule.provider.version.clear()));
+        assert!(invalid(
+            |rule| rule.provider.configuration_sha256 = "not-a-digest".into()
+        ));
+    }
+
+    #[test]
+    fn observations_require_valid_primary_and_aligned_related_locations() {
+        let (input, _) = input();
+        let mut valid = observation();
+        valid.related_symbols.push("Base".into());
+        valid.related_locations.push(Location {
+            path: "model.py".into(),
+            line: 2,
+            column: 5,
+        });
+        assert!(validate_related(&valid, &input));
+        assert!(validate_observation("python.refused_bequest", &valid, &input).is_ok());
+
+        let mut invalid = valid;
+        invalid.related_symbols.push("Other".into());
+        assert!(!validate_related(&invalid, &input));
+        assert!(validate_observation("python.refused_bequest", &invalid, &input).is_err());
+
+        let mut invalid = observation();
+        invalid.symbol.clear();
+        assert!(validate_observation("python.refused_bequest", &invalid, &input).is_err());
+        let mut invalid = observation();
+        invalid.location.line = 0;
+        assert!(validate_observation("python.refused_bequest", &invalid, &input).is_err());
+        let mut invalid = observation();
+        invalid.measurements.remove("unused_members");
+        assert!(validate_observation("python.refused_bequest", &invalid, &input).is_err());
+    }
+
+    #[test]
+    fn complete_bundle_validation_rejects_duplicate_unknown_and_invalid_providers() {
+        let (input, registry) = input();
+        assert!(validate(&bundle(&input, &registry), &input, &registry).is_ok());
+
+        let mut duplicate = bundle(&input, &registry);
+        duplicate.providers.push(provider());
+        assert!(validate(&duplicate, &input, &registry).is_err());
+
+        let mut unknown = bundle(&input, &registry);
+        unknown.providers[0].rule_id = "python.unknown".into();
+        assert!(validate(&unknown, &input, &registry).is_err());
+
+        let mut invalid = bundle(&input, &registry);
+        invalid.providers[0].provider.name.clear();
+        assert!(validate(&invalid, &input, &registry).is_err());
     }
 }

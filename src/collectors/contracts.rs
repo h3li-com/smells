@@ -363,3 +363,250 @@ pub(super) fn library_capabilities(
     }
     Ok(observations)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        collectors::model::{FieldFact, FunctionFact},
+        core::model::{History, Input},
+        policy::{Limits, Policy, ResolvedSelection},
+        report::Location,
+    };
+    use std::{collections::BTreeMap, sync::Arc};
+
+    fn location(path: &str) -> Location {
+        Location {
+            path: path.into(),
+            line: 1,
+            column: 1,
+        }
+    }
+
+    fn function(name: &str, body: Option<&str>) -> FunctionFact {
+        FunctionFact {
+            name: name.into(),
+            symbol: format!("domain::{name}"),
+            location: location("src/domain.rs"),
+            type_parameters: Vec::new(),
+            body: body.map(Arc::from),
+            source: Arc::from(body.unwrap_or_default()),
+            private: false,
+        }
+    }
+
+    fn class(path: &str, owner: &str, name: &str) -> ClassFact {
+        ClassFact {
+            name: name.into(),
+            symbol: format!("{path}::{owner}"),
+            location: location(path),
+            type_parameters: Vec::new(),
+            source: Arc::from(""),
+            bases: Vec::new(),
+            interface: false,
+            private: false,
+            fields: Vec::new(),
+            methods: Vec::new(),
+            range: (0, 0),
+        }
+    }
+
+    fn rule(id: &str) -> Rule {
+        Rule {
+            id: id.into(),
+            version: 1,
+            smell: "test".into(),
+            kind: "threshold".into(),
+            implementation: "test".into(),
+            inputs: Vec::new(),
+            parameters: BTreeMap::new(),
+            contract: "test".into(),
+        }
+    }
+
+    fn input(files: BTreeMap<String, String>) -> Input {
+        Input {
+            files,
+            manifests: BTreeMap::new(),
+            artifacts: BTreeMap::new(),
+            artifact_candidates: BTreeMap::new(),
+            implementations: Vec::new(),
+            source_roles: Vec::new(),
+            history: History::default(),
+            policy: Policy {
+                schema_version: 1,
+                rule_pack: "rust-v1".into(),
+                scanner_version: env!("CARGO_PKG_VERSION").into(),
+                scope: "repository".into(),
+                default_groups: vec!["all".into()],
+                exclude_directories: Vec::new(),
+                source_roles: Vec::new(),
+                limits: Limits {
+                    maximum_files: 10,
+                    maximum_pairs: 10,
+                    maximum_group_combinations: 10,
+                },
+                rules: BTreeMap::new(),
+                exceptions: Vec::new(),
+                resolved: ResolvedSelection::default(),
+            },
+            digest: "0".repeat(64),
+            mode: "test",
+        }
+    }
+
+    #[test]
+    fn nominal_slot_names_require_an_exact_domain_suffix_and_a_primitive_type() {
+        for accepted in ["id", "account_id", "billing_currency", "postal_address"] {
+            assert!(semantically_nominal_name(accepted));
+        }
+        for rejected in ["identity", "candidate", "currency_code", "addressable"] {
+            assert!(!semantically_nominal_name(rejected));
+        }
+
+        let mut account = class("src/domain.rs", "Account", "Account");
+        account.fields = vec![
+            FieldFact {
+                name: "account_id".into(),
+                authored_type: "String".into(),
+                temporary: false,
+                private: false,
+            },
+            FieldFact {
+                name: "country".into(),
+                authored_type: "Country".into(),
+                temporary: false,
+                private: false,
+            },
+            FieldFact {
+                name: "identity".into(),
+                authored_type: "String".into(),
+                temporary: false,
+                private: false,
+            },
+        ];
+        let observations = nominal_slot_contract(
+            &rule("rust.nominal_slot_contract"),
+            &SourceModel {
+                classes: vec![account],
+                ..SourceModel::default()
+            },
+        );
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].measurements["mismatches"], 1);
+        assert_eq!(
+            observations[0].evidence["primitive_semantic_slots"][0],
+            "account_id"
+        );
+    }
+
+    #[test]
+    fn logical_symbols_resolve_crate_self_super_and_external_bases() {
+        let derived = class("src/domain/orders/handler.rs", "nested::Handler", "Handler");
+        assert_eq!(
+            logical_symbol(&derived),
+            "domain::orders::handler::nested::Handler"
+        );
+        assert_eq!(
+            qualified_base_target(&derived, "crate::ports::Reader").as_deref(),
+            Some("ports::Reader")
+        );
+        assert_eq!(
+            qualified_base_target(&derived, "self::Reader").as_deref(),
+            Some("domain::orders::handler::nested::Reader")
+        );
+        assert_eq!(
+            qualified_base_target(&derived, "super::super::Reader").as_deref(),
+            Some("domain::orders::Reader")
+        );
+        assert_eq!(
+            qualified_base_target(&derived, "external::Reader").as_deref(),
+            Some("external::Reader")
+        );
+        assert_eq!(qualified_base_target(&derived, "Reader"), None);
+    }
+
+    #[test]
+    fn rejection_stubs_are_narrow_and_drive_refused_bequest_counts() {
+        for accepted in [
+            "pass",
+            "return NotImplemented",
+            "raise NotImplementedError()",
+            "{ throw new Error('unsupported'); }",
+        ] {
+            assert!(rejection_stub(accepted));
+        }
+        for rejected in [
+            "return value",
+            "raise ValueError()",
+            "throw error",
+            "pass; audit()",
+        ] {
+            assert!(!rejection_stub(rejected));
+        }
+
+        let mut base = class("src/base.py", "Port", "Port");
+        base.methods = vec![
+            function("__init__", Some("pass")),
+            function("load", None),
+            function("save", None),
+        ];
+        let mut derived = class("src/adapter.py", "Adapter", "Adapter");
+        derived.bases = vec!["Port".into()];
+        derived.methods = vec![
+            function("load", Some("raise NotImplementedError()")),
+            function("save", Some("return value")),
+        ];
+        let observations = refused_bequest(&SourceModel {
+            classes: vec![base, derived],
+            ..SourceModel::default()
+        });
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].measurements["inherited_members"], 2);
+        assert_eq!(observations[0].measurements["unused_members"], 1);
+        assert_eq!(observations[0].evidence["rejected_members"][0], "load");
+    }
+
+    #[test]
+    fn parallel_hierarchies_report_each_shared_role_once() {
+        let mut cat = class("src/animals.rs", "CatAnimal", "CatAnimal");
+        cat.bases = vec!["Animal".into()];
+        let mut dog = class("src/animals.rs", "DogAnimal", "DogAnimal");
+        dog.bases = vec!["Animal".into()];
+        let mut cat_view = class("src/views.rs", "CatView", "CatView");
+        cat_view.bases = vec!["View".into()];
+        let mut dog_view = class("src/views.rs", "DogView", "DogView");
+        dog_view.bases = vec!["View".into()];
+        let observations = parallel_inheritance(&SourceModel {
+            classes: vec![cat, dog, cat_view, dog_view],
+            ..SourceModel::default()
+        });
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].measurements["parallel_pairs"], 2);
+        assert_eq!(observations[0].related_symbols.len(), 2);
+    }
+
+    #[test]
+    fn rust_library_capabilities_require_a_nonempty_extension_trait() {
+        let mut extension = class("src/ext.rs", "ReadExt", "ReadExt");
+        extension.interface = true;
+        extension.methods = vec![function("read_more", None)];
+        let mut empty = class("src/empty.rs", "EmptyExt", "EmptyExt");
+        empty.interface = true;
+        let mut ordinary = class("src/port.rs", "ReadPort", "ReadPort");
+        ordinary.interface = true;
+        ordinary.methods = vec![function("read", None)];
+
+        let observations = library_capabilities(
+            &rule("rust.library_capabilities"),
+            &SourceModel {
+                classes: vec![extension, empty, ordinary],
+                ..SourceModel::default()
+            },
+            &input(BTreeMap::new()),
+        )
+        .unwrap();
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].symbol, "src/ext.rs::ReadExt");
+    }
+}

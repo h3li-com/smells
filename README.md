@@ -326,7 +326,7 @@ Preserve both artifacts. Let exit `1` block configured violations and exit `2` b
 
 ### Run it before commits
 
-`--staged` scans the complete tracked source snapshot in the Git index. It reads source, runtime manifests, recognized SQL migration artifacts, policy, and optional evidence from staged blobs rather than unstaged replacements. Those artifact bytes participate in the same file budget and input digest as the source snapshot.
+`--staged` scans the complete tracked source snapshot in the Git index. It reads source, runtime manifests, recognized SQL migration artifacts, unresolved migration candidates, policy, and optional evidence from staged blobs rather than unstaged replacements. Recognized and candidate artifact bytes participate in the same file budget and input digest as the source snapshot.
 
 With the Python `pre-commit` framework:
 
@@ -414,7 +414,7 @@ Dynamic or custom discovery can be declared with repository-root-anchored policy
 }]
 ```
 
-Supported source-role frameworks are documented by each language policy schema. Recognized SQL migration files are included in the input digest and listed under `migration_artifacts` with `migration_body_not_analyzed`; Smells does not imply that scanning a Drizzle, Prisma, SQLx, Diesel, or Refinery launcher analyzed its SQL body. See the [migration design and framework evidence](docs/migration-code-analysis.md).
+Supported source-role frameworks are documented by each language policy schema. Recognized migration bundle members are included in the input digest and listed under `migration_artifacts` with a versioned contract and an explicit analysis status. When static ownership evidence is available, artifact records point to its exact configuration or launcher span. SQLx artifacts disclose byte-exact versus configured ignored-character checksum normalization. Migration-shaped files whose ownership cannot be proved remain visible under `migration_artifact_candidates`, and their bytes are still provenance-bound; Smells does not imply that scanning a Drizzle, Prisma, SQLx, Diesel, or Refinery launcher analyzed its SQL or operations body. See the [migration design and framework evidence](docs/migration-code-analysis.md).
 
 ### Optional higher-fidelity evidence
 

@@ -1,6 +1,40 @@
 use super::extract::{ClassSummary, record_class_metrics};
 use super::*;
 
+fn data_class_match(fields: usize, operations: usize, minimum: u64, maximum: u64) -> bool {
+    fields as u64 >= minimum && operations as u64 <= maximum
+}
+
+fn lazy_class_match(
+    fields: usize,
+    methods: usize,
+    lines: usize,
+    maximum_fields: u64,
+    maximum_methods: u64,
+    maximum_lines: u64,
+) -> bool {
+    fields as u64 <= maximum_fields
+        && methods as u64 <= maximum_methods
+        && lines as u64 <= maximum_lines
+}
+
+fn body_line_total(lines: usize, comments: usize) -> usize {
+    lines + comments
+}
+
+fn comment_share_match(lines: usize, comments: usize, minimum_lines: u64, share: u64) -> bool {
+    let total = body_line_total(lines, comments);
+    lines as u64 >= minimum_lines && 100_u128 * comments as u128 >= share as u128 * total as u128
+}
+
+fn enough_clump_slots(slots: usize, minimum: usize) -> bool {
+    slots >= minimum
+}
+
+fn enough_clump_support(declarations: usize, minimum: u64) -> bool {
+    declarations as u64 >= minimum
+}
+
 fn class_patterns(facts: &Facts, policy: &Policy, language: &str, report: &mut Report) {
     let data_class = format!("{language}.data_class");
     let lazy_class = format!("{language}.lazy_class");
@@ -17,7 +51,7 @@ fn class_patterns(facts: &Facts, policy: &Policy, language: &str, report: &mut R
                 json!({"fields":class.fields,"operations":class.operations}),
                 "fields >= and operations <=",
                 json!({"minimum_fields":minimum,"maximum_operations":maximum}),
-                class.fields as u64 >= minimum && class.operations as u64 <= maximum,
+                data_class_match(class.fields, class.operations, minimum, maximum),
                 json!({"accessor_definition":"strict_source_shape","constructors_excluded":true}),
             );
         }
@@ -34,9 +68,14 @@ fn class_patterns(facts: &Facts, policy: &Policy, language: &str, report: &mut R
                 json!({"fields":class.fields,"functions":class.methods,"lines":class.method_lines}),
                 "all <=",
                 json!({"maximum_fields":fields,"maximum_functions":methods,"maximum_lines":lines}),
-                class.fields as u64 <= fields
-                    && class.methods as u64 <= methods
-                    && class.method_lines as u64 <= lines,
+                lazy_class_match(
+                    class.fields,
+                    class.methods,
+                    class.method_lines,
+                    fields,
+                    methods,
+                    lines,
+                ),
                 json!({"scope":"source_authored_class_members"}),
             );
         }
@@ -51,7 +90,7 @@ fn comments(facts: &Facts, policy: &Policy, language: &str, report: &mut Report)
     for function in &facts.functions {
         let code = policy.parameter(&id, "minimum_code_lines");
         let share = policy.parameter(&id, "minimum_share_percent");
-        let total = function.lines + function.comments;
+        let total = body_line_total(function.lines, function.comments);
         if total == 0 {
             continue;
         }
@@ -64,8 +103,7 @@ fn comments(facts: &Facts, policy: &Policy, language: &str, report: &mut Report)
             json!({"comment_lines":function.comments,"code_lines":function.lines}),
             "code minimum and share >=",
             json!({"minimum_code_lines":code,"minimum_share_percent":share}),
-            function.lines as u64 >= code
-                && 100_u128 * function.comments as u128 >= share as u128 * total as u128,
+            comment_share_match(function.lines, function.comments, code, share),
             json!({"denominator":total,"documentation_strings":"excluded"}),
         );
     }
@@ -117,7 +155,7 @@ fn clumps(facts: &Facts, policy: &Policy, language: &str, report: &mut Report) {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
-        if slots.len() < size {
+        if !enough_clump_slots(slots.len(), size) {
             continue;
         }
         let mut groups = Vec::new();
@@ -137,7 +175,7 @@ fn clumps(facts: &Facts, policy: &Policy, language: &str, report: &mut Report) {
         }
     }
     for (group, support) in supports {
-        if (support.len() as u64) < minimum {
+        if !enough_clump_support(support.len(), minimum) {
             continue;
         }
         let functions: Vec<_> = support
@@ -276,6 +314,131 @@ pub(super) fn patterns(facts: &Facts, policy: &Policy, language: &str, report: &
     duplicates(facts, policy, language, report);
 }
 
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod tests {
+    use super::{
+        FunctionFact, Location, body_line_total, combinations, comment_share_match,
+        data_class_match, enough_clump_slots, enough_clump_support, lazy_class_match,
+        ordered_functions, overlapping_functions,
+    };
+
+    fn function(symbol: &str, path: &str, line: usize, body_range: (usize, usize)) -> FunctionFact {
+        FunctionFact {
+            symbol: symbol.into(),
+            owner: None,
+            location: Location {
+                path: path.into(),
+                line,
+                column: 1,
+            },
+            parameters: Vec::new(),
+            lines: 1,
+            comments: 0,
+            tokens: vec!["identifier".into()],
+            body_range,
+        }
+    }
+
+    #[test]
+    fn data_class_requires_both_independent_boundaries() {
+        assert!(data_class_match(5, 2, 5, 2));
+        assert!(!data_class_match(4, 2, 5, 2));
+        assert!(!data_class_match(5, 3, 5, 2));
+        assert!(!data_class_match(4, 3, 5, 2));
+    }
+
+    #[test]
+    fn lazy_class_requires_every_maximum_boundary() {
+        assert!(lazy_class_match(3, 4, 20, 3, 4, 20));
+        assert!(!lazy_class_match(4, 4, 20, 3, 4, 20));
+        assert!(!lazy_class_match(3, 5, 20, 3, 4, 20));
+        assert!(!lazy_class_match(3, 4, 21, 3, 4, 20));
+        assert!(!lazy_class_match(4, 5, 21, 3, 4, 20));
+    }
+
+    #[test]
+    fn comment_share_requires_the_code_minimum_and_exact_integer_ratio() {
+        assert!(comment_share_match(20, 5, 20, 20));
+        assert!(!comment_share_match(19, 5, 20, 20));
+        assert!(!comment_share_match(20, 4, 20, 20));
+        assert!(comment_share_match(80, 20, 1, 20));
+        assert!(!comment_share_match(81, 19, 1, 20));
+    }
+
+    #[test]
+    fn body_line_total_adds_code_and_comment_rows_independently() {
+        assert_eq!(body_line_total(0, 0), 0);
+        assert_eq!(body_line_total(5, 0), 5);
+        assert_eq!(body_line_total(0, 3), 3);
+        assert_eq!(body_line_total(5, 3), 8);
+    }
+
+    #[test]
+    fn group_combinations_are_unique_and_charge_the_exact_budget() {
+        let slots = [
+            ("a".into(), "A".into()),
+            ("b".into(), "B".into()),
+            ("c".into(), "C".into()),
+            ("d".into(), "D".into()),
+        ];
+        let mut groups = Vec::new();
+        let mut remaining = 6;
+        combinations(&slots, 2, 0, &mut Vec::new(), &mut groups, &mut remaining).unwrap();
+        assert_eq!(groups.len(), 6);
+        assert_eq!(remaining, 0);
+        assert_eq!(groups[0], [slots[0].clone(), slots[1].clone()]);
+        assert_eq!(groups[5], [slots[2].clone(), slots[3].clone()]);
+
+        let mut groups = Vec::new();
+        let mut remaining = 5;
+        let error =
+            combinations(&slots, 2, 0, &mut Vec::new(), &mut groups, &mut remaining).unwrap_err();
+        assert_eq!(error, "maximum_group_combinations budget exceeded");
+        assert_eq!(groups.len(), 5);
+        assert_eq!(remaining, 0);
+
+        let mut groups = Vec::new();
+        let mut remaining = 1;
+        combinations(&slots, 5, 0, &mut Vec::new(), &mut groups, &mut remaining).unwrap();
+        assert!(groups.is_empty());
+        assert_eq!(remaining, 1);
+    }
+
+    #[test]
+    fn clump_candidate_and_support_thresholds_are_inclusive_and_independent() {
+        assert!(enough_clump_slots(3, 3));
+        assert!(enough_clump_slots(4, 3));
+        assert!(!enough_clump_slots(2, 3));
+        assert!(enough_clump_support(3, 3));
+        assert!(enough_clump_support(4, 3));
+        assert!(!enough_clump_support(2, 3));
+    }
+
+    #[test]
+    fn duplicate_function_overlap_uses_strict_ranges_within_the_same_file() {
+        let first = function("zeta", "same.py", 10, (10, 20));
+        let overlapping = function("alpha", "same.py", 2, (19, 30));
+        let touching = function("touching", "same.py", 20, (20, 30));
+        let touching_before = function("touching_before", "same.py", 1, (0, 10));
+        let containing = function("containing", "same.py", 1, (0, 40));
+        let other_file = function("other", "other.py", 1, (10, 20));
+
+        assert!(overlapping_functions(&first, &overlapping));
+        assert!(overlapping_functions(&first, &containing));
+        assert!(!overlapping_functions(&first, &touching));
+        assert!(!overlapping_functions(&first, &touching_before));
+        assert!(!overlapping_functions(&first, &other_file));
+
+        let (ordered_first, ordered_second) = ordered_functions(&first, &overlapping);
+        assert_eq!(ordered_first.symbol, "alpha");
+        assert_eq!(ordered_second.symbol, "zeta");
+        let (ordered_first, ordered_second) = ordered_functions(&overlapping, &first);
+        assert_eq!(ordered_first.symbol, "alpha");
+        assert_eq!(ordered_second.symbol, "zeta");
+    }
+}
+
 pub(super) fn source_metrics(
     facts: &Facts,
     registry: &Registry,
@@ -304,6 +467,7 @@ pub(super) fn source_metrics(
                     &function.location.path,
                     &function.symbol,
                     function.owner.as_deref(),
+                    &function.location,
                 ),
             ),
         );
@@ -321,13 +485,5 @@ pub(super) fn source_metrics(
             input,
             report,
         );
-    }
-}
-
-pub(super) fn validate_required_rules(registry: &Registry, input: &Input, report: &mut Report) {
-    for rule in &registry.rules {
-        if rule.implementation == "not_implemented" && input.policy.required(&rule.id) {
-            report.error(format!("required detector not implemented: {}", rule.id));
-        }
     }
 }

@@ -79,3 +79,77 @@ pub(super) fn observation(
         evidence,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn primitive_types_are_language_specific_and_do_not_accept_wrappers() {
+        for (language, accepted) in [
+            (
+                "python",
+                ["str", "int", "float", "bool", "bytes"].as_slice(),
+            ),
+            (
+                "typescript",
+                ["string", "number", "boolean", "bigint", "symbol"].as_slice(),
+            ),
+            (
+                "rust",
+                ["bool", "char", "String", "i32", "u64", "usize", "f64"].as_slice(),
+            ),
+        ] {
+            for authored in accepted {
+                assert!(primitive_type(language, authored), "{language}: {authored}");
+            }
+        }
+        for (language, rejected) in [
+            ("python", "Optional[str]"),
+            ("typescript", "string | null"),
+            ("rust", "Option<String>"),
+            ("unknown", "string"),
+        ] {
+            assert!(!primitive_type(language, rejected));
+        }
+    }
+
+    #[test]
+    fn source_locations_are_one_based_and_unicode_columns_count_characters() {
+        let source = "αβ\nvalue";
+        assert_eq!(location_at("sample.py", source, 0).line, 1);
+        assert_eq!(location_at("sample.py", source, 0).column, 1);
+        assert_eq!(location_at("sample.py", source, "α".len()).column, 2);
+        let second_line = location_at("sample.py", source, "αβ\n".len());
+        assert_eq!(second_line.line, 2);
+        assert_eq!(second_line.column, 1);
+    }
+
+    #[test]
+    fn observations_keep_measurement_and_evidence_contracts() {
+        let location = Location {
+            path: "sample.rs".into(),
+            line: 2,
+            column: 3,
+        };
+        let observed = observation(
+            "sample::symbol".into(),
+            location.clone(),
+            [("count", 2), ("total", 3)],
+            json!({"collector": "test"}),
+        );
+        assert_eq!(observed.symbol, "sample::symbol");
+        assert_eq!(observed.location.path, location.path);
+        assert_eq!(observed.location.line, location.line);
+        assert_eq!(observed.location.column, location.column);
+        assert_eq!(observed.measurements["count"], 2);
+        assert_eq!(observed.measurements["total"], 3);
+        assert_eq!(observed.evidence["collector"], "test");
+        assert!(observed.related_symbols.is_empty());
+        assert_eq!(
+            simple_names("crate::domain.Account<T>"),
+            ["crate", "domain", "Account", "T"]
+        );
+    }
+}

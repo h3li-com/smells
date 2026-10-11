@@ -28,7 +28,9 @@ mutation-diff:
 
 mutation-full:
 	mkdir -p target/mutants
-	@./scripts/run-mutation-test.sh target/mutants/full
+	@MUTATION_IN_PLACE=false \
+		CARGO_MUTANTS_JOBS="$${CARGO_MUTANTS_JOBS:-4}" \
+		./scripts/run-mutation-test.sh target/mutants/full --copy-vcs true
 
 real-repository-e2e:
 	cargo build --locked --release

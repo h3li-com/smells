@@ -320,7 +320,13 @@ fn function(
             crate::report::RoleAdjustedMaximum::new(
                 lines,
                 "body code lines",
-                crate::migration::function_role(input, &module.path, &symbol, owner.as_deref()),
+                crate::migration::function_role(
+                    input,
+                    &module.path,
+                    &symbol,
+                    owner.as_deref(),
+                    &loc,
+                ),
             ),
         );
     }
@@ -518,8 +524,105 @@ pub(super) fn record_type_metrics(facts: &Facts, input: &Input, report: &mut Rep
                     .map(|index| facts.functions[*index].lines)
                     .sum(),
                 "summed associated body code lines",
-                crate::migration::type_role(input, &ty.location.path, symbol),
+                crate::migration::type_role(input, &ty.location.path, symbol, &ty.location),
             ),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Facts, Module, Nested, Report, body_counts, declaration};
+    use crate::core::model::History;
+    use std::collections::BTreeMap;
+    use syn::visit::Visit;
+
+    #[test]
+    fn rust_body_counts_code_and_ordinary_comment_only_lines_exactly() {
+        let source = concat!(
+            "fn sample() {\n",
+            "    let first = 1; // trailing comment is a code line\n",
+            "    // ordinary comment\n",
+            "    /* block\n",
+            "       comment */\n",
+            "    /// documentation comment is not ordinary commentary\n",
+            "    let second = 2;\n",
+            "}\n",
+        );
+        let file = syn::parse_file(source).unwrap();
+        let syn::Item::Fn(function) = &file.items[0] else {
+            panic!("function fixture");
+        };
+        assert_eq!(body_counts(source, &function.block).unwrap(), (2, 3));
+
+        let compact = "fn compact() { let value = 1; }";
+        let file = syn::parse_file(compact).unwrap();
+        let syn::Item::Fn(function) = &file.items[0] else {
+            panic!("function fixture");
+        };
+        assert_eq!(body_counts(compact, &function.block).unwrap(), (1, 0));
+    }
+
+    #[test]
+    fn unsupported_verbatim_items_fail_closed() {
+        let registry = crate::policy::registry("rust-v1").unwrap();
+        let policy = crate::policy::parse(
+            include_str!("../../examples/quality-policy.json"),
+            &registry,
+        )
+        .unwrap();
+        let mut report = Report::new(&registry, &policy, "test", &[], &History::default());
+        let mut facts = Facts {
+            modules: BTreeMap::new(),
+            types: BTreeMap::new(),
+            functions: Vec::new(),
+            slots: Vec::new(),
+            aliases: BTreeMap::new(),
+        };
+        let module = Module {
+            key: "crate".into(),
+            root: "crate".into(),
+            path: "src/lib.rs".into(),
+            items: Vec::new(),
+            imports: BTreeMap::new(),
+        };
+        let unsupported = syn::Item::Verbatim("unsupported syntax".parse().unwrap());
+
+        assert_eq!(
+            declaration(&mut facts, &module, &unsupported, &policy, &mut report).unwrap_err(),
+            "unsupported item syntax in src/lib.rs"
+        );
+    }
+
+    #[test]
+    fn nested_visitor_marks_verbatim_expressions_and_local_types_as_unsupported() {
+        let expression = syn::Expr::Verbatim("unsupported expression".parse().unwrap());
+        let mut nested = Nested {
+            items: Vec::new(),
+            unsupported: false,
+        };
+        nested.visit_expr(&expression);
+        assert!(nested.unsupported);
+
+        let local_type: syn::Item = syn::parse_quote!(
+            struct Local;
+        );
+        let mut nested = Nested {
+            items: Vec::new(),
+            unsupported: false,
+        };
+        nested.visit_item(&local_type);
+        assert!(nested.unsupported);
+
+        let local_function: syn::Item = syn::parse_quote!(
+            fn local() {}
+        );
+        let mut nested = Nested {
+            items: Vec::new(),
+            unsupported: false,
+        };
+        nested.visit_item(&local_function);
+        assert!(!nested.unsupported);
+        assert_eq!(nested.items.len(), 1);
     }
 }

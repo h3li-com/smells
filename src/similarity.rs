@@ -268,17 +268,25 @@ fn exact_similarity(
         let (right_key, right_count) = right.runs[right_index];
         match left_key.cmp(&right_key) {
             std::cmp::Ordering::Less => {
-                left_remaining -= left_count;
+                left_remaining = left_remaining
+                    .checked_sub(left_count)
+                    .expect("fingerprint run exceeds remaining left size");
                 left_index += 1;
             }
             std::cmp::Ordering::Greater => {
-                right_remaining -= right_count;
+                right_remaining = right_remaining
+                    .checked_sub(right_count)
+                    .expect("fingerprint run exceeds remaining right size");
                 right_index += 1;
             }
             std::cmp::Ordering::Equal => {
                 intersection += left_count.min(right_count);
-                left_remaining -= left_count;
-                right_remaining -= right_count;
+                left_remaining = left_remaining
+                    .checked_sub(left_count)
+                    .expect("fingerprint run exceeds remaining left size");
+                right_remaining = right_remaining
+                    .checked_sub(right_count)
+                    .expect("fingerprint run exceeds remaining right size");
                 left_index += 1;
                 right_index += 1;
             }
@@ -372,12 +380,13 @@ impl JoinState {
             self.seen
                 .touched
                 .iter()
-                .filter(|candidate| {
-                    !self.candidates.contains(**candidate)
-                        && !self.rejected_by_length.contains(**candidate)
-                })
+                .filter(|candidate| self.rejected_by_position(**candidate))
                 .count(),
         );
+    }
+
+    fn rejected_by_position(&self, candidate: usize) -> bool {
+        !self.candidates.contains(candidate) && !self.rejected_by_length.contains(candidate)
     }
 
     fn verify_candidates(
@@ -465,6 +474,7 @@ pub fn exact_jaccard_pairs(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use serde_json::{Value, json};
     use std::{
         fs,
@@ -648,6 +658,133 @@ mod tests {
         let pairs = exact_jaccard_pairs(&[first, second], 4, 8_000, 1, |_, _| false).unwrap();
         assert_eq!(pairs.len(), 1);
         assert_eq!((pairs[0].intersection, pairs[0].union), (16, 18));
+    }
+
+    #[test]
+    fn feature_frequency_and_prefix_formulas_keep_their_exact_contracts() {
+        let token_lists = vec![vec!["a", "b", "c", "d", "e"], vec!["a", "b", "c", "d", "e"]]
+            .into_iter()
+            .map(|tokens| tokens.into_iter().map(str::to_string).collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        let fingerprints = fingerprints(&token_lists);
+        let (_, frequencies) = feature_ids(&token_lists, &fingerprints, 4);
+        assert_eq!(frequencies, vec![2, 2]);
+
+        assert_eq!(probing_prefix_length(10, 8_000), 3);
+        assert_eq!(probing_prefix_length(10, 10_000), 1);
+        assert_eq!(indexed_prefix_length(10, 8_000), 2);
+        assert_eq!(indexed_prefix_length(10, 10_000), 1);
+        assert_eq!(indexed_prefix_length(10, 1), 10);
+
+        assert!(matches!(
+            candidate_decision(20, 10, 0, 0, 5_000),
+            CandidateDecision::Possible
+        ));
+        assert!(matches!(
+            candidate_decision(4, 10, 0, 0, 5_000),
+            CandidateDecision::RejectedByLength
+        ));
+        assert!(matches!(
+            candidate_decision(10, 10, 8, 0, 5_000),
+            CandidateDecision::RejectedByPosition
+        ));
+        assert!(matches!(
+            candidate_decision(10, 10, 0, 8, 5_000),
+            CandidateDecision::RejectedByPosition
+        ));
+        assert!(matches!(
+            candidate_decision(10, 10, 8, 0, 1_500),
+            CandidateDecision::RejectedByPosition
+        ));
+        assert!(matches!(
+            candidate_decision(10, 10, 0, 8, 2_500),
+            CandidateDecision::RejectedByPosition
+        ));
+        assert!(matches!(
+            candidate_decision(10, 10, 0, 8, 1_500),
+            CandidateDecision::RejectedByPosition
+        ));
+    }
+
+    #[test]
+    fn candidate_accumulator_deduplicates_each_generation_and_resets_on_wrap() {
+        let mut candidates = CandidateAccumulator::new(3);
+        candidates.begin();
+        assert!(candidates.insert(1));
+        assert!(!candidates.insert(1));
+        assert!(candidates.contains(1));
+        assert!(!candidates.contains(2));
+        assert_eq!(candidates.touched, [1]);
+
+        candidates.begin();
+        assert!(!candidates.contains(1));
+        assert!(candidates.insert(1));
+
+        candidates.generation = u32::MAX;
+        candidates.generations.fill(u32::MAX);
+        candidates.begin();
+        assert_eq!(candidates.generation, 1);
+        assert_eq!(candidates.generations, [0, 0, 0]);
+        assert!(!candidates.contains(1));
+    }
+
+    #[test]
+    fn position_rejections_exclude_possible_and_length_rejected_candidates_independently() {
+        let mut join = JoinState::new(3, 0);
+        join.begin_record();
+        for candidate in 0..3 {
+            join.seen.insert(candidate);
+        }
+        join.candidates.insert(0);
+        join.rejected_by_length.insert(1);
+
+        assert!(!join.rejected_by_position(0));
+        assert!(!join.rejected_by_position(1));
+        assert!(join.rejected_by_position(2));
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 96,
+            max_shrink_iters: 2_048,
+            ..ProptestConfig::default()
+        })]
+
+        #[test]
+        fn optimized_join_matches_brute_force_for_generated_token_corpora(
+            raw in prop::collection::vec(prop::collection::vec(0_u8..7, 0..14), 0..8),
+            minimum_tokens in 1_u64..12,
+            similarity in 1_u64..=10_000,
+        ) {
+            let token_lists = raw
+                .into_iter()
+                .map(|tokens| {
+                    tokens
+                        .into_iter()
+                        .map(|token| format!("token-{token}"))
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            let actual = exact_jaccard_pairs(
+                &token_lists,
+                minimum_tokens,
+                similarity,
+                usize::MAX,
+                |_, _| false,
+            )
+            .unwrap()
+            .into_iter()
+            .map(|pair| {
+                let (left, right) = if pair.left < pair.right {
+                    (pair.left, pair.right)
+                } else {
+                    (pair.right, pair.left)
+                };
+                (left, right, pair.intersection, pair.union)
+            })
+            .collect::<BTreeSet<_>>();
+            prop_assert_eq!(actual, brute_pairs(&token_lists, minimum_tokens, similarity));
+        }
     }
 
     #[test]

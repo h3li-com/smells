@@ -865,7 +865,13 @@ mod tests {
 
     #[test]
     fn date_validation_handles_format_and_leap_year_boundaries() {
-        for valid in ["2000-02-29", "2024-02-29", "2026-09-27"] {
+        for valid in [
+            "2000-02-29",
+            "2024-02-29",
+            "2026-01-31",
+            "2026-02-28",
+            "2026-09-27",
+        ] {
             assert!(valid_date(valid), "expected valid date: {valid}");
         }
         for invalid in [
@@ -884,6 +890,407 @@ mod tests {
         ] {
             assert!(!valid_date(invalid), "expected invalid date: {invalid}");
         }
+    }
+
+    #[test]
+    fn catalog_identifiers_and_versions_enforce_the_published_format() {
+        for valid in ["rust", "rust-v1", "rule-23"] {
+            assert!(
+                valid_identifier(valid),
+                "expected valid identifier: {valid}"
+            );
+        }
+        for invalid in ["", "-rust", "rust-", "rust--v1", "Rust", "rust_v1"] {
+            assert!(
+                !valid_identifier(invalid),
+                "expected invalid identifier: {invalid}"
+            );
+        }
+
+        for valid in ["0.0.0", "1.2.3", "2026.10.11"] {
+            assert!(valid_version(valid), "expected valid version: {valid}");
+        }
+        for invalid in ["", "1", "1.2", "1.2.3.4", "1..3", "1.two.3"] {
+            assert!(
+                !valid_version(invalid),
+                "expected invalid version: {invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn catalog_urls_require_a_nonempty_safe_https_authority() {
+        for valid in [
+            "https://example.com",
+            "https://example.com/path?q=1#fragment",
+            "https://[::1]:443/source",
+        ] {
+            assert!(valid_https_url(valid), "expected valid URL: {valid}");
+        }
+        for invalid in [
+            "",
+            "http://example.com",
+            "https://",
+            "https:///path",
+            "https://---/path",
+            "https://example.com/has space",
+            "https://example.com\\path",
+            "https://example_com/path",
+            "https://example.com/\u{7f}",
+        ] {
+            assert!(
+                !valid_https_url(invalid),
+                "expected invalid URL: {invalid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn catalog_fingerprints_and_names_reject_ambiguous_values() {
+        let digest = format!("sha256:{}", "a".repeat(64));
+        assert!(valid_sha256(&digest));
+        for invalid in [
+            "",
+            "sha256:abc",
+            &format!("sha256:{}", "A".repeat(64)),
+            &format!("sha257:{}", "a".repeat(64)),
+            &format!("sha256:{}g", "a".repeat(63)),
+        ] {
+            assert!(!valid_sha256(invalid), "expected invalid digest: {invalid}");
+        }
+
+        assert!(valid_names(&["Alice".into(), "Bob".into()], true));
+        assert!(valid_names(&[], false));
+        assert!(!valid_names(&[], true));
+        assert!(!valid_names(&["Alice".into(), "Alice".into()], false));
+        assert!(!valid_names(&["   ".into()], false));
+    }
+
+    #[test]
+    fn source_manifest_header_requires_every_identity_field() {
+        let (manifest, _) = parse().unwrap();
+        assert!(valid_source_manifest_header(&manifest));
+
+        let (mut invalid, _) = parse().unwrap();
+        invalid.schema_version = 2;
+        assert!(!valid_source_manifest_header(&invalid));
+
+        let (mut invalid, _) = parse().unwrap();
+        invalid.manifest_id = "other-sources".into();
+        assert!(!valid_source_manifest_header(&invalid));
+
+        let (mut invalid, _) = parse().unwrap();
+        invalid.manifest_version = "1.0".into();
+        assert!(!valid_source_manifest_header(&invalid));
+
+        let (mut invalid, _) = parse().unwrap();
+        invalid.reviewed_on = "2026-02-30".into();
+        assert!(!valid_source_manifest_header(&invalid));
+
+        let (mut invalid, _) = parse().unwrap();
+        invalid.sources.clear();
+        assert!(!valid_source_manifest_header(&invalid));
+    }
+
+    #[test]
+    fn publication_metadata_matches_each_source_kind() {
+        let (manifest, _) = parse().unwrap();
+        let book = manifest
+            .sources
+            .iter()
+            .find(|source| matches!(source.kind, SourceKind::BookEdition))
+            .unwrap();
+        let paper = manifest
+            .sources
+            .iter()
+            .find(|source| matches!(source.kind, SourceKind::ResearchPaper))
+            .unwrap();
+        let web = manifest
+            .sources
+            .iter()
+            .find(|source| matches!(source.kind, SourceKind::LiveWebCatalog))
+            .unwrap();
+
+        assert!(valid_book_metadata(book));
+        assert!(valid_research_paper_metadata(paper));
+        assert!(valid_live_web_metadata(web));
+        assert!(valid_publication_metadata(book));
+        assert!(valid_publication_metadata(paper));
+        assert!(valid_publication_metadata(web));
+    }
+
+    #[test]
+    fn publication_metadata_rejects_each_forbidden_or_missing_field() {
+        let source = |kind| {
+            let (manifest, _) = parse().unwrap();
+            manifest
+                .sources
+                .into_iter()
+                .find(|source| std::mem::discriminant(&source.kind) == kind)
+                .unwrap()
+        };
+
+        let book_kind = std::mem::discriminant(&SourceKind::BookEdition);
+        let mut invalid = source(book_kind);
+        invalid.publication_year = None;
+        assert!(!valid_book_metadata(&invalid));
+        let mut invalid = source(book_kind);
+        invalid.edition = Some(String::new());
+        assert!(!valid_book_metadata(&invalid));
+        let mut invalid = source(book_kind);
+        invalid.isbn = Some("123".into());
+        assert!(!valid_book_metadata(&invalid));
+        let mut invalid = source(book_kind);
+        invalid.isbn = Some("978000000000x".into());
+        assert!(!valid_book_metadata(&invalid));
+
+        let paper_kind = std::mem::discriminant(&SourceKind::ResearchPaper);
+        let mut invalid = source(paper_kind);
+        invalid.publication_year = None;
+        assert!(!valid_research_paper_metadata(&invalid));
+        let mut invalid = source(paper_kind);
+        invalid.doi = Some(String::new());
+        assert!(!valid_research_paper_metadata(&invalid));
+        let mut invalid = source(paper_kind);
+        invalid.edition = Some("first".into());
+        assert!(!valid_research_paper_metadata(&invalid));
+        let mut invalid = source(paper_kind);
+        invalid.isbn = Some("9780000000000".into());
+        assert!(!valid_research_paper_metadata(&invalid));
+
+        let web_kind = std::mem::discriminant(&SourceKind::LiveWebCatalog);
+        let mut invalid = source(web_kind);
+        invalid.publication_year = Some(2026);
+        assert!(!valid_live_web_metadata(&invalid));
+        let mut invalid = source(web_kind);
+        invalid.edition = Some("live".into());
+        assert!(!valid_live_web_metadata(&invalid));
+        let mut invalid = source(web_kind);
+        invalid.isbn = Some("9780000000000".into());
+        assert!(!valid_live_web_metadata(&invalid));
+        let mut invalid = source(web_kind);
+        invalid.doi = Some("10.1/live".into());
+        assert!(!valid_live_web_metadata(&invalid));
+
+        let mut invalid_book = source(book_kind);
+        invalid_book.publication_year = None;
+        assert!(!valid_publication_metadata(&invalid_book));
+        let mut invalid_paper = source(paper_kind);
+        invalid_paper.doi = Some(String::new());
+        assert!(!valid_publication_metadata(&invalid_paper));
+        let mut invalid_web = source(web_kind);
+        invalid_web.publication_year = Some(2026);
+        assert!(!valid_publication_metadata(&invalid_web));
+    }
+
+    #[test]
+    fn source_identity_requires_distinct_nonblank_attribution() {
+        let source = || parse().unwrap().0.sources.remove(0);
+        assert!(valid_source_identity(&source()));
+
+        let mut invalid = source();
+        invalid.source_id = "Invalid_ID".into();
+        assert!(!valid_source_identity(&invalid));
+        let mut invalid = source();
+        invalid.title = "  ".into();
+        assert!(!valid_source_identity(&invalid));
+        let mut invalid = source();
+        invalid.authors.clear();
+        assert!(!valid_source_identity(&invalid));
+        let mut invalid = source();
+        invalid.contributors = vec!["same".into(), "same".into()];
+        assert!(!valid_source_identity(&invalid));
+        let mut invalid = source();
+        invalid.publisher = "\t".into();
+        assert!(!valid_source_identity(&invalid));
+        let mut invalid = source();
+        invalid.revision = String::new();
+        assert!(!valid_source_identity(&invalid));
+    }
+
+    #[test]
+    fn source_location_review_and_year_are_bounded() {
+        let (manifest, _) = parse().unwrap();
+        let source = &manifest.sources[0];
+        assert!(valid_source_location_and_review(
+            source,
+            &manifest.reviewed_on
+        ));
+        assert!(valid_source_year(source));
+
+        let fresh = || parse().unwrap().0.sources.remove(0);
+        let mut invalid = fresh();
+        invalid.canonical_url = "http://example.com".into();
+        assert!(!valid_source_location_and_review(
+            &invalid,
+            &manifest.reviewed_on
+        ));
+        let mut invalid = fresh();
+        invalid.full_text_url = Some("http://example.com".into());
+        assert!(!valid_source_location_and_review(
+            &invalid,
+            &manifest.reviewed_on
+        ));
+        let mut invalid = fresh();
+        invalid.edition_url = Some("http://example.com".into());
+        assert!(!valid_source_location_and_review(
+            &invalid,
+            &manifest.reviewed_on
+        ));
+        let mut invalid = fresh();
+        invalid.reviewed_on = "2026-02-30".into();
+        assert!(!valid_source_location_and_review(
+            &invalid,
+            &manifest.reviewed_on
+        ));
+        let invalid = fresh();
+        assert!(!valid_source_location_and_review(&invalid, "2026-10-10"));
+
+        let mut invalid = fresh();
+        invalid.publication_year = Some(1899);
+        assert!(!valid_source_year(&invalid));
+        invalid.publication_year = Some(1900);
+        assert!(valid_source_year(&invalid));
+        invalid.publication_year = Some(2100);
+        assert!(valid_source_year(&invalid));
+        invalid.publication_year = Some(2101);
+        assert!(!valid_source_year(&invalid));
+        invalid.publication_year = None;
+        assert!(valid_source_year(&invalid));
+    }
+
+    #[test]
+    fn source_validation_rejects_duplicate_identities_and_fingerprints() {
+        let (mut manifest, _) = parse().unwrap();
+        manifest.sources[1].source_id = manifest.sources[0].source_id.clone();
+        assert!(validate_sources(&manifest).is_err());
+
+        let (mut manifest, _) = parse().unwrap();
+        manifest.sources[1].catalog_fingerprint = manifest.sources[0].catalog_fingerprint.clone();
+        assert!(validate_sources(&manifest).is_err());
+    }
+
+    #[test]
+    fn concept_catalog_header_requires_the_complete_published_inventory() {
+        let (_, catalog) = parse().unwrap();
+        assert!(valid_concept_catalog_header(&catalog));
+
+        let (_, mut invalid) = parse().unwrap();
+        invalid.schema_version = 2;
+        assert!(!valid_concept_catalog_header(&invalid));
+        let (_, mut invalid) = parse().unwrap();
+        invalid.catalog_id = "another-catalog".into();
+        assert!(!valid_concept_catalog_header(&invalid));
+        let (_, mut invalid) = parse().unwrap();
+        invalid.catalog_version = "1.0".into();
+        assert!(!valid_concept_catalog_header(&invalid));
+        let (_, mut invalid) = parse().unwrap();
+        invalid.item_count -= 1;
+        assert!(!valid_concept_catalog_header(&invalid));
+        let (_, mut invalid) = parse().unwrap();
+        invalid.concepts.pop();
+        assert!(!valid_concept_catalog_header(&invalid));
+    }
+
+    #[test]
+    fn concept_metadata_requires_a_canonical_name_summary_and_evidence() {
+        let (_, catalog) = parse().unwrap();
+        let accepted = catalog
+            .concepts
+            .iter()
+            .find(|concept| concept.catalog_state == CatalogState::Accepted)
+            .unwrap();
+        assert!(valid_concept_metadata(accepted, Some("Long Method")));
+        assert!(!valid_concept_metadata(accepted, None));
+        assert!(!valid_concept_metadata(accepted, Some("  ")));
+
+        let (_, mut invalid) = parse().unwrap();
+        invalid.concepts[0].id = "Invalid_ID".into();
+        assert!(!valid_concept_metadata(
+            &invalid.concepts[0],
+            Some("Long Method")
+        ));
+        let (_, mut invalid) = parse().unwrap();
+        invalid.concepts[0].summary = "\t".into();
+        assert!(!valid_concept_metadata(
+            &invalid.concepts[0],
+            Some("Long Method")
+        ));
+        let (_, mut invalid) = parse().unwrap();
+        invalid.concepts[0].references.clear();
+        assert!(!valid_concept_metadata(
+            &invalid.concepts[0],
+            Some("Long Method")
+        ));
+        let (_, mut invalid) = parse().unwrap();
+        invalid.concepts[0].name = Some("Duplicate Name".into());
+        assert!(!valid_concept_metadata(
+            &invalid.concepts[0],
+            Some("Long Method")
+        ));
+
+        let (_, mut invalid) = parse().unwrap();
+        let candidate = invalid
+            .concepts
+            .iter_mut()
+            .find(|concept| concept.catalog_state == CatalogState::Candidate)
+            .unwrap();
+        assert!(valid_concept_metadata(candidate, candidate.name.as_deref()));
+        candidate.name = None;
+        assert!(!valid_concept_metadata(candidate, None));
+    }
+
+    #[test]
+    fn duplicate_concept_identity_is_rejected_before_other_catalog_checks() {
+        let (sources, mut catalog) = parse().unwrap();
+        let source_ids = validate_sources(&sources).unwrap();
+        let policy = registry("rust-v1");
+        catalog.concepts[1].id = catalog.concepts[0].id.clone();
+
+        assert_eq!(
+            validate_concepts(&catalog, &source_ids, &policy).unwrap_err(),
+            "invalid embedded concept: long-method"
+        );
+    }
+
+    #[test]
+    fn catalog_lifecycle_and_registry_alignment_fail_closed() {
+        let valid = BTreeMap::from([(CatalogState::Accepted, 23), (CatalogState::Candidate, 13)]);
+        assert!(valid_lifecycle_counts(&valid));
+        for invalid in [
+            BTreeMap::from([(CatalogState::Accepted, 22), (CatalogState::Candidate, 13)]),
+            BTreeMap::from([(CatalogState::Accepted, 23), (CatalogState::Candidate, 12)]),
+            BTreeMap::from([
+                (CatalogState::Accepted, 23),
+                (CatalogState::Candidate, 13),
+                (CatalogState::Deprecated, 1),
+            ]),
+            BTreeMap::from([
+                (CatalogState::Accepted, 23),
+                (CatalogState::Candidate, 13),
+                (CatalogState::Retired, 1),
+            ]),
+        ] {
+            assert!(!valid_lifecycle_counts(&invalid));
+        }
+
+        let (_, catalog) = parse().unwrap();
+        let mut policy = registry("rust-v1");
+        policy.smells.pop();
+        assert!(validate_registry_alignment(&catalog, &policy).is_err());
+    }
+
+    #[test]
+    fn candidate_concepts_cannot_claim_detector_support() {
+        let (_, mut catalog) = parse().unwrap();
+        let candidate = catalog
+            .concepts
+            .iter_mut()
+            .find(|concept| concept.catalog_state == CatalogState::Candidate)
+            .unwrap();
+        assert!(validate_candidate_support(candidate).is_ok());
+        candidate.language_support.rust.detector_support = DetectorSupport::Stable;
+        assert!(validate_candidate_support(candidate).is_err());
     }
 
     #[test]
@@ -937,6 +1344,31 @@ mod tests {
         let source_ids = validate_sources(&sources).unwrap();
         catalog.concepts[0].references[0].source_locator.push('\t');
         assert!(validate_reference(&catalog.concepts[0].references[0], &source_ids).is_err());
+    }
+
+    #[test]
+    fn concept_references_require_every_identity_and_location_field() {
+        let invalid_reference = |mutate: fn(&mut ConceptReference)| {
+            let (sources, mut catalog) = parse().unwrap();
+            let source_ids = validate_sources(&sources).unwrap();
+            let reference = &mut catalog.concepts[0].references[0];
+            mutate(reference);
+            validate_reference(reference, &source_ids)
+        };
+
+        assert!(
+            invalid_reference(|reference| reference.source_id = "missing-source".into()).is_err()
+        );
+        assert!(invalid_reference(|reference| reference.source_term = "\n".into()).is_err());
+        assert!(
+            invalid_reference(|reference| reference.reference_url = "http://example.com".into())
+                .is_err()
+        );
+        assert!(invalid_reference(|reference| reference.source_locator = "\0".into()).is_err());
+        assert!(invalid_reference(|reference| reference.ordinal = 0).is_err());
+        assert!(
+            invalid_reference(|reference| reference.source_category = Some("\r".into())).is_err()
+        );
     }
 
     #[test]
@@ -1054,6 +1486,45 @@ mod tests {
             validate_concepts(&catalog, &source_ids, &policy).unwrap_err(),
             "invalid alias sources for concept: long-method"
         );
+    }
+
+    #[test]
+    fn aliases_require_distinct_evidenced_names_and_sources() {
+        let invalid_alias = |mutate: fn(&mut Concept)| {
+            let (sources, mut catalog) = parse().unwrap();
+            let source_ids = validate_sources(&sources).unwrap();
+            let policy = registry("rust-v1");
+            let concept = catalog
+                .concepts
+                .iter_mut()
+                .find(|concept| !concept.aliases.is_empty())
+                .unwrap();
+            mutate(concept);
+            validate_concepts(&catalog, &source_ids, &policy).unwrap_err()
+        };
+
+        for error in [
+            invalid_alias(|concept| concept.aliases[0].name = "  ".into()),
+            invalid_alias(|concept| {
+                let policy = registry("rust-v1");
+                let canonical_name = policy
+                    .smells
+                    .iter()
+                    .find(|smell| smell.id == concept.id)
+                    .unwrap()
+                    .name
+                    .clone();
+                concept.aliases[0].name = canonical_name;
+            }),
+            invalid_alias(|concept| {
+                let name = concept.aliases[0].name.to_uppercase();
+                let source_ids = concept.aliases[0].source_ids.clone();
+                concept.aliases.push(Alias { name, source_ids });
+            }),
+            invalid_alias(|concept| concept.aliases[0].source_ids.clear()),
+        ] {
+            assert_eq!(error, "invalid alias for concept: long-method");
+        }
     }
 
     #[test]

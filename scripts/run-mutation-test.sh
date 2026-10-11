@@ -13,8 +13,21 @@ cargo_command=${CARGO_COMMAND:-cargo}
 python_command=${PYTHON_COMMAND:-python3}
 
 mutation_status=0
-PROPTEST_DISABLE_FAILURE_PERSISTENCE=1 \
-    "$cargo_command" mutants --in-place --output "$output_directory" "$@" || mutation_status=$?
+case "${MUTATION_IN_PLACE:-true}" in
+    true)
+        PROPTEST_DISABLE_FAILURE_PERSISTENCE=1 \
+            "$cargo_command" mutants --in-place --output "$output_directory" "$@" ||
+            mutation_status=$?
+        ;;
+    false)
+        PROPTEST_DISABLE_FAILURE_PERSISTENCE=1 \
+            "$cargo_command" mutants --output "$output_directory" "$@" || mutation_status=$?
+        ;;
+    *)
+        printf 'MUTATION_IN_PLACE must be true or false\n' >&2
+        exit 2
+        ;;
+esac
 
 outcomes="$output_directory/mutants.out/outcomes.json"
 summary_status=0

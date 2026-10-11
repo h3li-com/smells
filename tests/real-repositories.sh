@@ -86,6 +86,12 @@ checkout_fixture \
 	22f6400e81864aec5438d0447a4c4d9b51df6527 \
 	'/examples/actix_example/migration/'
 checkout_fixture \
+	sqlx \
+	https://github.com/launchbadge/sqlx.git \
+	8b65c2fb42a3a523b77000f41b648986d1d49ba0 \
+	'/Cargo.toml' \
+	'/examples/postgres/todos/'
+checkout_fixture \
 	typeorm \
 	https://github.com/typeorm/typeorm.git \
 	5a8a1400361a4b5cb90e805bea2c665149da3911 \
@@ -134,8 +140,26 @@ jq -e '
     any(.measurements[];
         .role_context != null and
         .role_context.framework == "sea_orm" and
-        .role_context.declaration_role == "migration_shell")
+        .role_context.declaration_role == "migration_shell") and
+    any(.measurements[];
+        .role_context != null and
+        .role_context.framework == "sea_orm" and
+        .role_context.declaration_role == "migration_up")
 ' "$sea_orm_report" >/dev/null || fail 'SeaORM migrations were not classified'
+
+sqlx_report=$report_root/sqlx.json
+scan_report \
+	"$fixture_root/sqlx/examples/postgres/todos" \
+	"$rust_policy" \
+	"$sqlx_report"
+assert_complete_catalog "$sqlx_report"
+jq -e '
+    any(.migration_artifacts[];
+        .framework == "sqlx" and
+        .path == "migrations/20200718111257_todos.sql" and
+        .contract_version == "sqlx:file-migrations-v1" and
+        .status == "migration_body_not_analyzed")
+' "$sqlx_report" >/dev/null || fail 'SQLx CLI/default migrations were not inventoried'
 
 typeorm_unresolved_report=$report_root/typeorm-unresolved.json
 scan_report \
@@ -185,6 +209,7 @@ jq -e '
     any(.migration_artifacts[];
         .framework == "drizzle_kit" and
         .path == "drizzle/migrations/0000_wealthy_sway.sql" and
+        .contract_version == "drizzle:legacy-flat" and
         .status == "migration_body_not_analyzed")
 ' "$drizzle_report" >/dev/null || fail 'Drizzle SQL migration was not inventoried'
 

@@ -188,7 +188,20 @@ pub(crate) fn import_statements(path: &str, source: &str) -> Result<Vec<String>,
 
 #[cfg(test)]
 mod tests {
-    use super::{code_only, import_statements};
+    use super::{code_only, entirely_non_code_node, import_statements};
+
+    #[test]
+    fn non_code_node_classification_covers_each_supported_syntax_kind() {
+        for kind in [
+            "comment",
+            "regex",
+            "import_statement",
+            "import_from_statement",
+        ] {
+            assert!(entirely_non_code_node(kind), "{kind}");
+        }
+        assert!(!entirely_non_code_node("expression_statement"));
+    }
 
     #[test]
     fn masks_comments_strings_and_imports_without_changing_offsets() {
@@ -255,6 +268,33 @@ mod tests {
         assert_eq!(
             import_statements("sample.ts", source).unwrap(),
             vec!["import { Kysely } from 'kysely';"]
+        );
+    }
+
+    #[test]
+    fn import_collection_covers_python_forms_and_typescript_require_only() {
+        let python = concat!(
+            "import alembic\n",
+            "from django.db import migrations\n",
+            "value = import_like('ignored')\n",
+        );
+        assert_eq!(
+            import_statements("sample.py", python).unwrap(),
+            ["import alembic", "from django.db import migrations"]
+        );
+
+        let typescript = concat!(
+            "const knex = require('knex');\n",
+            "const ignored = load('knex');\n",
+        );
+        assert_eq!(
+            import_statements("sample.ts", typescript).unwrap(),
+            ["require('knex')"]
+        );
+        assert!(
+            import_statements("sample.rs", "use crate::domain;")
+                .unwrap()
+                .is_empty()
         );
     }
 }

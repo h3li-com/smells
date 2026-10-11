@@ -224,6 +224,22 @@ fn forwarding(function: &Function) -> bool {
     passed == Some(parameters)
 }
 
+fn forwarding_applicable(enabled: bool, receiver_count: usize) -> bool {
+    enabled && receiver_count > 0
+}
+
+fn temporary_fields_applicable(enabled: bool, is_enum: bool, receiver_count: usize) -> bool {
+    enabled && !is_enum && receiver_count > 0
+}
+
+fn comment_body_line_total(code_lines: usize, comment_lines: usize) -> usize {
+    code_lines.saturating_add(comment_lines)
+}
+
+fn comment_share_applicable(has_body: bool, total_lines: usize) -> bool {
+    has_body && total_lines > 0
+}
+
 #[derive(Default)]
 struct FieldUses {
     fields: BTreeSet<String>,
@@ -332,7 +348,7 @@ fn forwarding_share(
     report: &mut Report,
 ) {
     let id = "rust.forwarding_share";
-    if !policy.enabled(id) || metrics.receivers.is_empty() {
+    if !forwarding_applicable(policy.enabled(id), metrics.receivers.len()) {
         return;
     }
     let forward = metrics
@@ -373,7 +389,7 @@ fn temporary_fields(
     report: &mut Report,
 ) {
     let id = "rust.temporary_fields";
-    if !policy.enabled(id) || ty.is_enum || metrics.receivers.is_empty() {
+    if !temporary_fields_applicable(policy.enabled(id), ty.is_enum, metrics.receivers.len()) {
         return;
     }
     let uses: Vec<_> = metrics.receivers.iter().map(|f| field_uses(f)).collect();
@@ -413,12 +429,12 @@ fn comments(facts: &Facts, policy: &Policy, report: &mut Report) {
         return;
     }
     for function in &facts.functions {
-        if function.body.is_none() || function.lines + function.comments == 0 {
+        let total = comment_body_line_total(function.lines, function.comments);
+        if !comment_share_applicable(function.body.is_some(), total) {
             continue;
         }
         let code = parameter(policy, id, "minimum_code_lines");
         let share = parameter(policy, id, "minimum_share_percent");
-        let total = function.lines + function.comments;
         report.finding(
             policy,
             id,
@@ -947,4 +963,221 @@ pub fn check(facts: &Facts, policy: &Policy, report: &mut Report) {
     clumps(facts, policy, report);
     duplicates(facts, policy, report);
     dispatch(facts, policy, report);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn method(source: &str) -> Function {
+        let method: ImplItemFn = syn::parse_str(source).unwrap();
+        Function {
+            symbol: method.sig.ident.to_string(),
+            module: "crate".into(),
+            location: crate::report::Location {
+                path: "src/lib.rs".into(),
+                line: 1,
+                column: 1,
+            },
+            signature: method.sig,
+            body: Some(method.block),
+            body_bytes: None,
+            owner: Some("Service".into()),
+            lines: 1,
+            comments: 0,
+        }
+    }
+
+    #[test]
+    fn combinations_emit_each_mathematical_subset_once() {
+        let slots = [
+            ("a".into(), "i32".into()),
+            ("b".into(), "i32".into()),
+            ("c".into(), "i32".into()),
+            ("d".into(), "i32".into()),
+        ];
+        let mut groups = Vec::new();
+        let mut remaining = 6;
+        combinations(&slots, 2, 0, &mut Vec::new(), &mut groups, &mut remaining).unwrap();
+        assert_eq!(groups.len(), 6);
+        assert_eq!(groups.into_iter().collect::<BTreeSet<_>>().len(), 6);
+        assert_eq!(remaining, 0);
+
+        let mut remaining = 5;
+        assert!(
+            combinations(
+                &slots,
+                2,
+                0,
+                &mut Vec::new(),
+                &mut Vec::new(),
+                &mut remaining,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn raw_and_optional_types_follow_spelled_rust_syntax() {
+        for source in ["i32", "&str", "String", "std::string::String"] {
+            let ty: Type = syn::parse_str(source).unwrap();
+            assert!(raw(&ty), "raw type: {source}");
+        }
+        for source in [
+            "Vec<i32>",
+            "i32<String>",
+            "domain::AccountId",
+            "<T as Trait>::Item",
+        ] {
+            let ty: Type = syn::parse_str(source).unwrap();
+            assert!(!raw(&ty), "non-raw type: {source}");
+        }
+
+        for source in [
+            "Option<i32>",
+            "std::option::Option<String>",
+            "core::option::Option<&str>",
+        ] {
+            let ty: Type = syn::parse_str(source).unwrap();
+            assert!(optional(&ty), "optional type: {source}");
+        }
+        for source in [
+            "Option",
+            "Option<i32, i64>",
+            "Maybe<i32>",
+            "&Option<i32>",
+            "<T as Trait>::Option<i32>",
+        ] {
+            let ty: Type = syn::parse_str(source).unwrap();
+            assert!(!optional(&ty), "non-optional type: {source}");
+        }
+    }
+
+    #[test]
+    fn accessor_shape_requires_a_receiver_and_exact_field_transfer() {
+        for source in [
+            "fn value(&self) -> i32 { self.value }",
+            "fn value(&self) -> &i32 { &self.value }",
+            "fn set_value(&mut self, value: i32) { self.value = value; }",
+        ] {
+            assert!(accessor(&method(source)), "accessor: {source}");
+        }
+        for source in [
+            "fn value(&self) -> i32 { self.value + 1 }",
+            "fn set_value(&mut self, value: i32) { self.value = other; }",
+            "fn set_value(&mut self, value: i32, other: i32) { self.value = value; }",
+            "fn set_value(&mut self, value: i32) { self.value = 1; }",
+        ] {
+            assert!(!accessor(&method(source)), "non-accessor: {source}");
+        }
+    }
+
+    #[test]
+    fn forwarding_shape_requires_receiver_projection_and_parameter_passthrough() {
+        for source in [
+            "fn send(&self, value: i32) { self.client.send(value) }",
+            "fn send(&self, value: i32) { send(&self.client, value) }",
+            "fn send(&self, value: i32) { send(self.client, value) }",
+        ] {
+            assert!(forwarding(&method(source)), "forwarder: {source}");
+        }
+        for source in [
+            "fn send(&self, value: i32) { client.send(value) }",
+            "fn send(&self, value: i32) { send(value) }",
+            "fn send(&self, value: i32) { send(other, value) }",
+            "fn send(&self, value: i32) { (self.callback)(self.client, value) }",
+            "fn send(&self, value: i32) { self.client.send(value + 1) }",
+            "fn send(&self, value: i32) { self.client.send(1) }",
+        ] {
+            assert!(!forwarding(&method(source)), "non-forwarder: {source}");
+        }
+    }
+
+    #[test]
+    fn type_pattern_applicability_requires_each_independent_precondition() {
+        assert!(forwarding_applicable(true, 1));
+        assert!(!forwarding_applicable(false, 1));
+        assert!(!forwarding_applicable(true, 0));
+
+        assert!(temporary_fields_applicable(true, false, 1));
+        assert!(!temporary_fields_applicable(false, false, 1));
+        assert!(!temporary_fields_applicable(true, true, 1));
+        assert!(!temporary_fields_applicable(true, false, 0));
+
+        assert_eq!(comment_body_line_total(3, 2), 5);
+        assert_eq!(comment_body_line_total(usize::MAX, 1), usize::MAX);
+        assert!(comment_share_applicable(true, 1));
+        assert!(!comment_share_applicable(false, 1));
+        assert!(!comment_share_applicable(true, 0));
+    }
+
+    #[test]
+    fn normalized_literal_tags_preserve_literal_families_and_numeric_suffixes() {
+        for (source, expected) in [
+            ("\"text\"", Some("str")),
+            ("b\"bytes\"", Some("bytes")),
+            ("c\"cstr\"", Some("cstr")),
+            ("'x'", Some("char")),
+            ("b'x'", Some("byte")),
+            ("true", None),
+        ] {
+            let literal: Lit = syn::parse_str(source).unwrap();
+            assert_eq!(simple_literal_tag(&literal), expected, "{source}");
+        }
+        for (source, expected) in [
+            ("42", Some("int:".to_string())),
+            ("42_u64", Some("int:u64".to_string())),
+            ("1.5", Some("float:".to_string())),
+            ("1.5_f32", Some("float:f32".to_string())),
+            ("'x'", None),
+        ] {
+            let literal: Lit = syn::parse_str(source).unwrap();
+            assert_eq!(numeric_literal_tag(&literal), expected, "{source}");
+        }
+        for (source, expected) in [
+            ("\"text\"", "str"),
+            ("b'x'", "byte"),
+            ("42_u64", "int:u64"),
+            ("1.5_f32", "float:f32"),
+        ] {
+            let token = source
+                .parse::<TokenStream>()
+                .unwrap()
+                .into_iter()
+                .next()
+                .unwrap();
+            let TokenTree::Literal(literal) = token else {
+                panic!("expected literal token: {source}");
+            };
+            assert_eq!(literal_tag(&literal), expected, "{source}");
+        }
+    }
+
+    #[test]
+    fn keyword_and_variant_normalization_preserve_domain_owners() {
+        for keyword in ["fn", "self", "Self", "yield"] {
+            assert!(rust_keyword(keyword));
+        }
+        for identifier in ["function", "account", "String"] {
+            assert!(!rust_keyword(identifier));
+        }
+
+        for pattern in [
+            syn::parse_quote!(State::Ready),
+            syn::parse_quote!(State::Ready { value }),
+            syn::parse_quote!(State::Ready(value)),
+        ] {
+            let mut paths = Vec::new();
+            variant_paths(&pattern, &mut paths);
+            assert_eq!(paths, [(vec!["State".into()], "Ready".into())]);
+        }
+        let unqualified: Pat = syn::parse_quote!(Ready);
+        let mut paths = Vec::new();
+        variant_paths(&unqualified, &mut paths);
+        assert!(paths.is_empty());
+
+        let unqualified_path: Path = syn::parse_quote!(Ready);
+        push_variant_path(&unqualified_path, &mut paths);
+        assert!(paths.is_empty());
+    }
 }

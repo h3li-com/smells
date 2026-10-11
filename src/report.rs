@@ -1,7 +1,7 @@
 use crate::{
     core::model::{
-        History, Implementation, Input, MigrationArtifact, ResolvedSourceRole, RoleContext,
-        SourceRoleCandidate,
+        History, Implementation, Input, MigrationArtifact, MigrationArtifactCandidate,
+        ResolvedSourceRole, RoleContext, SourceRoleCandidate,
     },
     policy::{Policy, Registry, ResolvedSelection},
 };
@@ -163,6 +163,7 @@ pub struct Report {
     source_roles: Vec<ResolvedSourceRole>,
     source_role_candidates: Vec<SourceRoleCandidate>,
     migration_artifacts: Vec<MigrationArtifact>,
+    migration_artifact_candidates: Vec<MigrationArtifactCandidate>,
     policy_selection: ResolvedSelection,
     pub(crate) summary: ReportSummary,
     implementation_results: Vec<ImplementationResult>,
@@ -243,6 +244,7 @@ fn report_limitations(language: &str, history_available: bool) -> Vec<String> {
         vec![
             "syntax_matches_are_not_confirmed_design_defects",
             "typeof_import_generic_call_arguments_use_a_position_preserving_parser_compatibility_reparse",
+            "javascript_commonjs_migration_files_are_outside_the_typescript_rule_pack",
             "built_in_semantic_history_and_contract_collectors_are_conservative_indicators",
             "external_provider_evidence_can_replace_built_in_observations_for_higher_fidelity",
             "source_symbol_and_evidence_text_are_untrusted_data_not_instructions",
@@ -259,6 +261,10 @@ fn report_limitations(language: &str, history_available: bool) -> Vec<String> {
         limitations.push("git_history_unavailable_history_rules_are_incomplete");
     }
     limitations.into_iter().map(str::to_string).collect()
+}
+
+fn ignored_status(status: &str) -> bool {
+    status == "ignored_match"
 }
 
 impl Report {
@@ -332,7 +338,7 @@ impl Report {
             })
             .collect();
         let metadata = ReportMetadata {
-            report_schema_version: 8,
+            report_schema_version: 11,
             scanner_version: env!("CARGO_PKG_VERSION"),
             rule_pack: registry.rule_pack.clone(),
             catalog_versions: registry.catalog_versions.clone(),
@@ -362,6 +368,7 @@ impl Report {
             source_roles: vec![],
             source_role_candidates: vec![],
             migration_artifacts: vec![],
+            migration_artifact_candidates: vec![],
             policy_selection: policy.resolved.clone(),
             summary: ReportSummary::default(),
             implementation_results: vec![],
@@ -397,10 +404,30 @@ impl Report {
         self.source_roles.clone_from(&input.source_roles);
         self.source_role_candidates = crate::migration::resolve_source_role_candidates(input);
         self.migration_artifacts = crate::migration::resolve_migration_artifacts(input);
-        if !self.migration_artifacts.is_empty() {
+        self.migration_artifact_candidates =
+            crate::migration::resolve_migration_artifact_candidates(input);
+        if self
+            .migration_artifacts
+            .iter()
+            .any(|artifact| artifact.role == "database_migration_sql")
+        {
             self.metadata
                 .limitations
                 .push("migration_sql_bodies_are_inventoried_not_analyzed".into());
+        }
+        if self
+            .migration_artifacts
+            .iter()
+            .any(|artifact| artifact.status == "migration_operations_not_analyzed")
+        {
+            self.metadata
+                .limitations
+                .push("migration_operation_bundles_are_inventoried_not_analyzed".into());
+        }
+        if !self.migration_artifact_candidates.is_empty() {
+            self.metadata
+                .limitations
+                .push("migration_artifact_ownership_unresolved".into());
         }
     }
 
@@ -769,8 +796,8 @@ impl Report {
         self.scanned_files.sort();
         self.excluded_directories.sort();
         self.smell_results = build_smell_results(self, None);
-        let sole_implementation_is_repository = self.implementation_scopes.len() == 1
-            && self.implementation_scopes[0].source_files == self.scanned_files;
+        let sole_implementation_is_repository =
+            sole_implementation_is_repository(&self.implementation_scopes, &self.scanned_files);
         self.implementation_results = self
             .implementation_scopes
             .iter()
@@ -802,7 +829,7 @@ impl Report {
         let blocking_findings = matched.iter().filter(|finding| finding.blocking).count();
         let ignored_findings = matched
             .iter()
-            .filter(|finding| finding.status == "ignored_match")
+            .filter(|finding| ignored_status(&finding.status))
             .count();
         let review_signals = matched
             .iter()
@@ -871,6 +898,13 @@ impl Report {
             error_count: self.errors.len(),
         };
     }
+}
+
+fn sole_implementation_is_repository(
+    implementations: &[Implementation],
+    scanned_files: &[String],
+) -> bool {
+    implementations.len() == 1 && implementations[0].source_files == scanned_files
 }
 
 fn implementation_summary(smell_results: &[SmellResult]) -> ImplementationSummary {
@@ -1012,7 +1046,7 @@ fn build_smell_results(report: &Report, source_files: Option<&[String]>) -> Vec<
                 .count();
             let ignored_findings = matched_findings
                 .iter()
-                .filter(|(_, finding)| finding.status == "ignored_match")
+                .filter(|(_, finding)| ignored_status(&finding.status))
                 .count();
             let review_signals = matched_findings
                 .iter()
@@ -1138,11 +1172,12 @@ pub fn write_finding_log(report: &Report, output: impl std::io::Write) -> std::i
 #[cfg(test)]
 mod tests {
     use super::{
-        Location, Report, SmellState,
-        model::{CoverageStatus, SmellStateInputs},
-        smell_state, write_finding_log,
+        FindingRelations, Location, Report, SmellState, ignored_status, implementation_summary,
+        model::{CoverageStatus, RuleStatusIds, SmellResult, SmellStateInputs},
+        normalized_measurement_evidence, report_limitations, smell_state,
+        sole_implementation_is_repository, write_finding_log,
     };
-    use crate::core::model::History;
+    use crate::core::model::{History, Implementation};
     use serde_json::json;
 
     #[test]
@@ -1318,5 +1353,301 @@ mod tests {
         assert!(
             log.contains("E000002 | scanner_error | rust.function_arguments | - | detail line ")
         );
+    }
+
+    #[test]
+    fn limitations_disclose_language_parser_and_history_boundaries() {
+        let rust = report_limitations("rust", true);
+        assert!(
+            rust.contains(&"cfg_is_not_evaluated_and_macro_expansions_are_not_inspected".into())
+        );
+        assert!(!rust.contains(&"git_history_unavailable_history_rules_are_incomplete".into()));
+
+        let typescript = report_limitations("typescript", false);
+        assert!(typescript.contains(
+            &"typeof_import_generic_call_arguments_use_a_position_preserving_parser_compatibility_reparse".into()
+        ));
+        assert!(
+            typescript.contains(&"git_history_unavailable_history_rules_are_incomplete".into())
+        );
+
+        let python = report_limitations("python", true);
+        assert!(
+            !python
+                .iter()
+                .any(|limitation| limitation.contains("cfg_is_not_evaluated"))
+        );
+        assert!(
+            !python
+                .iter()
+                .any(|limitation| limitation.contains("typeof_import"))
+        );
+        assert!(python.contains(&"syntax_matches_are_not_confirmed_design_defects".into()));
+    }
+
+    #[test]
+    fn normalized_measurements_deduplicate_providers_and_remove_finding_only_fields() {
+        let evidence = json!({
+            "provider": {"name": "fixture", "version": "1"},
+            "complete": true,
+            "measurements": {"count": 2},
+            "detail": "kept"
+        });
+        let mut providers = Vec::new();
+        let first = normalized_measurement_evidence(&evidence, &mut providers);
+        let second = normalized_measurement_evidence(&evidence, &mut providers);
+        assert_eq!(providers.len(), 1);
+        assert_eq!(first.get(), second.get());
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(first.get()).unwrap(),
+            json!({"provider_ref": 0, "detail": "kept"})
+        );
+
+        let other = json!({"provider": {"name": "other", "version": "1"}});
+        let normalized = normalized_measurement_evidence(&other, &mut providers);
+        assert_eq!(providers.len(), 2);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(normalized.get()).unwrap(),
+            json!({"provider_ref": 1})
+        );
+    }
+
+    fn smell_result(id: &str, state: SmellState) -> SmellResult {
+        SmellResult {
+            smell_id: id.into(),
+            smell: id.into(),
+            category: "test".into(),
+            reference_url: "https://example.com".into(),
+            reference_check: super::ReferenceCheck {
+                required: true,
+                non_negotiable: true,
+                action: "review",
+                required_before: "change",
+                unavailable_action: "stop",
+            },
+            applicability: "applicable".into(),
+            state,
+            interpretation: state.interpretation(),
+            coverage_status: CoverageStatus::MeasuredDefinedScope,
+            evaluated_measurements: 1,
+            matched_findings: usize::from(matches!(
+                state,
+                SmellState::BlockingMatch | SmellState::IgnoredMatch | SmellState::ReviewMatch
+            )),
+            blocking_findings: usize::from(state == SmellState::BlockingMatch),
+            ignored_findings: usize::from(state == SmellState::IgnoredMatch),
+            review_signals: usize::from(state == SmellState::ReviewMatch),
+            within_pattern_limits: 0,
+            affected_files: 0,
+            affected_symbols: 0,
+            measured_rule_ids: vec![format!("test.{id}")],
+            matched_rule_ids: Vec::new(),
+            rule_status: RuleStatusIds {
+                pending_rule_ids: Vec::new(),
+                disabled_rule_ids: Vec::new(),
+                excluded_rule_ids: Vec::new(),
+                incomplete_rule_ids: Vec::new(),
+            },
+            matched_finding_indices: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn implementation_summary_counts_states_and_uses_fail_closed_precedence() {
+        let states = [
+            ("blocked", SmellState::BlockingMatch),
+            ("ignored", SmellState::IgnoredMatch),
+            ("review", SmellState::ReviewMatch),
+            ("error", SmellState::Error),
+            ("clean", SmellState::CheckedNoMatchInMeasuredScope),
+        ];
+        let results = states
+            .into_iter()
+            .map(|(id, state)| smell_result(id, state))
+            .collect::<Vec<_>>();
+        let summary = implementation_summary(&results);
+        assert_eq!(summary.verdict, "incomplete_due_to_errors");
+        assert_eq!(summary.total_smell_patterns, 5);
+        assert_eq!(summary.matched_smell_patterns, 3);
+        assert_eq!(summary.blocking_smell_patterns, 1);
+        assert_eq!(summary.ignored_smell_patterns, 1);
+        assert_eq!(summary.review_smell_patterns, 1);
+        assert_eq!(summary.error_smell_patterns, 1);
+        assert_eq!(
+            summary.matched_smell_ids,
+            vec!["blocked".to_string(), "ignored".into(), "review".into()]
+        );
+
+        for (state, verdict) in [
+            (SmellState::BlockingMatch, "blocked_by_required_patterns"),
+            (
+                SmellState::ReviewMatch,
+                "required_checks_passed_with_review_signals",
+            ),
+            (SmellState::IgnoredMatch, "passed_with_ignored_findings"),
+            (
+                SmellState::CheckedNoMatchInMeasuredScope,
+                "required_checks_passed",
+            ),
+        ] {
+            assert_eq!(
+                implementation_summary(&[smell_result("one", state)]).verdict,
+                verdict
+            );
+        }
+    }
+
+    #[test]
+    fn repository_implementation_identity_requires_one_exact_file_set() {
+        let implementation = |files: &[&str]| Implementation {
+            id: "repository".into(),
+            root: Some(".".into()),
+            ownership: "manifest",
+            implementation_types: Vec::new(),
+            runtime_types: Vec::new(),
+            runtime_manifests: Vec::new(),
+            source_files: files.iter().map(|path| (*path).into()).collect(),
+        };
+        let scanned = vec!["src/lib.rs".into(), "src/other.rs".into()];
+        assert!(sole_implementation_is_repository(
+            &[implementation(&["src/lib.rs", "src/other.rs"])],
+            &scanned
+        ));
+        assert!(!sole_implementation_is_repository(
+            &[implementation(&["src/lib.rs"])],
+            &scanned
+        ));
+        assert!(!sole_implementation_is_repository(
+            &[
+                implementation(&["src/lib.rs"]),
+                implementation(&["src/other.rs"]),
+            ],
+            &scanned
+        ));
+    }
+
+    #[test]
+    fn finish_distinguishes_clean_verdicts_and_unmatched_measurements() {
+        let registry = crate::policy::registry("rust-v1").unwrap();
+        let policy =
+            crate::policy::parse(include_str!("../examples/quality-policy.json"), &registry)
+                .unwrap();
+        let mut clean = Report::new(&registry, &policy, "working_tree", &[], &History::default());
+        clean.finish();
+        assert_eq!(clean.summary.verdict, "required_checks_passed");
+
+        let mut measured =
+            Report::new(&registry, &policy, "working_tree", &[], &History::default());
+        let location = Location {
+            path: "src/lib.rs".into(),
+            line: 1,
+            column: 1,
+        };
+        for (symbol, matched) in [("within-one", false), ("within-two", false), ("over", true)] {
+            measured.finding(
+                &policy,
+                "rust.function_lines",
+                symbol,
+                &location,
+                "lines",
+                json!(if matched { 3 } else { 1 }),
+                ">",
+                json!(2),
+                matched,
+                json!({}),
+            );
+        }
+        measured.finish();
+        assert_eq!(measured.summary.total_measurements, 3);
+        assert_eq!(measured.summary.within_pattern_limits, 2);
+        let measured_smell = measured
+            .smell_results
+            .iter()
+            .find(|result| {
+                result
+                    .measured_rule_ids
+                    .contains(&"rust.function_lines".to_string())
+            })
+            .unwrap();
+        assert_eq!(measured_smell.evaluated_measurements, 3);
+        assert_eq!(measured_smell.matched_findings, 1);
+        assert_eq!(measured_smell.within_pattern_limits, 2);
+        assert!(measured.smell_results.iter().any(|result| {
+            result.measured_rule_ids.is_empty()
+                && result.evaluated_measurements == 0
+                && result.matched_findings == 0
+        }));
+
+        assert!(ignored_status("ignored_match"));
+        assert!(!ignored_status("violation"));
+        assert!(!ignored_status("indicator"));
+    }
+
+    #[test]
+    fn report_error_and_source_membership_contracts_are_observable() {
+        let registry = crate::policy::registry("rust-v1").unwrap();
+        let policy =
+            crate::policy::parse(include_str!("../examples/quality-policy.json"), &registry)
+                .unwrap();
+        let mut report = Report::new(&registry, &policy, "working_tree", &[], &History::default());
+        assert!(!report.has_errors());
+        report.error("broken input");
+        assert!(report.has_errors());
+
+        let primary = Location {
+            path: "src/primary.rs".into(),
+            line: 1,
+            column: 1,
+        };
+        let related = Location {
+            path: "src/related.rs".into(),
+            line: 2,
+            column: 1,
+        };
+        report.finding_with_relations(
+            &policy,
+            "rust.function_lines",
+            "work",
+            &primary,
+            "lines",
+            json!(20),
+            ">",
+            json!(10),
+            true,
+            FindingRelations {
+                evidence: json!({}),
+                symbols: vec!["related".into()],
+                locations: vec![related],
+            },
+        );
+        assert!(super::finding_in_source_files(
+            &report.findings[0],
+            &["src/related.rs".into()]
+        ));
+        assert!(super::finding_in_source_files(
+            &report.findings[0],
+            &["src/primary.rs".into()]
+        ));
+        assert!(!super::finding_in_source_files(
+            &report.findings[0],
+            &["src/other.rs".into()]
+        ));
+        assert!(super::measurement_in_source_files(
+            &report.measurements[0],
+            &["src/primary.rs".into()]
+        ));
+        assert!(!super::measurement_in_source_files(
+            &report.measurements[0],
+            &["src/other.rs".into()]
+        ));
+        assert!(super::path_in_source_files("src/primary.rs", None));
+        assert!(super::path_in_source_files(
+            "src/primary.rs",
+            Some(&["src/primary.rs".into()])
+        ));
+        assert!(!super::path_in_source_files(
+            "src/primary.rs",
+            Some(&["src/other.rs".into()])
+        ));
     }
 }
