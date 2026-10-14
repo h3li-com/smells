@@ -11,6 +11,11 @@ npm_workflow="$repository_root/.github/workflows/publish-npm.yml"
 crates_recovery_workflow="$repository_root/.github/workflows/publish-crates.yml"
 registry_dispatcher="$repository_root/scripts/dispatch-registry-publications.sh"
 registry_release_verifier="$repository_root/scripts/verify-registry-release.sh"
+release_version=$(sed -n '/^\[package\]/,/^\[/ s/^version = "\([^"]*\)"/\1/p' \
+    "$repository_root/Cargo.toml")
+release_tag="v$release_version"
+release_note="$repository_root/docs/releases/$release_tag.md"
+release_template="$repository_root/docs/releases/TEMPLATE.md"
 
 if grep -F 'uses: ./.github/workflows/publish-pypi.yml' "$workflow" >/dev/null ||
     grep -F 'uses: ./.github/workflows/publish-npm.yml' "$workflow" >/dev/null ||
@@ -19,6 +24,27 @@ if grep -F 'uses: ./.github/workflows/publish-pypi.yml' "$workflow" >/dev/null |
     exit 1
 fi
 grep -F 'publish-external-registries:' "$workflow" >/dev/null
+grep -F './scripts/verify-release-notes.sh "$RELEASE_TAG"' "$workflow" >/dev/null
+grep -F -- '--notes-file "docs/releases/$RELEASE_TAG.md"' "$workflow" >/dev/null
+if grep -F -- '--generate-notes' "$workflow" >/dev/null; then
+    printf 'release workflow still relies on generated release notes\n' >&2
+    exit 1
+fi
+for heading in \
+    '## Why this release' \
+    '## What was added' \
+    '## What was fixed' \
+    '## What was removed' \
+    '## Before upgrading' \
+    '## How to use it' \
+    '## Verification'; do
+    grep -F "$heading" "$release_note" >/dev/null
+    grep -F "$heading" "$release_template" >/dev/null
+done
+"$repository_root/scripts/verify-release-notes.sh" "$release_tag" >/dev/null
+grep -F "smells==$release_version" "$release_note" >/dev/null
+grep -F "@mindful-time/smells@$release_version" "$release_note" >/dev/null
+grep -F -- "--version $release_version smells" "$release_note" >/dev/null
 grep -F 'actions: write' "$workflow" >/dev/null
 grep -F './scripts/dispatch-registry-publications.sh "$RELEASE_TAG"' \
     "$workflow" >/dev/null

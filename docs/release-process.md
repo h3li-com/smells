@@ -42,7 +42,11 @@ Version changes are normal pull requests. A version PR must update:
 1. `Cargo.toml` and `Cargo.lock`;
 2. every starter policy and policy schema scanner pin;
 3. versioned test evidence and documentation;
-4. `CHANGELOG.md`.
+4. `CHANGELOG.md`;
+5. `docs/releases/vMAJOR.MINOR.PATCH.md`, with explicit sections explaining why the
+   release exists, what was added, fixed, and removed, compatibility requirements,
+   and exact installation and usage commands. Copy `docs/releases/TEMPLATE.md`; the
+   local and workflow gates reject a missing, incomplete, or placeholder note.
 
 `pyproject.toml` reads the version dynamically from Cargo metadata, so it cannot
 drift independently. The PR must pass the required `CI / required` check.
@@ -52,7 +56,7 @@ drift independently. The PR must pass the required `CI / required` check.
 After the version PR is merged into `main`:
 
 1. The repository owner, `mindful-time`, opens **Actions → Release → Run workflow**.
-2. Select `main` and enter the exact stable tag, such as `v0.5.0`.
+2. Select `main` and enter the exact stable tag, such as `v0.6.0`.
 3. The workflow rejects every other dispatch or rerun actor, input other than
    `vMAJOR.MINOR.PATCH`, a tag that already exists, a non-`main` dispatch, or a
    version that differs from `Cargo.toml`. The actor check runs during validation
@@ -66,8 +70,10 @@ After the version PR is merged into `main`:
    `smells-artifacts.spdx.json`.
 6. The publication job also builds the root npm launcher and crates.io source archive.
    Only after every step succeeds does the workflow create the tag and immutable
-   GitHub Release at the exact tested commit. GitHub then produces a cryptographically
-   signed release attestation binding the tag, commit, and asset digests.
+   GitHub Release at the exact tested commit, using the checked-in version-specific
+   release note instead of mutable generated text. GitHub then produces a
+   cryptographically signed release attestation binding the tag, commit, and asset
+   digests.
 7. The release workflow dispatches three independent top-level workflows to publish
    the already-tested wheels to PyPI, the six npm packages to npmjs.com, and the
    source package to crates.io. External Trusted Publisher identities are bound to
@@ -120,8 +126,8 @@ Download the archive, its matching `.sha256`, and verify it before extraction:
 
 ```sh
 sha256sum --check smells-x86_64-unknown-linux-gnu.tar.gz.sha256
-gh release verify v0.5.0 --repo mindful-time/smells
-gh release verify-asset v0.5.0 \
+gh release verify v0.6.0 --repo mindful-time/smells
+gh release verify-asset v0.6.0 \
   smells-x86_64-unknown-linux-gnu.tar.gz \
   --repo mindful-time/smells
 ```

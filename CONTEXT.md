@@ -79,3 +79,22 @@ _Avoid_: Any related location, arbitrary suppression site
 > **Domain expert:** The Hook Summary is not enough. Open the Finding Log, use its Issue Index to jump to the full detail, and read the resolved When to Ignore guidance before proposing a change. A match is evidence to review, not an automatic instruction to refactor.
 >
 > **Developer:** The Finding's Guidance Reference resolves to the complete guidance, and it applies here, so I added a rule-specific Suppression with a reason. The report still shows it as an Ignored Finding for audit.
+
+## Release contract
+
+**Release Note**:
+The immutable, version-specific user guide published with one release. It is checked
+in at `docs/releases/vMAJOR.MINOR.PATCH.md`, starts from
+`docs/releases/TEMPLATE.md`, and explains why the release exists, what was added,
+fixed, and removed, what consumers must do before upgrading, how to install and run
+the exact version, and how the release was verified. If nothing was removed, the note
+says so explicitly. The Release workflow validates and publishes this file; generated
+notes are not an acceptable substitute.
+_Avoid_: Generated changelog, commit list, internal implementation diary
+
+**Release Completion**:
+A release is complete only when the owner-dispatched workflow has created the signed
+immutable GitHub Release from `main` and verified the exact version on PyPI,
+npmjs.com, crates.io, and GitHub Packages. A merged version PR or a GitHub tag alone
+is not release completion.
+_Avoid_: Merge complete, tag complete, best-effort registry publication

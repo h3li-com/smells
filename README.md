@@ -93,25 +93,25 @@ Choose one channel. Every channel provides the same Rust executable and rule beh
 General-purpose installation with [uv](https://docs.astral.sh/uv/concepts/tools/):
 
 ```sh
-uv tool install smells==0.5.0
+uv tool install smells==0.6.0
 smells --version
 ```
 
 Inside a Node project:
 
 ```sh
-npm install --save-dev --save-exact @mindful-time/smells@0.5.0
+npm install --save-dev --save-exact @mindful-time/smells@0.6.0
 npx --no-install smells --version
 ```
 
 With a Rust toolchain:
 
 ```sh
-cargo install --locked --version 0.5.0 smells
+cargo install --locked --version 0.6.0 smells
 smells --version
 ```
 
-Prebuilt archives for macOS, Linux, and Windows are available from the [v0.5.0 GitHub Release](https://github.com/mindful-time/smells/releases/tag/v0.5.0).
+Prebuilt archives for macOS, Linux, and Windows are available from the [v0.6.0 GitHub Release](https://github.com/mindful-time/smells/releases/tag/v0.6.0).
 
 ### 2. Add a policy to the repository
 
@@ -123,11 +123,11 @@ Choose the policy that matches the language being scanned:
 | Python | [`examples/python-quality-policy.json`](examples/python-quality-policy.json) |
 | TypeScript/TSX | [`examples/typescript-quality-policy.json`](examples/typescript-quality-policy.json) |
 
-For example, add the immutable v0.5.0 Python starter to another repository:
+For example, add the immutable v0.6.0 Python starter to another repository:
 
 ```sh
 curl -fsSLo quality-policy.json \
-  https://raw.githubusercontent.com/mindful-time/smells/v0.5.0/examples/python-quality-policy.json
+  https://raw.githubusercontent.com/mindful-time/smells/v0.6.0/examples/python-quality-policy.json
 smells contracts validate --policy quality-policy.json
 ```
 
@@ -312,7 +312,7 @@ Pin the Smells version in the installation command. Upgrade the executable and p
 Add the same command to the repository's existing quality job:
 
 ```sh
-uvx --from smells==0.5.0 smells check \
+uvx --from smells==0.6.0 smells check \
   --path . \
   --policy quality-policy.json \
   --format table \
@@ -337,7 +337,7 @@ repos:
       - id: smells
         name: deterministic smell scan
         language: system
-        entry: uvx --from smells==0.5.0 smells check --staged --policy quality-policy.json --format table --log smells-findings.log --report smells-report.json
+        entry: uvx --from smells==0.6.0 smells check --staged --policy quality-policy.json --format table --log smells-findings.log --report smells-report.json
         pass_filenames: false
 ```
 
@@ -456,10 +456,10 @@ Run the project's compiler, type checker, tests, fresh coverage, and security to
 
 | Channel | Package | Installation |
 | --- | --- | --- |
-| PyPI | [`smells`](https://pypi.org/project/smells/0.5.0/) | `uv tool install smells==0.5.0` |
-| npm | [`@mindful-time/smells`](https://www.npmjs.com/package/@mindful-time/smells/v/0.5.0) | `npm install --save-dev --save-exact @mindful-time/smells@0.5.0` |
-| crates.io | [`smells`](https://crates.io/crates/smells/0.5.0) | `cargo install --locked --version 0.5.0 smells` |
-| GitHub | [v0.5.0 release](https://github.com/mindful-time/smells/releases/tag/v0.5.0) | Download the archive for the host platform |
+| PyPI | [`smells`](https://pypi.org/project/smells/0.6.0/) | `uv tool install smells==0.6.0` |
+| npm | [`@mindful-time/smells`](https://www.npmjs.com/package/@mindful-time/smells/v/0.6.0) | `npm install --save-dev --save-exact @mindful-time/smells@0.6.0` |
+| crates.io | [`smells`](https://crates.io/crates/smells/0.6.0) | `cargo install --locked --version 0.6.0 smells` |
+| GitHub | [v0.6.0 release](https://github.com/mindful-time/smells/releases/tag/v0.6.0) | Download the archive for the host platform |
 
 All registry payloads originate from one immutable GitHub Release. Protected workflows verify its commit, attestations, checksums, and exact assets before publishing through short-lived identities.
 
@@ -508,6 +508,6 @@ cargo test --locked --test e2e_live -- --ignored --nocapture
 
 ## Project status
 
-Version `0.5.0` is prepared for GitHub Releases, PyPI, npm, GitHub Packages, and crates.io. Smells is open-source software licensed under the [MIT License](LICENSE).
+Version `0.6.0` is prepared for GitHub Releases, PyPI, npm, GitHub Packages, and crates.io. Smells is open-source software licensed under the [MIT License](LICENSE).
 
 Repository: [mindful-time/smells](https://github.com/mindful-time/smells)

@@ -58,6 +58,7 @@ test:
 release-check:
 	@sh -n scripts/quality-tool-versions.sh scripts/install-ci-quality-tools.sh \
 		scripts/verify-release-tag.sh scripts/package-release.sh \
+		scripts/verify-release-notes.sh \
 		scripts/package-npm.sh scripts/smoke-test-npm.sh \
 		scripts/publish-crate.sh scripts/bootstrap-npm-release.sh \
 		scripts/configure-main-protection.sh scripts/verify-release-actor.sh \
@@ -65,6 +66,7 @@ release-check:
 		scripts/benchmark-release-gate.sh scripts/prepare-mutation-diff.sh \
 		scripts/run-mutation-test.sh \
 		scripts/collect-release-artifacts.sh tests/release-artifacts.sh \
+		tests/release-notes.sh \
 		tests/mutation-runner.sh tests/mutation-workflow.sh \
 		tests/real-repositories.sh \
 		tests/npm-packages.sh tests/npm-publisher.sh tests/npm-bootstrap.sh \
@@ -77,6 +79,7 @@ release-check:
 	@sh tests/crate-package.sh
 	@sh tests/registry-publication.sh
 	@sh tests/release-workflow.sh
+	@sh tests/release-notes.sh
 	@sh tests/mutation-runner.sh
 	@sh tests/mutation-workflow.sh
 	@node --check npm/smells.js
@@ -86,7 +89,8 @@ release-check:
 		python3 -m py_compile \
 			scripts/mutation-summary.py scripts/verify-pypi-release.py
 	@version=$$(sed -n '/^\[package\]/,/^\[/ s/^version = "\([^"]*\)"/\1/p' Cargo.toml); \
-		./scripts/verify-release-tag.sh "v$$version" >/dev/null
+		./scripts/verify-release-tag.sh "v$$version" >/dev/null; \
+		./scripts/verify-release-notes.sh "v$$version" >/dev/null
 	@./scripts/verify-release-actor.sh mindful-time mindful-time mindful-time >/dev/null
 	@if ./scripts/verify-release-actor.sh \
 		mindful-time mindful-time another-user >/dev/null 2>&1; then \
