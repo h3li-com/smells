@@ -4,6 +4,8 @@ All notable changes to Smells are recorded here. Release tags use `vMAJOR.MINOR.
 
 ## Unreleased
 
+## 0.6.0 - 2026-10-14
+
 - Classify high-confidence Python, TypeScript, and Rust database migration source
   roles without removing migration code from the measured corpus, and report exact
   canonical entrypoint findings as visible nonblocking review signals.
