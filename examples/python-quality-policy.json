@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "rule_pack": "python-v1",
-  "scanner_version": "0.5.0",
+  "scanner_version": "0.6.0",
   "scope": "authored_source",
   "default_groups": ["all"],
   "exclude_directories": [
@@ -20,6 +20,7 @@
     "node_modules",
     "target"
   ],
+  "source_roles": [],
   "limits": {
     "maximum_files": 10000,
     "maximum_pairs": 250000,
@@ -27,7 +28,7 @@
   },
   "rules": {
     "python.function_lines": {
-      "version": 1,
+      "version": 2,
       "mode": "required",
       "parameters": {
         "maximum": 100

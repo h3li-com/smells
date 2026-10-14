@@ -29,11 +29,11 @@
     {"id":"middle-man","name":"Middle Man","category":"couplers","applicability":"applicable","rules":["typescript.forwarding_share"]}
   ],
   "rules": [
-    {"id":"typescript.function_lines","version":1,"smell":"long-method","kind":"metric","implementation":"implemented","inputs":["authored_source","tree_sitter_typescript"],"parameters":{"maximum":100},"contract":"typescript-function-lines"},
+    {"id":"typescript.function_lines","version":2,"smell":"long-method","kind":"metric","implementation":"implemented","inputs":["authored_source","tree_sitter_typescript"],"parameters":{"maximum":100},"contract":"typescript-function-lines"},
     {"id":"typescript.function_arguments","version":1,"smell":"long-parameter-list","kind":"metric","implementation":"implemented","inputs":["authored_source","tree_sitter_typescript"],"parameters":{"maximum":7},"contract":"typescript-function-arguments"},
     {"id":"typescript.class_fields","version":1,"smell":"large-class","kind":"metric","implementation":"implemented","inputs":["authored_source","tree_sitter_typescript"],"parameters":{"maximum":15},"contract":"typescript-class-fields"},
     {"id":"typescript.class_methods","version":1,"smell":"large-class","kind":"metric","implementation":"implemented","inputs":["authored_source","tree_sitter_typescript"],"parameters":{"maximum":20},"contract":"typescript-class-methods"},
-    {"id":"typescript.class_method_lines","version":1,"smell":"large-class","kind":"metric","implementation":"implemented","inputs":["authored_source","tree_sitter_typescript"],"parameters":{"maximum":500},"contract":"typescript-class-method-lines"},
+    {"id":"typescript.class_method_lines","version":2,"smell":"large-class","kind":"metric","implementation":"implemented","inputs":["authored_source","tree_sitter_typescript"],"parameters":{"maximum":500},"contract":"typescript-class-method-lines"},
     {"id":"typescript.primitive_slots","version":1,"smell":"primitive-obsession","kind":"indicator","implementation":"implemented","inputs":["built_in_collector"],"parameters":{"minimum_raw_slots":5,"minimum_share_percent":80},"contract":"typescript-primitive-slots"},
     {"id":"typescript.data_clumps","version":1,"smell":"data-clumps","kind":"indicator","implementation":"implemented","inputs":["authored_source","tree_sitter_typescript"],"parameters":{"minimum_group_size":3,"minimum_declarations":3},"contract":"typescript-data-clumps"},
     {"id":"typescript.alternative_interfaces","version":1,"smell":"alternative-classes-with-different-interfaces","kind":"indicator","implementation":"implemented","inputs":["built_in_collector"],"parameters":{"minimum_similarity_basis_points":8200,"minimum_tokens":20},"contract":"typescript-alternative-interfaces"},

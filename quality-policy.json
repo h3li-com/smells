@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "rule_pack": "rust-v1",
-  "scanner_version": "0.5.0",
+  "scanner_version": "0.6.0",
   "scope": "authored_all_cfg",
   "default_groups": ["all"],
   "exclude_directories": [
@@ -20,14 +20,15 @@
     "node_modules",
     "target"
   ],
+  "source_roles": [],
   "limits": {"maximum_files": 10000, "maximum_pairs": 100000, "maximum_group_combinations": 100000},
   "rules": {
-    "rust.function_lines": {"version":1,"mode":"required","parameters":{"maximum":169}},
+    "rust.function_lines": {"version":2,"mode":"required","parameters":{"maximum":169}},
     "rust.function_arguments": {"version":1,"mode":"required","parameters":{"maximum":11}},
     "rust.type_fields": {"version":1,"mode":"required","parameters":{"maximum":22}},
     "rust.enum_variants": {"version":1,"mode":"required","parameters":{"maximum":20}},
     "rust.type_functions": {"version":1,"mode":"required","parameters":{"maximum":20}},
-    "rust.type_function_lines": {"version":1,"mode":"required","parameters":{"maximum":692}},
+    "rust.type_function_lines": {"version":2,"mode":"required","parameters":{"maximum":692}},
     "rust.trait_functions": {"version":1,"mode":"required","parameters":{"maximum":20}},
     "rust.primitive_slots": {"version":1,"mode":"report","parameters":{"minimum_raw_slots":5,"minimum_share_percent":80}},
     "rust.data_clumps": {"version":1,"mode":"report","parameters":{"minimum_group_size":3,"minimum_declarations":3}},

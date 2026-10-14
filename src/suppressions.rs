@@ -474,3 +474,163 @@ pub fn parse(files: &BTreeMap<String, String>, registry: &Registry) -> ParsedSup
 
     ParsedSuppressions { directives, errors }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rust_suppression_parser_resolves_every_supported_declaration_kind() {
+        let source = concat!(
+            "struct Host;\n",
+            "impl Host {\n",
+            "    // smells: ignore[rust.function_arguments] -- method contract\n",
+            "    #[inline]\n",
+            "    fn method(a:i32,b:i32,c:i32,d:i32,e:i32,f:i32,g:i32,h:i32) {}\n",
+            "}\n",
+            "trait Service {\n",
+            "    // smells: ignore[rust.function_arguments] -- trait contract\n",
+            "    fn call(a:i32,b:i32,c:i32,d:i32,e:i32,f:i32,g:i32,h:i32);\n",
+            "}\n",
+            "// smells: ignore[rust.type_fields] -- serialized layout\n",
+            "struct Record { a:i32, b:i32, c:i32, d:i32 }\n",
+            "// smells: ignore[rust.enum_variants] -- protocol variants\n",
+            "enum Event { A, B, C, D }\n",
+            "// smells: ignore[rust.trait_functions] -- public port\n",
+            "trait Port { fn a(); fn b(); fn c(); fn d(); }\n",
+            "// smells: ignore[rust.unused_code] -- compatibility alias\n",
+            "type Legacy = Record;\n",
+        );
+        let parsed = parse(
+            &BTreeMap::from([("src/lib.rs".into(), source.into())]),
+            &crate::policy::registry("rust-v1").unwrap(),
+        );
+        assert!(parsed.errors.is_empty());
+        assert_eq!(parsed.directives.len(), 6);
+        assert_eq!(
+            parsed
+                .directives
+                .iter()
+                .map(|directive| directive.suppression.target_location.line)
+                .collect::<Vec<_>>(),
+            [5, 9, 12, 14, 16, 18]
+        );
+        assert!(
+            parsed
+                .directives
+                .iter()
+                .all(|directive| directive.suppression.target_end_line
+                    >= directive.suppression.target_location.line)
+        );
+    }
+
+    #[test]
+    fn declaration_span_owns_its_start_and_body_but_not_its_exclusive_end() {
+        let span = DeclarationSpan {
+            start_line: 3,
+            start_column: 5,
+            end_line: 6,
+            end_column: 2,
+        };
+        assert!(span.contains_position(3, 5));
+        assert!(span.contains_position(5, 99));
+        assert!(span.contains_position(6, 1));
+        assert!(!span.contains_position(3, 4));
+        assert!(!span.contains_position(6, 2));
+    }
+
+    #[test]
+    fn only_blank_comment_and_annotation_lines_may_bridge_a_directive() {
+        let language = SuppressionLanguage::Rust;
+        let annotations = BTreeSet::from([3]);
+        assert!(language.permitted_gap_line("", 1, &annotations));
+        assert!(language.permitted_gap_line("// smells: note", 2, &annotations));
+        assert!(language.permitted_gap_line("#[inline]", 3, &annotations));
+        assert!(!language.permitted_gap_line("let value = 1;", 4, &annotations));
+    }
+
+    #[test]
+    fn portable_suppression_spans_preserve_one_based_locations() {
+        for (pack, path, source, expected_line, expected_column) in [
+            (
+                "python-v1",
+                "service.py",
+                "# smells: ignore[python.function_arguments] -- command API\n@command\ndef publish(a, b, c, d):\n    pass\n",
+                3,
+                1,
+            ),
+            (
+                "typescript-v1",
+                "service.ts",
+                "class Service {\n  // smells: ignore[typescript.function_arguments] -- command API\n  @command\n  publish(a: number, b: number, c: number, d: number): void {}\n}\n",
+                4,
+                3,
+            ),
+        ] {
+            let parsed = parse(
+                &BTreeMap::from([(path.into(), source.into())]),
+                &crate::policy::registry(pack).unwrap(),
+            );
+            assert!(parsed.errors.is_empty(), "{pack}");
+            assert_eq!(parsed.directives.len(), 1, "{pack}");
+            let target = &parsed.directives[0].suppression.target_location;
+            assert_eq!(
+                (target.line, target.column),
+                (expected_line, expected_column)
+            );
+            assert!(parsed.directives[0].owns(
+                &format!("{}.function_arguments", parsed_pack_language(pack)),
+                target
+            ));
+        }
+    }
+
+    #[test]
+    fn tree_sitter_syntax_preserves_exact_declaration_and_decorator_ranges() {
+        let source = concat!(
+            "@command(\n",
+            "    'publish',\n",
+            ")\n",
+            "def publish(value):\n",
+            "    return value\n",
+        );
+        let syntax = source_syntax("service.py", source, SuppressionLanguage::Python);
+
+        assert_eq!(
+            syntax.spans,
+            vec![DeclarationSpan {
+                start_line: 4,
+                start_column: 1,
+                end_line: 5,
+                end_column: 17,
+            }]
+        );
+        assert_eq!(syntax.annotation_lines, BTreeSet::from([1, 2, 3]));
+    }
+
+    #[test]
+    fn rust_syntax_preserves_exact_declaration_and_attribute_ranges() {
+        let source = concat!(
+            "#[inline]\n",
+            "fn publish(value: i32) -> i32 {\n",
+            "    value\n",
+            "}\n",
+        );
+        let syntax = source_syntax("src/lib.rs", source, SuppressionLanguage::Rust);
+
+        assert_eq!(
+            syntax.spans,
+            vec![DeclarationSpan {
+                start_line: 2,
+                start_column: 1,
+                end_line: 4,
+                end_column: 2,
+            }]
+        );
+        assert_eq!(syntax.annotation_lines, BTreeSet::from([1]));
+    }
+
+    fn parsed_pack_language(pack: &str) -> &str {
+        pack.split_once('-').unwrap().0
+    }
+}

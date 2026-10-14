@@ -40,7 +40,7 @@ fn compatibility_source(source: &str) -> Option<String> {
         }
         bytes[range.start] = b'<';
         bytes[range.end - 1] = b'>';
-        if let Some(type_byte) = bytes[range.start + 1..range.end - 1]
+        if let Some(type_byte) = bytes[range.start + 1..range.end]
             .iter_mut()
             .find(|byte| !matches!(**byte, b'\n' | b'\r'))
         {
@@ -73,7 +73,7 @@ pub(crate) fn parse(parser: &mut Parser, source: &str, path: &str) -> Result<Tre
 
 #[cfg(test)]
 mod tests {
-    use super::parse;
+    use super::{compatibility_source, import_type_argument_ranges, parse};
     use tree_sitter::Parser;
 
     #[test]
@@ -90,5 +90,22 @@ mod tests {
         let broken = format!("{valid}\nfunction broken( {{");
         let tree = parse(&mut parser, &broken, "broken.ts").unwrap();
         assert!(tree.root_node().has_error());
+    }
+
+    #[test]
+    fn compatibility_replacement_preserves_range_delimiters_and_byte_length() {
+        let source = "load< typeof import('module') >()";
+        let ranges = import_type_argument_ranges(source);
+        assert_eq!(ranges.len(), 1);
+        let range = ranges[0].clone();
+        let compatible = compatibility_source(source).expect("compatibility rewrite");
+        assert_eq!(compatible.len(), source.len());
+        assert_eq!(compatible.as_bytes()[range.start], b'<');
+        assert_eq!(compatible.as_bytes()[range.end - 1], b'>');
+        assert!(compatible[range.start + 1..range.end - 1].contains('T'));
+        assert_eq!(&compatible[range.end..], "()");
+
+        assert!(compatibility_source("load<string>()").is_none());
+        assert!(import_type_argument_ranges("type X = typeof import('module');").is_empty());
     }
 }

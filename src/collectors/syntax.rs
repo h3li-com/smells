@@ -112,13 +112,7 @@ pub(super) fn code_only_from_tree(path: &str, source: &str, root: Node<'_>) -> S
     String::from_utf8(bytes).expect("masking preserves UTF-8 validity")
 }
 
-pub(super) fn code_only(path: &str, source: &str) -> Result<String, String> {
-    if Path::new(path)
-        .extension()
-        .is_some_and(|extension| extension == "rs")
-    {
-        return Ok(rust_code_only(source));
-    }
+fn parse_tree(path: &str, source: &str) -> Result<tree_sitter::Tree, String> {
     let language = grammar(path)?;
     let mut parser = Parser::new();
     parser
@@ -137,12 +131,77 @@ pub(super) fn code_only(path: &str, source: &str) -> Result<String, String> {
     if tree.root_node().has_error() {
         return Err(format!("collector parse error in {path}"));
     }
+    Ok(tree)
+}
+
+pub(crate) fn code_only(path: &str, source: &str) -> Result<String, String> {
+    if Path::new(path)
+        .extension()
+        .is_some_and(|extension| extension == "rs")
+    {
+        return Ok(rust_code_only(source));
+    }
+    let tree = parse_tree(path, source)?;
     Ok(code_only_from_tree(path, source, tree.root_node()))
+}
+
+fn collect_import_statements(node: Node<'_>, source: &str, statements: &mut Vec<String>) {
+    if matches!(node.kind(), "import_statement" | "import_from_statement") {
+        statements.push(
+            node.utf8_text(source.as_bytes())
+                .unwrap_or_default()
+                .to_string(),
+        );
+        return;
+    }
+    if node.kind() == "call_expression"
+        && node
+            .child_by_field_name("function")
+            .and_then(|function| function.utf8_text(source.as_bytes()).ok())
+            == Some("require")
+    {
+        statements.push(
+            node.utf8_text(source.as_bytes())
+                .unwrap_or_default()
+                .to_string(),
+        );
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_import_statements(child, source, statements);
+    }
+}
+
+pub(crate) fn import_statements(path: &str, source: &str) -> Result<Vec<String>, String> {
+    if Path::new(path)
+        .extension()
+        .is_some_and(|extension| extension == "rs")
+    {
+        return Ok(Vec::new());
+    }
+    let tree = parse_tree(path, source)?;
+    let mut statements = Vec::new();
+    collect_import_statements(tree.root_node(), source, &mut statements);
+    Ok(statements)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::code_only;
+    use super::{code_only, entirely_non_code_node, import_statements};
+
+    #[test]
+    fn non_code_node_classification_covers_each_supported_syntax_kind() {
+        for kind in [
+            "comment",
+            "regex",
+            "import_statement",
+            "import_from_statement",
+        ] {
+            assert!(entirely_non_code_node(kind), "{kind}");
+        }
+        assert!(!entirely_non_code_node("expression_statement"));
+    }
 
     #[test]
     fn masks_comments_strings_and_imports_without_changing_offsets() {
@@ -196,5 +255,46 @@ mod tests {
         let masked = code_only("sample.ts", source).unwrap();
         assert_eq!(masked.len(), source.len());
         assert!(!masked.contains("fake.deep.navigation"));
+    }
+
+    #[test]
+    fn import_statements_exclude_comment_and_string_lookalikes() {
+        let source = concat!(
+            "// import { MigrationInterface } from 'typeorm';\n",
+            "const example = `import { MigrationInterface } from 'typeorm';`;\n",
+            "import { Kysely } from 'kysely';\n",
+        );
+
+        assert_eq!(
+            import_statements("sample.ts", source).unwrap(),
+            vec!["import { Kysely } from 'kysely';"]
+        );
+    }
+
+    #[test]
+    fn import_collection_covers_python_forms_and_typescript_require_only() {
+        let python = concat!(
+            "import alembic\n",
+            "from django.db import migrations\n",
+            "value = import_like('ignored')\n",
+        );
+        assert_eq!(
+            import_statements("sample.py", python).unwrap(),
+            ["import alembic", "from django.db import migrations"]
+        );
+
+        let typescript = concat!(
+            "const knex = require('knex');\n",
+            "const ignored = load('knex');\n",
+        );
+        assert_eq!(
+            import_statements("sample.ts", typescript).unwrap(),
+            ["require('knex')"]
+        );
+        assert!(
+            import_statements("sample.rs", "use crate::domain;")
+                .unwrap()
+                .is_empty()
+        );
     }
 }

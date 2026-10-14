@@ -42,13 +42,9 @@ fn output_path() -> Option<&'static OsString> {
         .as_ref()
 }
 
-pub fn enabled() -> bool {
-    output_path().is_some()
-}
-
 pub fn reset() {
-    if enabled() {
-        METRICS_WRITTEN.store(false, Ordering::Relaxed);
+    METRICS_WRITTEN.store(false, Ordering::Relaxed);
+    if output_path().is_some() {
         for counter in &COUNTERS {
             counter.store(0, Ordering::Relaxed);
         }
@@ -56,7 +52,7 @@ pub fn reset() {
 }
 
 pub fn add(counter: Counter, value: usize) {
-    if enabled() {
+    if output_path().is_some() {
         COUNTERS[counter as usize].fetch_add(value as u64, Ordering::Relaxed);
     }
 }
@@ -65,33 +61,35 @@ fn get(counter: Counter) -> u64 {
     COUNTERS[counter as usize].load(Ordering::Relaxed)
 }
 
-#[cfg(target_os = "macos")]
-fn peak_resident_bytes() -> u64 {
-    let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
-    // SAFETY: getrusage initializes the supplied rusage structure when it succeeds.
-    if unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) } == 0 {
-        // SAFETY: the successful call above initialized usage.
-        unsafe { usage.assume_init() }.ru_maxrss.max(0) as u64
-    } else {
-        0
-    }
+fn getrusage_succeeded(status: libc::c_int) -> bool {
+    status == 0
 }
 
-#[cfg(all(unix, not(target_os = "macos")))]
 fn peak_resident_bytes() -> u64 {
-    let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
-    // SAFETY: getrusage initializes the supplied rusage structure when it succeeds.
-    if unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) } == 0 {
-        // SAFETY: Linux and the supported Unix targets report ru_maxrss in KiB.
-        (unsafe { usage.assume_init() }.ru_maxrss.max(0) as u64).saturating_mul(1024)
-    } else {
+    #[cfg(unix)]
+    {
+        let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+        // SAFETY: getrusage initializes the supplied rusage structure when it succeeds.
+        if getrusage_succeeded(unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) }) {
+            // SAFETY: the successful call above initialized usage.
+            let peak = unsafe { usage.assume_init() }.ru_maxrss.max(0) as u64;
+            #[cfg(target_os = "macos")]
+            {
+                peak
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                // Linux and the supported Unix targets report ru_maxrss in KiB.
+                peak.saturating_mul(1024)
+            }
+        } else {
+            0
+        }
+    }
+    #[cfg(not(unix))]
+    {
         0
     }
-}
-
-#[cfg(not(unix))]
-fn peak_resident_bytes() -> u64 {
-    0
 }
 
 #[derive(Serialize)]
@@ -152,4 +150,33 @@ pub fn write(json_bytes: usize) -> Result<(), String> {
     let bytes = serde_json::to_vec_pretty(&snapshot)
         .map_err(|error| format!("cannot serialize scan metrics: {error}"))?;
     fs::write(path, bytes).map_err(|error| format!("cannot write scan metrics: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reset_always_reopens_the_single_write_guard() {
+        METRICS_WRITTEN.store(true, Ordering::Relaxed);
+
+        reset();
+
+        assert!(!METRICS_WRITTEN.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn getrusage_status_uses_the_operating_system_success_convention() {
+        assert!(getrusage_succeeded(0));
+        assert!(!getrusage_succeeded(1));
+        assert!(!getrusage_succeeded(-1));
+    }
+
+    #[test]
+    fn peak_resident_memory_uses_the_platform_contract() {
+        #[cfg(unix)]
+        assert!(peak_resident_bytes() > 1);
+        #[cfg(not(unix))]
+        assert_eq!(peak_resident_bytes(), 0);
+    }
 }

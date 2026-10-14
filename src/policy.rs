@@ -117,6 +117,16 @@ pub struct Limits {
     pub maximum_group_combinations: usize,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceRoleDeclaration {
+    pub role: String,
+    pub framework: String,
+    pub paths: Vec<String>,
+    #[serde(default)]
+    pub configuration: Vec<String>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Policy {
@@ -127,6 +137,8 @@ pub struct Policy {
     #[serde(default = "all_default_groups")]
     pub default_groups: Vec<String>,
     pub exclude_directories: Vec<String>,
+    #[serde(default)]
+    pub source_roles: Vec<SourceRoleDeclaration>,
     pub limits: Limits,
     #[serde(deserialize_with = "unique_map")]
     pub rules: BTreeMap<String, Selection>,
@@ -314,7 +326,7 @@ fn validate_applicability(registry: &Registry) -> Result<(), String> {
 }
 
 fn valid_rule(rule: &Rule, registry: &Registry) -> bool {
-    rule.version == 1
+    rule.version > 0
         && !rule.inputs.is_empty()
         && !rule.contract.is_empty()
         && matches!(
@@ -385,11 +397,15 @@ fn validate_guidance(guidance: &WhenToIgnore) -> Result<(), String> {
     ))
 }
 
+fn valid_guidance_catalog_header(catalog: &GuidanceCatalog) -> bool {
+    catalog.schema_version == 1 && catalog.catalog_id == "when-to-ignore-v1"
+}
+
 fn embedded_guidance_catalog(registry: &Registry) -> Result<Vec<WhenToIgnore>, String> {
     let catalog: GuidanceCatalog =
         serde_json::from_str(include_str!("../rules/when-to-ignore-v1.json"))
             .map_err(|error| format!("invalid embedded when-to-ignore catalog: {error}"))?;
-    if catalog.schema_version != 1 || catalog.catalog_id != "when-to-ignore-v1" {
+    if !valid_guidance_catalog_header(&catalog) {
         return Err("invalid embedded when-to-ignore catalog header".into());
     }
     validate_guidance_coverage(registry, &catalog)?;
@@ -478,6 +494,113 @@ fn validate_exclusions(policy: &Policy) -> Result<(), String> {
         || !exclusions.contains(".git")
     {
         return Err("exclude_directories must be unique directory names and include .git".into());
+    }
+    Ok(())
+}
+
+fn valid_anchored_role_path(path: &str, allow_glob: bool) -> bool {
+    if !path.starts_with('/')
+        || path.len() == 1
+        || path.contains('\\')
+        || path.contains("//")
+        || path
+            .split('/')
+            .any(|component| matches!(component, "." | ".."))
+    {
+        return false;
+    }
+    if allow_glob {
+        !path.contains(['?', '[', ']', '{', '}'])
+    } else {
+        !path.contains('*') && !path.contains(['?', '[', ']', '{', '}'])
+    }
+}
+
+fn framework_supported(language: &str, framework: &str) -> bool {
+    match language {
+        "python" => matches!(framework, "alembic" | "django"),
+        "typescript" => matches!(
+            framework,
+            "typeorm" | "knex" | "mikro_orm" | "kysely" | "sequelize_umzug" | "prisma_8"
+        ),
+        "rust" => matches!(framework, "sea_orm" | "refinery" | "rusqlite_migration"),
+        _ => false,
+    }
+}
+
+fn valid_source_role_declaration(declaration: &SourceRoleDeclaration, registry: &Registry) -> bool {
+    let unique_paths = declaration.paths.iter().collect::<BTreeSet<_>>();
+    let unique_configuration = declaration.configuration.iter().collect::<BTreeSet<_>>();
+    declaration.role == "database_migration"
+        && framework_supported(&registry.language, &declaration.framework)
+        && !declaration.paths.is_empty()
+        && unique_paths.len() == declaration.paths.len()
+        && unique_configuration.len() == declaration.configuration.len()
+        && declaration
+            .paths
+            .iter()
+            .all(|path| valid_anchored_role_path(path, true))
+        && declaration
+            .configuration
+            .iter()
+            .all(|path| valid_anchored_role_path(path, false))
+}
+
+fn validate_source_role_directories(
+    declaration: &SourceRoleDeclaration,
+    excluded_directories: &[String],
+) -> Result<(), String> {
+    for path in declaration.paths.iter().chain(&declaration.configuration) {
+        if path.split('/').any(|component| {
+            excluded_directories
+                .iter()
+                .any(|excluded| excluded == component)
+        }) {
+            return Err(format!(
+                "source role path traverses an excluded directory: {path}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn record_source_role_identity<'a>(
+    declaration: &'a SourceRoleDeclaration,
+    identities: &mut BTreeSet<(&'a str, &'a str, &'a Vec<String>, &'a Vec<String>)>,
+    scopes: &mut BTreeMap<&'a str, &'a str>,
+) -> Result<(), String> {
+    let identity = (
+        declaration.role.as_str(),
+        declaration.framework.as_str(),
+        &declaration.paths,
+        &declaration.configuration,
+    );
+    if !identities.insert(identity) {
+        return Err("duplicate source role declaration".into());
+    }
+    for path in &declaration.paths {
+        if let Some(previous) = scopes.insert(path, &declaration.framework) {
+            return Err(format!(
+                "duplicate or ambiguous source role path scope: {path} ({previous}, {})",
+                declaration.framework
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_source_roles(policy: &Policy, registry: &Registry) -> Result<(), String> {
+    let mut identities = BTreeSet::new();
+    let mut scopes = BTreeMap::<&str, &str>::new();
+    for declaration in &policy.source_roles {
+        if !valid_source_role_declaration(declaration, registry) {
+            return Err(format!(
+                "invalid source role declaration for {}",
+                declaration.framework
+            ));
+        }
+        validate_source_role_directories(declaration, &policy.exclude_directories)?;
+        record_source_role_identity(declaration, &mut identities, &mut scopes)?;
     }
     Ok(())
 }
@@ -715,6 +838,7 @@ pub fn parse_with_selection(
     validate_scope(&policy, registry)?;
     validate_budgets_and_exceptions(&policy)?;
     validate_exclusions(&policy)?;
+    validate_source_roles(&policy, registry)?;
     validate_selected_rules(&policy, registry)?;
     validate_rule_parameters(&policy, registry)?;
     policy.resolved = resolve_selection(&policy, registry, options)?;
@@ -743,5 +867,379 @@ impl Policy {
     }
     pub fn parameter(&self, id: &str, name: &str) -> u64 {
         self.rules[id].parameters[name]
+    }
+}
+
+pub(crate) fn required_unimplemented_rule_ids<'a>(
+    registry: &'a Registry,
+    policy: &Policy,
+) -> Vec<&'a str> {
+    registry
+        .rules
+        .iter()
+        .filter(|rule| rule.implementation == "not_implemented" && policy.required(&rule.id))
+        .map(|rule| rule.id.as_str())
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    fn raw_registry(rule_pack: &str) -> Registry {
+        serde_json::from_str(registry_json(rule_pack).unwrap()).unwrap()
+    }
+
+    fn rust_policy_value() -> Value {
+        serde_json::from_str(include_str!("../examples/quality-policy.json")).unwrap()
+    }
+
+    fn policy_result(value: &Value) -> Result<Policy, String> {
+        parse(
+            &serde_json::to_string(value).unwrap(),
+            &registry("rust-v1").unwrap(),
+        )
+    }
+
+    #[test]
+    fn registry_catalog_header_rejects_drift_in_every_pinned_field() {
+        let invalid = |mutate: fn(&mut Registry)| {
+            let mut registry = raw_registry("rust-v1");
+            mutate(&mut registry);
+            validate_catalog(&registry, "rust-v1").is_err()
+        };
+
+        assert!(invalid(|registry| registry.schema_version = 2));
+        assert!(invalid(|registry| registry.rule_pack = "python-v1".into()));
+        assert!(invalid(|registry| registry.language = "java".into()));
+        assert!(invalid(
+            |registry| registry.catalog.source = "https://example.com".into()
+        ));
+        assert!(invalid(
+            |registry| registry.catalog.checked_on = "2026-10-11".into()
+        ));
+        assert!(invalid(|registry| registry.catalog.item_count = 22));
+        assert!(invalid(
+            |registry| registry.catalog.guidance_pack = "other-guidance".into()
+        ));
+        assert!(invalid(|registry| {
+            registry.smells.pop();
+        }));
+    }
+
+    #[test]
+    fn registry_smells_and_rules_must_form_one_complete_bijection() {
+        let mut registry = raw_registry("rust-v1");
+        registry.smells.pop();
+        assert!(validate_smell_catalog(&registry).is_err());
+
+        let mut registry = raw_registry("rust-v1");
+        registry.rules[1].id = registry.rules[0].id.clone();
+        assert!(validate_smell_catalog(&registry).is_err());
+
+        let mut registry = raw_registry("rust-v1");
+        registry.smells[0].applicability = "unknown".into();
+        assert!(validate_smell_mappings(&registry).is_err());
+
+        let mut registry = raw_registry("rust-v1");
+        let applicable = registry
+            .smells
+            .iter_mut()
+            .find(|smell| smell.applicability == "applicable")
+            .unwrap();
+        applicable.rules.clear();
+        assert!(validate_smell_mappings(&registry).is_err());
+
+        let mut registry = raw_registry("rust-v1");
+        registry.smells[0].rules[0] = "rust.missing-rule".into();
+        assert!(validate_smell_mappings(&registry).is_err());
+    }
+
+    #[test]
+    fn language_applicability_is_exact_for_rust_and_portable_packs() {
+        let mut rust = raw_registry("rust-v1");
+        rust.smells
+            .iter_mut()
+            .find(|smell| smell.id == "refused-bequest")
+            .unwrap()
+            .applicability = "applicable".into();
+        assert!(validate_applicability(&rust).is_err());
+
+        let mut python = raw_registry("python-v1");
+        python.smells[0].applicability = "not_applicable_native_rust".into();
+        assert!(validate_applicability(&python).is_err());
+    }
+
+    #[test]
+    fn rule_contract_requires_version_inputs_kind_implementation_and_owner() {
+        let valid = raw_registry("rust-v1");
+        assert!(valid.rules.iter().all(|rule| valid_rule(rule, &valid)));
+
+        let invalid = |mutate: fn(&mut Rule)| {
+            let mut registry = raw_registry("rust-v1");
+            let mut rule = registry.rules.remove(0);
+            mutate(&mut rule);
+            !valid_rule(&rule, &registry)
+        };
+        assert!(invalid(|rule| rule.version = 0));
+        assert!(invalid(|rule| rule.inputs.clear()));
+        assert!(invalid(|rule| rule.contract.clear()));
+        assert!(invalid(|rule| rule.implementation = "planned".into()));
+        assert!(invalid(|rule| rule.kind = "heuristic".into()));
+        assert!(invalid(|rule| rule.id = "rust.unowned-rule".into()));
+
+        let mut registry = raw_registry("rust-v1");
+        registry.rules[0].version = 0;
+        assert!(validate_rules(&registry).is_err());
+    }
+
+    #[test]
+    fn guidance_identity_content_and_coverage_fail_closed() {
+        let registry = registry("rust-v1").unwrap();
+        let guidance = registry.guidance_catalog[0].clone();
+        assert!(valid_guidance_identity(&guidance));
+        assert!(valid_guidance_content(&guidance));
+        assert!(validate_guidance(&guidance).is_ok());
+
+        let invalid_identity = |mutate: fn(&mut WhenToIgnore)| {
+            let mut guidance = registry.guidance_catalog[0].clone();
+            mutate(&mut guidance);
+            !valid_guidance_identity(&guidance) && validate_guidance(&guidance).is_err()
+        };
+        assert!(invalid_identity(|guidance| guidance.version = 2));
+        assert!(invalid_identity(
+            |guidance| guidance.guidance_ref = "wrong@1".into()
+        ));
+        assert!(invalid_identity(
+            |guidance| guidance.source_url = "https://example.com".into()
+        ));
+
+        let invalid_content = |mutate: fn(&mut WhenToIgnore)| {
+            let mut guidance = registry.guidance_catalog[0].clone();
+            mutate(&mut guidance);
+            !valid_guidance_content(&guidance) && validate_guidance(&guidance).is_err()
+        };
+        assert!(invalid_content(
+            |guidance| guidance.provenance = "unknown".into()
+        ));
+        assert!(invalid_content(
+            |guidance| guidance.checked_on = "2026-10-11".into()
+        ));
+        assert!(invalid_content(|guidance| guidance.items.clear()));
+        assert!(invalid_content(|guidance| guidance.items[0] = "  ".into()));
+
+        let mut catalog: GuidanceCatalog =
+            serde_json::from_str(include_str!("../rules/when-to-ignore-v1.json")).unwrap();
+        assert!(valid_guidance_catalog_header(&catalog));
+        catalog.schema_version = 2;
+        assert!(!valid_guidance_catalog_header(&catalog));
+        let mut catalog: GuidanceCatalog =
+            serde_json::from_str(include_str!("../rules/when-to-ignore-v1.json")).unwrap();
+        catalog.catalog_id = "other-guidance".into();
+        assert!(!valid_guidance_catalog_header(&catalog));
+
+        let mut catalog: GuidanceCatalog =
+            serde_json::from_str(include_str!("../rules/when-to-ignore-v1.json")).unwrap();
+        catalog.records.pop();
+        assert!(validate_guidance_coverage(&registry, &catalog).is_err());
+        let mut catalog: GuidanceCatalog =
+            serde_json::from_str(include_str!("../rules/when-to-ignore-v1.json")).unwrap();
+        catalog.records[1].smell_id = catalog.records[0].smell_id.clone();
+        assert!(validate_guidance_coverage(&registry, &catalog).is_err());
+    }
+
+    #[test]
+    fn policy_header_scope_budgets_and_exclusions_reject_each_invalid_shape() {
+        let invalid = |pointer: &str, replacement: Value| {
+            let mut value = rust_policy_value();
+            *value.pointer_mut(pointer).unwrap() = replacement;
+            policy_result(&value).is_err()
+        };
+        assert!(invalid("/schema_version", json!(3)));
+        assert!(invalid("/rule_pack", json!("python-v1")));
+        assert!(invalid("/scanner_version", json!("0.0.0")));
+        assert!(invalid("/scope", json!("authored_source")));
+        assert!(invalid("/limits/maximum_files", json!(0)));
+        assert!(invalid("/limits/maximum_pairs", json!(0)));
+        assert!(invalid("/limits/maximum_group_combinations", json!(0)));
+        assert!(invalid(
+            "/exceptions",
+            json!([{"rule": "rust.function_lines"}])
+        ));
+        assert!(invalid("/exclude_directories", json!([".git", ".git"])));
+        assert!(invalid("/exclude_directories", json!([".git", "a/b"])));
+        assert!(invalid("/exclude_directories", json!([".git", "a\\b"])));
+        assert!(invalid("/exclude_directories", json!([".git", "."])));
+        assert!(invalid("/exclude_directories", json!([".git", ".."])));
+        assert!(invalid("/exclude_directories", json!(["target"])));
+    }
+
+    #[test]
+    fn anchored_role_paths_and_frameworks_are_language_specific() {
+        for path in ["/migrations", "/db/*/migrations"] {
+            assert!(valid_anchored_role_path(path, true), "valid path: {path}");
+        }
+        for path in [
+            "",
+            "/",
+            "migrations",
+            "/db\\migrations",
+            "/db//migrations",
+            "/db/./migrations",
+            "/db/../migrations",
+            "/db/?/migrations",
+            "/db/[m]/migrations",
+            "/db/{m}/migrations",
+        ] {
+            assert!(
+                !valid_anchored_role_path(path, true),
+                "invalid path: {path}"
+            );
+        }
+        assert!(!valid_anchored_role_path("/db/*/config", false));
+
+        for (language, framework) in [
+            ("python", "alembic"),
+            ("python", "django"),
+            ("typescript", "typeorm"),
+            ("typescript", "drizzle"),
+            ("rust", "sea_orm"),
+            ("rust", "refinery"),
+            ("rust", "rusqlite_migration"),
+        ] {
+            let expected = framework != "drizzle";
+            assert_eq!(framework_supported(language, framework), expected);
+        }
+        assert!(!framework_supported("java", "flyway"));
+    }
+
+    #[test]
+    fn source_role_policy_rejects_excluded_duplicate_and_ambiguous_scopes() {
+        let declaration = json!({
+            "role": "database_migration",
+            "framework": "refinery",
+            "paths": ["/migrations/*.rs"],
+            "configuration": ["/src/lib.rs"]
+        });
+        let mut value = rust_policy_value();
+        value["source_roles"] = json!([declaration]);
+        assert!(policy_result(&value).is_ok());
+
+        let mut excluded = value.clone();
+        excluded["source_roles"][0]["paths"] = json!(["/target/migrations/*.rs"]);
+        assert!(policy_result(&excluded).is_err());
+
+        let mut duplicate = value.clone();
+        duplicate["source_roles"] = json!([
+            duplicate["source_roles"][0].clone(),
+            duplicate["source_roles"][0].clone()
+        ]);
+        assert!(policy_result(&duplicate).is_err());
+
+        let mut ambiguous = value;
+        let mut second = ambiguous["source_roles"][0].clone();
+        second["framework"] = json!("sea_orm");
+        ambiguous["source_roles"]
+            .as_array_mut()
+            .unwrap()
+            .push(second);
+        assert!(policy_result(&ambiguous).is_err());
+    }
+
+    #[test]
+    fn policy_requires_every_registered_rule_and_parameter_boundary() {
+        let mut value = rust_policy_value();
+        let first_rule = value["rules"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .next()
+            .unwrap()
+            .clone();
+        value["rules"].as_object_mut().unwrap().remove(&first_rule);
+        assert!(policy_result(&value).is_err());
+
+        for (name, value, expected) in [
+            ("minimum_items", 0, true),
+            ("minimum_items", 1, false),
+            ("maximum_percent", 100, false),
+            ("maximum_percent", 101, true),
+            ("minimum_basis_points", 10_000, false),
+            ("minimum_basis_points", 10_001, true),
+            ("minimum_group_size", 1, true),
+            ("minimum_group_size", 2, false),
+            ("minimum_tokens", 3, true),
+            ("minimum_tokens", 4, false),
+        ] {
+            assert_eq!(invalid_parameter(name, value), expected, "{name}={value}");
+        }
+    }
+
+    #[test]
+    fn only_required_unimplemented_rules_are_reported() {
+        let mut first_registry = registry("rust-v1").unwrap();
+        let policy = parse(
+            include_str!("../examples/quality-policy.json"),
+            &first_registry,
+        )
+        .unwrap();
+        let required = first_registry
+            .rules
+            .iter_mut()
+            .find(|rule| policy.required(&rule.id))
+            .unwrap();
+        let required_id = required.id.clone();
+        required.implementation = "not_implemented".into();
+        assert_eq!(
+            required_unimplemented_rule_ids(&first_registry, &policy),
+            [required_id.as_str()]
+        );
+
+        let mut registry = registry("rust-v1").unwrap();
+        let nonrequired = registry
+            .rules
+            .iter_mut()
+            .find(|rule| !policy.required(&rule.id))
+            .unwrap();
+        nonrequired.implementation = "not_implemented".into();
+        assert!(required_unimplemented_rule_ids(&registry, &policy).is_empty());
+    }
+
+    #[test]
+    fn generated_groups_assign_every_rule_to_its_input_kind_and_smell_category() {
+        let registry = registry("rust-v1").unwrap();
+        let groups = group_definitions(&registry);
+        for rule in &registry.rules {
+            assert!(groups["all"].contains(&rule.id));
+            let source_rule = rule.inputs.iter().any(|input| input == "authored_source");
+            assert_eq!(groups["source"].contains(&rule.id), source_rule);
+            assert_eq!(groups["evidence"].contains(&rule.id), !source_rule);
+
+            let category = &registry
+                .smells
+                .iter()
+                .find(|smell| smell.id == rule.smell)
+                .unwrap()
+                .category;
+            assert!(groups[category].contains(&rule.id));
+            for other in registry
+                .smells
+                .iter()
+                .map(|smell| &smell.category)
+                .filter(|other| *other != category)
+            {
+                assert!(!groups[other].contains(&rule.id));
+            }
+        }
+    }
+
+    #[test]
+    fn duplicate_map_error_preserves_the_unique_key_contract() {
+        let registry = registry("rust-v1").unwrap();
+        let mut value = rust_policy_value();
+        value["rules"] = json!([]);
+        let error = parse(&serde_json::to_string(&value).unwrap(), &registry).unwrap_err();
+        assert!(error.contains("an object with unique keys"), "{error}");
     }
 }

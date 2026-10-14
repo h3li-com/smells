@@ -29,7 +29,7 @@
     {"id":"middle-man","name":"Middle Man","category":"couplers","applicability":"applicable","rules":["python.forwarding_share"]}
   ],
   "rules": [
-    {"id":"python.function_lines","version":1,"smell":"long-method","kind":"metric","implementation":"implemented","inputs":["authored_source","tree_sitter_python"],"parameters":{"maximum":100},"contract":"python-function-lines"},
+    {"id":"python.function_lines","version":2,"smell":"long-method","kind":"metric","implementation":"implemented","inputs":["authored_source","tree_sitter_python"],"parameters":{"maximum":100},"contract":"python-function-lines"},
     {"id":"python.function_arguments","version":1,"smell":"long-parameter-list","kind":"metric","implementation":"implemented","inputs":["authored_source","tree_sitter_python"],"parameters":{"maximum":7},"contract":"python-function-arguments"},
     {"id":"python.class_fields","version":1,"smell":"large-class","kind":"metric","implementation":"implemented","inputs":["authored_source","tree_sitter_python"],"parameters":{"maximum":15},"contract":"python-class-fields"},
     {"id":"python.class_methods","version":1,"smell":"large-class","kind":"metric","implementation":"implemented","inputs":["authored_source","tree_sitter_python"],"parameters":{"maximum":20},"contract":"python-class-methods"},

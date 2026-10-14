@@ -1,5 +1,6 @@
+use crate::core::model::RoleContext;
 use crate::policy::Mode;
-use serde::{Deserialize, Serialize, ser::SerializeStruct};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, value::RawValue};
 use std::collections::BTreeMap;
 
@@ -28,6 +29,8 @@ pub struct Finding {
     pub diagnostic: Diagnostic,
     pub status: String,
     pub blocking: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role_context: Option<RoleContext>,
     pub suppression: Option<Suppression>,
     #[serde(skip_serializing)]
     pub evidence: Value,
@@ -82,6 +85,7 @@ pub struct Measurement {
     pub related_locations: Vec<Location>,
     pub observed: Value,
     pub matched: bool,
+    pub role_context: Option<RoleContext>,
     pub evidence: Box<RawValue>,
 }
 
@@ -91,26 +95,38 @@ struct CompactEvaluation<'a> {
     matched: bool,
 }
 
+#[derive(Serialize)]
+struct SerializableMeasurement<'a> {
+    rule_id: &'a str,
+    symbol: &'a str,
+    location: &'a Location,
+    related_symbols: &'a [String],
+    related_locations: &'a [Location],
+    evaluation: CompactEvaluation<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    role_context: Option<&'a RoleContext>,
+    evidence: &'a RawValue,
+}
+
 impl Serialize for Measurement {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
-        let mut state = serializer.serialize_struct("Measurement", 7)?;
-        state.serialize_field("rule_id", &self.rule_id)?;
-        state.serialize_field("symbol", &self.symbol)?;
-        state.serialize_field("location", &self.location)?;
-        state.serialize_field("related_symbols", &self.related_symbols)?;
-        state.serialize_field("related_locations", &self.related_locations)?;
-        state.serialize_field(
-            "evaluation",
-            &CompactEvaluation {
+        SerializableMeasurement {
+            rule_id: &self.rule_id,
+            symbol: &self.symbol,
+            location: &self.location,
+            related_symbols: &self.related_symbols,
+            related_locations: &self.related_locations,
+            evaluation: CompactEvaluation {
                 observed: &self.observed,
                 matched: self.matched,
             },
-        )?;
-        state.serialize_field("evidence", &self.evidence)?;
-        state.end()
+            role_context: self.role_context.as_ref(),
+            evidence: &self.evidence,
+        }
+        .serialize(serializer)
     }
 }
 
@@ -419,6 +435,180 @@ pub(super) fn smell_state(inputs: SmellStateInputs) -> SmellStatus {
             inputs.excluded,
         ),
         coverage: measured_coverage(inputs.measured, inputs.pending, inputs.excluded),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn location(path: &str, line: usize, column: usize) -> Location {
+        Location {
+            path: path.into(),
+            line,
+            column,
+        }
+    }
+
+    #[test]
+    fn source_excerpt_rejects_unknown_and_out_of_range_locations() {
+        let files = BTreeMap::from([("sample.rs".into(), "first\nsecond".into())]);
+        assert!(source_excerpt(&files, &location("missing.rs", 1, 1)).is_none());
+        assert!(source_excerpt(&files, &location("sample.rs", 0, 1)).is_none());
+        assert!(source_excerpt(&files, &location("sample.rs", 3, 1)).is_none());
+        assert!(source_excerpt(&files, &location("sample.rs", 2, 1)).is_some());
+    }
+
+    #[test]
+    fn source_excerpt_uses_one_context_line_and_one_based_display_columns() {
+        let files = BTreeMap::from([("sample.rs".into(), "zero\none\ntwo\nthree\nfour".into())]);
+        let excerpt = source_excerpt(&files, &location("sample.rs", 3, 2)).unwrap();
+        assert_eq!(excerpt.path, "sample.rs");
+        assert_eq!(excerpt.focus_line, 3);
+        assert_eq!(excerpt.focus_column, 2);
+        assert_eq!(
+            excerpt
+                .lines
+                .iter()
+                .map(|line| (line.line, line.display_start_column, line.text.as_str()))
+                .collect::<Vec<_>>(),
+            [(2, 1, "one"), (3, 1, "two"), (4, 1, "three")]
+        );
+        assert!(
+            excerpt
+                .lines
+                .iter()
+                .all(|line| !line.truncated_before && !line.truncated_after)
+        );
+    }
+
+    #[test]
+    fn source_excerpt_truncation_keeps_the_focus_visible_at_start_middle_and_end() {
+        let long = "é".repeat(500);
+        let files = BTreeMap::from([("long.py".into(), long)]);
+        let cases = [
+            (1, 1, false, true),
+            (251, 171, true, true),
+            (500, 181, true, false),
+        ];
+        for (focus_column, display_start, before, after) in cases {
+            let excerpt = source_excerpt(&files, &location("long.py", 1, focus_column)).unwrap();
+            let line = &excerpt.lines[0];
+            assert_eq!(line.line, 1);
+            assert_eq!(line.display_start_column, display_start);
+            assert_eq!(line.text.chars().count(), 320);
+            assert_eq!(line.truncated_before, before);
+            assert_eq!(line.truncated_after, after);
+            assert!(focus_column >= line.display_start_column);
+            assert!(focus_column < line.display_start_column + line.text.chars().count());
+        }
+    }
+
+    #[test]
+    fn measurement_serialization_keeps_compact_evaluation_and_raw_evidence() {
+        let measurement = Measurement {
+            rule_id: "rust.rule".into(),
+            symbol: "src/lib.rs::run".into(),
+            location: location("src/lib.rs", 2, 3),
+            related_symbols: vec!["src/lib.rs::other".into()],
+            related_locations: vec![location("src/lib.rs", 4, 1)],
+            observed: json!({"lines": 10}),
+            matched: true,
+            role_context: None,
+            evidence: serde_json::value::to_raw_value(&json!({"collector": "test"})).unwrap(),
+        };
+        let value = serde_json::to_value(&measurement).unwrap();
+        assert_eq!(value["rule_id"], "rust.rule");
+        assert_eq!(value["location"]["line"], 2);
+        assert_eq!(value["evaluation"]["observed"]["lines"], 10);
+        assert_eq!(value["evaluation"]["matched"], true);
+        assert_eq!(value["evidence"]["collector"], "test");
+        assert!(value.get("matched").is_none());
+    }
+
+    #[test]
+    fn state_labels_interpretations_and_display_are_stable_report_contracts() {
+        let states = [
+            (
+                SmellState::BlockingMatch,
+                "blocking_match",
+                "One or more required deterministic rules matched this smell pattern.",
+            ),
+            (
+                SmellState::IgnoredMatch,
+                "ignored_match",
+                "One or more deterministic matches were explicitly accepted by audited source-local suppressions.",
+            ),
+            (
+                SmellState::ReviewMatch,
+                "review_match",
+                "One or more report-only deterministic rules matched; semantic review is required before deciding whether to refactor.",
+            ),
+            (
+                SmellState::CheckedNoMatchInMeasuredScope,
+                "checked_no_match_in_measured_scope",
+                "No enabled implemented rule matched in its defined source scope; this is not proof that the semantic smell is absent.",
+            ),
+            (
+                SmellState::Pending,
+                "pending",
+                "No detector for this smell ran because its registered rules are not implemented yet.",
+            ),
+            (
+                SmellState::Excluded,
+                "excluded",
+                "All registered detectors for this smell were excluded by the resolved policy groups.",
+            ),
+            (
+                SmellState::Disabled,
+                "disabled",
+                "All registered detectors for this smell are disabled by policy.",
+            ),
+            (
+                SmellState::NotApplicable,
+                "not_applicable",
+                "This canonical smell does not apply to the selected language model.",
+            ),
+            (
+                SmellState::Error,
+                "error",
+                "Measurement is incomplete; do not infer that this smell is absent.",
+            ),
+        ];
+        for (state, label, interpretation) in states {
+            assert_eq!(state.as_str(), label);
+            assert_eq!(state.to_string(), label);
+            assert_eq!(state.interpretation(), interpretation);
+            assert_eq!(
+                serde_json::to_string(&state).unwrap(),
+                format!("\"{label}\"")
+            );
+        }
+
+        let coverage = [
+            (
+                CoverageStatus::MeasuredWithPendingRules,
+                "measured_with_pending_rules",
+            ),
+            (
+                CoverageStatus::MeasuredDefinedScope,
+                "measured_defined_scope",
+            ),
+            (CoverageStatus::Pending, "pending"),
+            (CoverageStatus::Excluded, "excluded"),
+            (CoverageStatus::Disabled, "disabled"),
+            (CoverageStatus::NotApplicable, "not_applicable"),
+            (CoverageStatus::Incomplete, "incomplete"),
+        ];
+        for (status, label) in coverage {
+            assert_eq!(status.as_str(), label);
+            assert_eq!(status.to_string(), label);
+            assert_eq!(
+                serde_json::to_string(&status).unwrap(),
+                format!("\"{label}\"")
+            );
+        }
     }
 }
 

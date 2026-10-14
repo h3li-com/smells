@@ -2,7 +2,7 @@
 
 The report is the deterministic interface between Smells and a review agent. The scanner owns collection, measurement, threshold evaluation, and suppression validation. The agent owns semantic investigation and any proposed code change.
 
-`report_schema_version` is `7`. Consumers must reject unsupported versions rather than guessing field semantics. Schema 7 separates compact `measurements` from matched `findings`, assigns stable per-report finding IDs, stores immutable `when_to_ignore` guidance once in `guidance_catalog`, and audits source-local suppressions. Policy schema remains `2`.
+`report_schema_version` is `11`. Consumers must reject unsupported versions rather than guessing field semantics. Schema 11 adds optional `declaration_path` and `declaration_span` provenance to migration artifacts. Schema 10 added migration integrity metadata and bound unresolved migration-candidate content into the input digest. Schema 9 added versioned migration contracts, source-role declaration spans, explicit unverified-configuration state, migration-bundle records, and unresolved migration-artifact candidates. Policy schema remains `2`; `source_roles` is an optional, backward-compatible policy member.
 
 Each report identifies the embedded provenance metadata with `catalog_version` and `source_manifest_version`. These compact identifiers make the report readable without duplicating the complete source manifest or concept catalog. `implementation_sha256` continues to bind the report to the exact scanner code, rule packs, schemas, manifest, and catalog shipped in that artifact.
 
@@ -15,6 +15,10 @@ The top-level collections have distinct responsibilities:
 - `evidence_provider_catalog` stores each provider identity/configuration once. Measurement evidence uses `provider_ref`; its completed status and measured value are represented by the measurement itself instead of repeated inside every evidence object.
 - `guidance_catalog` contains exactly one immutable `when_to_ignore` record for each of the 23 smells. All 28 rules inherit one by `guidance_ref`; findings never duplicate the guidance text.
 - `suppressions` audits every syntactically valid directive and whether it was `used`, `unused`, or `unverified_due_to_incomplete_rule`. Invalid directives are reported in `errors` and make the scan incomplete.
+- `source_roles` lists every resolved special source artifact without removing it from the corpus. Each record identifies the role, framework, owning Implementation, path and path scope, declared or inferred source, confidence, versioned detector contract, optional framework-shell span, and detector evidence. A declared configuration path carries `configuration_status: "declared_unverified"` until the scanner has framework-specific proof that it was resolved. One explicit declaration cannot span multiple Implementations.
+- `source_role_candidates` lists unresolved, low-confidence path signals such as a `versions` component. Candidates never change measurements, findings, or blocking status; an explicit anchored role is the deterministic way to resolve a custom framework layout.
+- `migration_artifacts` inventories recognized migration bundle members included in the input digest. SQL bodies carry `status: "migration_body_not_analyzed"`; Prisma 8 operation and metadata records distinguish executed operations from metadata. Every artifact names the exact detector contract such as `drizzle:v1` or `prisma:8-rc-ops`. When ownership comes from a statically located config, dependency, source expression, or repository launcher, `declaration_path` and `declaration_span` identify that evidence exactly. SQLx artifacts also expose `integrity`: its checksum mechanism, whether bytes are normalized through configured `ignored-chars`, and the governing `sqlx.toml` path when present.
+- `migration_artifact_candidates` lists migration-shaped files whose framework ownership could not be resolved. Each record states the matched path convention, evidence sought, and unresolved reason. Candidate paths and bytes are included in the input digest, candidates are never treated as analyzed, and their presence discloses `migration_artifact_ownership_unresolved` in `limitations`.
 
 Every guidance record contains `guidance_ref`, `smell_id`, version, provenance, source URL, checked date, and an ordered list of conditions. `refactoring_guru_verbatim` means the item text is an attributed excerpt from the linked page. `smells_authored` means Smells supplies the guidance because that page has no explicit “When to Ignore” section. The pack is embedded and versioned; ordinary scans never download it.
 
@@ -34,6 +38,12 @@ If the targeted rule cannot complete, Smells cannot prove that its directive is 
 
 An accepted finding remains in `findings` with `status: "ignored_match"`, `blocking: false`, and its full suppression record. It is counted in `summary.ignored_findings` and the relevant smell result. A scan whose only matches are accepted required findings exits `0` with `passed_with_ignored_findings`.
 
+## Role-adjusted migration findings
+
+A confirmed database migration remains in `scanned_files`, implementation ownership, the input digest, measurements, findings, and history. Only canonical framework declarations receive a `role_context`. The context records `source_role`, `declaration_role`, framework, owning Implementation, declared/inferred source, confidence, detector contract, the exact measured declaration span when statically located, path scope, detector evidence, and disposition. A `migration_down` context therefore points to `down`, not to the framework shell or neighboring `up` declaration.
+
+When a canonical migration entrypoint exceeds the generic line limit, it remains a matched finding and measurement with `status: "reported_by_role"`, `blocking: false`, and `disposition: "reported_by_role"`. It counts as a review signal. Helpers, callbacks, data transforms, runtime migration launchers, and behavioral-complexity rules retain their normal status. This is auditable rule applicability, not file exclusion or suppression.
+
 ## Policy selection and coverage
 
 `policy_selection` records the complete uv-style group resolution: defaults, inclusions, only-groups, exclusions, boolean controls, groups and members, and selected/active/excluded rule IDs. `selected_rule_ids` reflects group algebra; `active_rule_ids` additionally removes explicit legacy `off` rules.
@@ -44,7 +54,7 @@ Every rule inside `coverage` repeats `selected` and `groups`. `measurement_statu
 
 ## Repository implementation model
 
-An implementation is a repository subtree owned by the nearest ancestor `Cargo.toml`, `pyproject.toml`, or `package.json` under the captured root. Nested manifests take precedence. Multiple manifests in one directory describe one multi-runtime implementation. Manifests are captured but never executed. Unowned source is reported as `implementation_id: "__unowned__"`.
+An implementation is a repository subtree owned by the nearest ancestor `Cargo.toml`, `pyproject.toml`, or `package.json` under the captured root. Nested ownership manifests take precedence. Auxiliary configuration such as `sqlx.toml` is attached to that owner and cannot create an Implementation boundary. Multiple ownership manifests in one directory describe one multi-runtime implementation. Manifests are captured but never executed. Unowned source is reported as `implementation_id: "__unowned__"`.
 
 `implementation_results` is ordered by repository-relative root, with `__unowned__` last. Each entry contains ownership/runtime metadata, scanned-file count, a local summary, and 23 smell results. A cross-implementation finding can affect more than one implementation, so local finding counts must not be summed. `matched_finding_indices` always addresses the top-level `findings` array.
 

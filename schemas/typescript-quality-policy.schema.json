@@ -21,7 +21,7 @@
       "const": "typescript-v1"
     },
     "scanner_version": {
-      "const": "0.5.0"
+      "const": "0.6.0"
     },
     "scope": {
       "const": "authored_source"
@@ -52,6 +52,14 @@
           ]
         }
       }
+    },
+    "source_roles": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/source_role"
+      },
+      "default": []
     },
     "limits": {
       "type": "object",
@@ -112,6 +120,14 @@
           "typescript.navigation_chains"
         ]
       },
+      "properties": {
+        "typescript.function_lines": {
+          "$ref": "#/$defs/selection_v2"
+        },
+        "typescript.class_method_lines": {
+          "$ref": "#/$defs/selection_v2"
+        }
+      },
       "additionalProperties": {
         "$ref": "#/$defs/selection"
       }
@@ -122,7 +138,28 @@
     }
   },
   "$defs": {
-    "selection": {
+    "source_role": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "framework", "paths"],
+      "properties": {
+        "role": {"const": "database_migration"},
+        "framework": {"enum": ["typeorm", "knex", "mikro_orm", "kysely", "sequelize_umzug", "prisma_8"]},
+        "paths": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^/[^\\\\?\\[\\]{}]+$"}
+        },
+        "configuration": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^/[^*?\\\\\\[\\]{}]+$"},
+          "default": []
+        }
+      }
+    },
+    "selection_contract": {
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -132,7 +169,7 @@
       ],
       "properties": {
         "version": {
-          "const": 1
+          "type": "integer"
         },
         "mode": {
           "enum": [
@@ -173,6 +210,18 @@
           }
         }
       }
+    },
+    "selection": {
+      "allOf": [
+        {"$ref": "#/$defs/selection_contract"},
+        {"properties": {"version": {"const": 1}}}
+      ]
+    },
+    "selection_v2": {
+      "allOf": [
+        {"$ref": "#/$defs/selection_contract"},
+        {"properties": {"version": {"const": 2}}}
+      ]
     }
   }
 }

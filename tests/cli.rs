@@ -28,7 +28,11 @@ impl Workspace {
         workspace
     }
     fn source(&self, path: &str, source: &str) {
-        fs::write(self.path.join(path), source).unwrap();
+        let path = self.path.join(path);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(path, source).unwrap();
     }
     fn policy(&self, value: &Value) {
         fs::write(
@@ -76,6 +80,445 @@ impl Workspace {
             String::from_utf8_lossy(&result.stderr)
         );
     }
+}
+
+#[test]
+fn refinery_rust_migration_builder_is_inferred_and_reported_by_role() {
+    let workspace =
+        Workspace::new("use refinery::embed_migrations;\nembed_migrations!(\"migrations\");\n");
+    workspace.source(
+        "migrations/V1__create_accounts.rs",
+        concat!(
+            "pub fn migration() -> String {\n",
+            "    let mut sql = String::new();\n",
+            "    sql.push_str(\"CREATE TABLE accounts (id INTEGER);\");\n",
+            "    sql.push_str(\"CREATE INDEX ix_accounts_id ON accounts(id);\");\n",
+            "    sql.push_str(\"ALTER TABLE accounts ADD COLUMN name TEXT;\");\n",
+            "    sql\n",
+            "}\n",
+        ),
+    );
+    workspace.modify("/rules/rust.function_lines/parameters/maximum", json!(3));
+
+    let output = workspace.check();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let data = report(&output);
+    let role = data["source_roles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|role| role["path"] == "migrations/V1__create_accounts.rs")
+        .expect("Refinery source role");
+    assert_eq!(role["framework"], "refinery");
+    assert_eq!(role["source"], "inferred");
+    assert_eq!(
+        role["evidence"],
+        json!([
+            "versioned_filename:refinery",
+            "canonical_signature:migration_to_string",
+            "embedding_call:embed_migrations"
+        ])
+    );
+    let finding = data["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| {
+            finding["rule_id"] == "rust.function_lines"
+                && finding["location"]["path"] == "migrations/V1__create_accounts.rs"
+        })
+        .expect("long Refinery builder");
+    assert_eq!(finding["status"], "reported_by_role");
+    assert_eq!(finding["blocking"], false);
+    assert_eq!(
+        finding["role_context"]["declaration_role"],
+        "migration_sql_builder"
+    );
+}
+
+#[test]
+fn refinery_embedding_does_not_classify_a_different_directory() {
+    let workspace =
+        Workspace::new("use refinery::embed_migrations;\nembed_migrations!(\"migrations\");\n");
+    workspace.source(
+        "legacy/V1__not_embedded.rs",
+        concat!(
+            "pub fn migration() -> String {\n",
+            "    let mut sql = String::new();\n",
+            "    sql.push_str(\"CREATE TABLE legacy (id INTEGER);\");\n",
+            "    sql.push_str(\"CREATE INDEX legacy_id ON legacy(id);\");\n",
+            "    sql\n",
+            "}\n",
+        ),
+    );
+    workspace.modify("/rules/rust.function_lines/parameters/maximum", json!(2));
+
+    let output = workspace.check();
+    assert_eq!(output.status.code(), Some(1));
+    let data = report(&output);
+    assert_eq!(data["source_roles"], json!([]));
+    assert_eq!(
+        data["source_role_candidates"][0]["evidence"],
+        json!(["unresolved_versioned_filename:refinery"])
+    );
+    let finding = data["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| finding["location"]["path"] == "legacy/V1__not_embedded.rs")
+        .expect("unembedded Refinery-like builder remains blocking");
+    assert_eq!(finding["status"], "violation");
+}
+
+#[test]
+fn seaorm_migration_type_reports_aggregate_function_lines_by_role() {
+    let workspace = Workspace::new(concat!(
+        "use sea_orm_migration::prelude::*;\n",
+        "mod m20261009_accounts;\n",
+        "pub struct Migrator;\n",
+        "impl MigratorTrait for Migrator {\n",
+        "    fn migrations() -> Vec<Box<dyn MigrationTrait>> {\n",
+        "        vec![Box::new(m20261009_accounts::Migration)]\n",
+        "    }\n",
+        "}\n",
+    ));
+    workspace.source(
+        "src/m20261009_accounts.rs",
+        concat!(
+            "use sea_orm_migration::prelude::*;\n",
+            "#[derive(DeriveMigrationName)]\n",
+            "pub struct Migration;\n\n",
+            "#[async_trait::async_trait]\n",
+            "impl MigrationTrait for Migration {\n",
+            "    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {\n",
+            "        let table = Table::create();\n",
+            "        manager.create_table(table).await?;\n",
+            "        manager.create_index(Index::create()).await?;\n",
+            "        Ok(())\n",
+            "    }\n\n",
+            "    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {\n",
+            "        manager.drop_table(Table::drop()).await?;\n",
+            "        Ok(())\n",
+            "    }\n",
+            "}\n",
+        ),
+    );
+    workspace.modify(
+        "/rules/rust.type_function_lines/parameters/maximum",
+        json!(4),
+    );
+
+    let output = workspace.check();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let data = report(&output);
+    assert_eq!(data["source_roles"][0]["framework"], "sea_orm");
+    let finding = data["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| {
+            finding["rule_id"] == "rust.type_function_lines"
+                && finding["location"]["path"] == "src/m20261009_accounts.rs"
+        })
+        .expect("SeaORM aggregate function lines");
+    assert_eq!(finding["status"], "reported_by_role");
+    assert_eq!(finding["blocking"], false);
+    assert_eq!(
+        finding["role_context"]["declaration_role"],
+        "migration_shell"
+    );
+}
+
+#[test]
+fn seaorm_shape_without_registry_stays_an_unresolved_candidate() {
+    let workspace = Workspace::new(concat!(
+        "use sea_orm_migration::prelude::*;\n",
+        "mod m20261009_accounts;\n",
+        "pub struct Migrator;\n",
+        "impl MigratorTrait for Migrator {\n",
+        "    fn migrations() -> Vec<Box<dyn MigrationTrait>> { vec![] }\n",
+        "}\n",
+    ));
+    workspace.source(
+        "src/m20261009_accounts.rs",
+        concat!(
+            "use sea_orm_migration::prelude::*;\n",
+            "#[derive(DeriveMigrationName)]\n",
+            "pub struct Migration;\n",
+            "#[async_trait::async_trait]\n",
+            "impl MigrationTrait for Migration {\n",
+            "    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {\n",
+            "        manager.create_table(Table::create()).await?;\n",
+            "        manager.create_index(Index::create()).await?;\n",
+            "        manager.alter_table(Table::alter()).await?;\n",
+            "        Ok(())\n",
+            "    }\n",
+            "}\n",
+        ),
+    );
+    workspace.modify(
+        "/rules/rust.type_function_lines/parameters/maximum",
+        json!(3),
+    );
+
+    let output = workspace.check();
+    assert_eq!(output.status.code(), Some(1));
+    let data = report(&output);
+    assert_eq!(data["source_roles"], json!([]));
+    assert_eq!(
+        data["source_role_candidates"][0]["evidence"],
+        json!(["unresolved_framework_signal:sea_orm_migration"])
+    );
+    let finding = data["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| finding["rule_id"] == "rust.type_function_lines")
+        .expect("unregistered SeaORM shape remains blocking");
+    assert_eq!(finding["status"], "violation");
+}
+
+#[test]
+fn rust_sql_migration_inventory_honors_framework_evidence_and_refinery_path() {
+    let workspace = Workspace::new(concat!(
+        "use diesel_migrations::{embed_migrations, EmbeddedMigrations};\n",
+        "const DIESEL: EmbeddedMigrations = embed_migrations!();\n",
+        "static SQLX: sqlx::migrate::Migrator = sqlx::migrate!(\"./sqlx\");\n",
+        "refinery::embed_migrations!(\"refinery\");\n",
+    ));
+    workspace.source(
+        "migrations/20261009000000_accounts/up.sql",
+        "CREATE TABLE accounts(id integer);\n",
+    );
+    workspace.source(
+        "sqlx/20261009000000_accounts.up.sql",
+        "CREATE TABLE accounts(id integer);\n",
+    );
+    workspace.source(
+        "refinery/V1__accounts.sql",
+        "CREATE TABLE accounts(id integer);\n",
+    );
+    workspace.source(
+        "legacy/V2__not_embedded.sql",
+        "CREATE TABLE legacy(id integer);\n",
+    );
+    workspace.source(
+        "legacy/20261009000000_not_embedded.sql",
+        "CREATE TABLE legacy_sqlx(id integer);\n",
+    );
+    workspace.source(
+        "archive/20261009000000_not_embedded/up.sql",
+        "CREATE TABLE legacy_diesel(id integer);\n",
+    );
+
+    let output = workspace.check();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let data = report(&output);
+    let artifacts = data["migration_artifacts"].as_array().unwrap();
+    assert_eq!(artifacts.len(), 3, "{artifacts:?}");
+    assert_eq!(artifacts[0]["framework"], "diesel");
+    assert_eq!(artifacts[1]["framework"], "refinery");
+    assert_eq!(artifacts[2]["framework"], "sqlx");
+    assert!(
+        artifacts
+            .iter()
+            .all(|artifact| !artifact["path"].as_str().unwrap().contains("not_embedded"))
+    );
+}
+
+#[test]
+fn rust_sql_migrations_are_discovered_from_project_and_cli_configuration() {
+    let workspace = Workspace::new(concat!(
+        "use refinery::load_sql_migrations;\n",
+        "pub fn migrations() { let _ = load_sql_migrations(\"database/refinery\"); }\n",
+    ));
+    workspace.source(
+        "Cargo.toml",
+        concat!(
+            "[package]\nname = \"migration-runner\"\nversion = \"0.1.0\"\n",
+            "[dependencies]\n",
+            "diesel_migrations = \"2\"\n",
+            "refinery = \"0.9\"\n",
+            "sqlx = \"0.9\"\n",
+        ),
+    );
+    workspace.source(
+        "sqlx.toml",
+        concat!(
+            "[migrate]\n",
+            "migrations-dir = \"database/sqlx\"\n",
+            "ignored-chars = [\" \", \"\\t\", \"\\r\", \"\\n\"]\n",
+        ),
+    );
+    workspace.source(
+        "Justfile",
+        concat!(
+            "migrate:\n    refinery migrate -p ./database/refinery-cli\n",
+            "announce:\n    @echo \"run refinery migrate -p ./database/echo-only\"\n",
+            "usage := '''\n  refinery migrate -p ./database/string-only\n'''\n",
+            "help:\n    #!/usr/bin/env sh\n    cat <<'EOF'\n    refinery migrate -p ./database/heredoc-only\n    EOF\n",
+            "continued:\n    printf '%s\\n' \\\n      refinery migrate -p ./database/continued-only\n",
+        ),
+    );
+    workspace.source(
+        "tools/Justfile",
+        "migrate:\n    refinery migrate --path ./database/not-root\n",
+    );
+    workspace.source(
+        "migrations/202610110001_accounts/up.sql",
+        "CREATE TABLE diesel_accounts(id integer);\n",
+    );
+    workspace.source(
+        "migrations/202610110001_accounts/down.sql",
+        "DROP TABLE diesel_accounts;\n",
+    );
+    workspace.source(
+        "migrations/V2__refinery_accounts.sql",
+        "CREATE TABLE refinery_accounts(id integer);\n",
+    );
+    workspace.source(
+        "database/refinery/V3__refinery_audit.sql",
+        "CREATE TABLE refinery_audit(id integer);\n",
+    );
+    workspace.source(
+        "database/refinery-cli/V4__refinery_cli.sql",
+        "CREATE TABLE refinery_cli(id integer);\n",
+    );
+    workspace.source(
+        "database/not-root/V5__not_owned.sql",
+        "CREATE TABLE not_owned(id integer);\n",
+    );
+    workspace.source(
+        "database/echo-only/V6__not_a_command.sql",
+        "CREATE TABLE not_a_command(id integer);\n",
+    );
+    workspace.source(
+        "database/string-only/V7__not_a_recipe.sql",
+        "CREATE TABLE not_a_recipe(id integer);\n",
+    );
+    workspace.source(
+        "database/heredoc-only/V8__not_a_command.sql",
+        "CREATE TABLE not_a_command(id integer);\n",
+    );
+    workspace.source(
+        "database/continued-only/V9__not_a_command.sql",
+        "CREATE TABLE not_a_command(id integer);\n",
+    );
+    workspace.source(
+        "database/sqlx/202610110001_sqlx_accounts.sql",
+        "CREATE TABLE sqlx_accounts(id integer);\n",
+    );
+
+    let output = workspace.check();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let data = report(&output);
+    let artifacts = data["migration_artifacts"].as_array().unwrap();
+    assert_eq!(artifacts.len(), 6, "{artifacts:?}");
+    let sqlx = artifacts
+        .iter()
+        .find(|artifact| artifact["framework"] == "sqlx")
+        .expect("configured SQLx migration");
+    assert_eq!(
+        sqlx["integrity"],
+        json!({
+            "mechanism": "sqlx_content_checksum",
+            "content_normalization": "configured_ignored_characters",
+            "configuration_path": "sqlx.toml"
+        })
+    );
+    assert_eq!(sqlx["declaration_path"], "sqlx.toml");
+    assert_eq!(sqlx["declaration_span"]["start_line"], 2);
+    assert!(artifacts.iter().any(|artifact| {
+        artifact["framework"] == "refinery"
+            && artifact["path"] == "database/refinery/V3__refinery_audit.sql"
+    }));
+    let refinery_cli = artifacts
+        .iter()
+        .find(|artifact| artifact["path"] == "database/refinery-cli/V4__refinery_cli.sql")
+        .expect("Refinery CLI literal path migration");
+    assert_eq!(refinery_cli["declaration_path"], "Justfile");
+    assert_eq!(refinery_cli["declaration_span"]["start_line"], 2);
+    let candidates = data["migration_artifact_candidates"].as_array().unwrap();
+    assert!(
+        candidates
+            .iter()
+            .any(|candidate| candidate["path"] == "database/not-root/V5__not_owned.sql")
+    );
+    assert!(
+        candidates
+            .iter()
+            .any(|candidate| candidate["path"] == "database/echo-only/V6__not_a_command.sql")
+    );
+    assert!(
+        candidates
+            .iter()
+            .any(|candidate| candidate["path"] == "database/string-only/V7__not_a_recipe.sql")
+    );
+    assert!(
+        candidates
+            .iter()
+            .any(|candidate| candidate["path"] == "database/heredoc-only/V8__not_a_command.sql")
+    );
+    assert!(
+        candidates
+            .iter()
+            .any(|candidate| candidate["path"] == "database/continued-only/V9__not_a_command.sql")
+    );
+}
+
+#[test]
+fn refinery_justfile_working_directory_overrides_fail_closed() {
+    let workspace = Workspace::new("pub fn migration_runner() {}\n");
+    workspace.source(
+        "Cargo.toml",
+        concat!(
+            "[package]\nname = \"migration-runner\"\nversion = \"0.1.0\"\n",
+            "[dependencies]\nrefinery = \"0.9\"\n",
+        ),
+    );
+    workspace.source(
+        "Justfile",
+        concat!(
+            "set no-cd\n",
+            "migrate:\n    refinery migrate -p ./database/history\n",
+        ),
+    );
+    workspace.source(
+        "database/history/V1__accounts.sql",
+        "CREATE TABLE accounts(id integer);\n",
+    );
+
+    let output = workspace.check();
+    assert_eq!(output.status.code(), Some(0));
+    let data = report(&output);
+    assert_eq!(data["migration_artifacts"], json!([]));
+    assert_eq!(
+        data["migration_artifact_candidates"][0]["path"],
+        "database/history/V1__accounts.sql"
+    );
 }
 
 #[test]
@@ -231,6 +674,7 @@ fn uv_style_group_selection_is_deterministic_and_exclusions_win() {
     for arguments in [
         vec!["--only-group", "source"],
         vec!["--all-groups", "--no-group", "evidence"],
+        vec!["--no-default-groups", "--group", "source"],
     ] {
         let mut command = vec![
             "check",
@@ -512,6 +956,48 @@ fn unknown_and_conflicting_group_selectors_fail_clearly() {
         assert_eq!(output.status.code(), Some(2), "{output:?}");
         assert!(!String::from_utf8_lossy(&output.stderr).is_empty());
     }
+
+    for invalid in ["-", ""] {
+        let output = workspace.command(&[
+            "check",
+            "--path",
+            ".",
+            "--policy",
+            "quality-policy.json",
+            "--group",
+            invalid,
+        ]);
+        assert_eq!(output.status.code(), Some(2));
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("invalid value for --group"),
+            "{output:?}"
+        );
+    }
+}
+
+#[test]
+fn output_formats_are_limited_to_scan_and_policy_display_commands() {
+    let workspace = Workspace::new("fn concise() {}");
+    let invalid_scan_format = workspace.command(&[
+        "check",
+        "--path",
+        ".",
+        "--policy",
+        "quality-policy.json",
+        "--format",
+        "yaml",
+    ]);
+    assert_eq!(invalid_scan_format.status.code(), Some(2));
+
+    let invalid_contract_format = workspace.command(&[
+        "contracts",
+        "validate",
+        "--policy",
+        "quality-policy.json",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(invalid_contract_format.status.code(), Some(2));
 }
 impl Drop for Workspace {
     fn drop(&mut self) {
@@ -631,6 +1117,44 @@ fn registry_covers_all_23_smells_and_exposes_readiness() {
         smell["applicability"] == "not_applicable_native_rust"
             || !smell["rules"].as_array().unwrap().is_empty()
     }));
+}
+
+#[test]
+fn no_arguments_prints_help_without_panicking() {
+    let output = Command::new(env!("CARGO_BIN_EXE_smells")).output().unwrap();
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("smells check"));
+}
+
+#[test]
+fn policy_show_consumes_selectors_and_value_options_in_sequence() {
+    let workspace = Workspace::new("fn concise() {}");
+    let output = workspace.command(&[
+        "policy",
+        "show",
+        "--all-groups",
+        "--policy",
+        "quality-policy.json",
+        "--format",
+        "json",
+    ]);
+
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(report(&output)["status"], "resolved_policy");
+}
+
+#[test]
+fn rules_rejects_an_unknown_flag_even_when_its_arity_is_valid() {
+    let output = Command::new(env!("CARGO_BIN_EXE_smells"))
+        .args(["rules", "--unknown", "rust-v1"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("usage: smells rules [--rule-pack PACK]")
+    );
 }
 
 #[test]
@@ -823,7 +1347,7 @@ fn report_aggregates_rule_evidence_by_canonical_smell_pattern() {
     let output = workspace.check();
     assert_eq!(output.status.code(), Some(1));
     let data = report(&output);
-    assert_eq!(data["report_schema_version"], 7);
+    assert_eq!(data["report_schema_version"], 11);
     assert_eq!(data["guidance_catalog"].as_array().unwrap().len(), 23);
     assert!(
         data["measurements"].as_array().unwrap().len() > data["findings"].as_array().unwrap().len(),
@@ -835,7 +1359,7 @@ fn report_aggregates_rule_evidence_by_canonical_smell_pattern() {
             .unwrap()
             .iter()
             .all(|finding| finding["evaluation"]["matched"] == true),
-        "schema-7 findings contain only matched evaluations"
+        "schema-8 findings contain only matched evaluations"
     );
     let results = data["smell_results"].as_array().unwrap();
     assert_eq!(results.len(), 23);
@@ -906,6 +1430,9 @@ fn table_output_is_actionable_while_json_report_is_saved() {
     for expected in [
         "Scan summary | verdict:",
         "Data Class | data-class | review_match",
+        "Finding | Smell | Repository symbols | Metric | Value | Matches when | Threshold | Status | Repository evidence locations",
+        "0 | Data Class | src/lib.rs::Account | fields and non-accessor operations",
+        "Actionable findings for __unowned__:",
         "Actionable finding",
         "Issue: Data Class: rust.data_class indicator",
         "Observed versus threshold:",
@@ -937,6 +1464,44 @@ fn table_output_is_actionable_while_json_report_is_saved() {
         2,
         "every finding must carry its own reference and guidance"
     );
+}
+
+#[test]
+fn table_output_caps_related_excerpts_and_reports_the_omitted_count() {
+    let workspace = Workspace::new(concat!(
+        "fn one(a: i32, b: i32, c: i32) {}\n",
+        "fn two(a: i32, b: i32, c: i32) {}\n",
+        "fn three(a: i32, b: i32, c: i32) {}\n",
+        "fn four(a: i32, b: i32, c: i32) {}\n",
+        "fn five(a: i32, b: i32, c: i32) {}\n",
+        "fn six(a: i32, b: i32, c: i32) {}\n",
+        "fn seven(a: i32, b: i32, c: i32) {}\n",
+    ));
+    let output = workspace.command(&[
+        "check",
+        "--path",
+        ".",
+        "--policy",
+        "quality-policy.json",
+        "--only-group",
+        "source",
+        "--format",
+        "table",
+    ]);
+
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("Related source excerpt 5:"), "{stdout}");
+    assert!(!stdout.contains("Related source excerpt 6:"), "{stdout}");
+    assert!(
+        stdout.contains("Related source excerpts omitted: 1"),
+        "{stdout}"
+    );
+    assert!(
+        !stdout.contains("Related source excerpts omitted: 0"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("    >      1 | fn one"), "{stdout}");
 }
 
 #[test]
@@ -988,6 +1553,46 @@ fn hook_mode_saves_one_indexed_finding_log_and_keeps_stdout_compact() {
         serde_json::from_slice(&fs::read(workspace.path.join("smells-report.json")).unwrap())
             .unwrap();
     assert_eq!(saved["findings"][0]["finding_id"], "F000001");
+}
+
+#[test]
+fn finding_log_keeps_blocking_ignored_and_review_targets_with_focus_markers() {
+    let mut source = String::from("pub fn oversized() {\n");
+    for index in 0..170 {
+        source.push_str(&format!("    let value_{index} = {index};\n"));
+    }
+    source.push_str("}\n\n");
+    source.push_str("// smells: ignore[rust.function_arguments] -- external callback shape\n");
+    source.push_str(
+        "fn callback(a: i32, b: i32, c: i32, d: i32, e: i32, f: i32, g: i32, h: i32, i: i32, j: i32, k: i32, l: i32) {}\n\n",
+    );
+    source.push_str("pub struct Account { pub name: String, pub email: String }\n");
+    let workspace = Workspace::new(&source);
+    let output = workspace.command(&[
+        "check",
+        "--path",
+        ".",
+        "--policy",
+        "quality-policy.json",
+        "--only-group",
+        "source",
+        "--format",
+        "table",
+        "--log",
+        "smells-findings.log",
+    ]);
+
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let log = fs::read_to_string(workspace.path.join("smells-findings.log")).unwrap();
+    for expected in [
+        "Status: blocking",
+        "Status: ignored",
+        "Status: review",
+        "Accepted suppression:",
+        "  >      1 | pub fn oversized() {",
+    ] {
+        assert!(log.contains(expected), "missing {expected:?} in:\n{log}");
+    }
 }
 
 #[test]
@@ -1577,12 +2182,24 @@ fn malformed_unknown_duplicate_and_out_of_range_policy_values_error() {
     for (pointer, value) in [
         ("/schema_version", json!(1)),
         ("/scanner_version", json!("latest")),
-        ("/rules/rust.function_lines/version", json!(2)),
+        ("/rules/rust.function_lines/version", json!(3)),
         (
             "/rules/rust.primitive_slots/parameters/minimum_share_percent",
             json!(101),
         ),
         ("/exceptions", json!([{"reason":"ignore everything"}])),
+        (
+            "/source_roles",
+            json!([{"role":"database_migration","framework":"alembic","paths":["/migrations/*.rs"]}]),
+        ),
+        (
+            "/source_roles",
+            json!([{"role":"database_migration","framework":"refinery","paths":["migrations/*.rs"]}]),
+        ),
+        (
+            "/source_roles",
+            json!([{"role":"database_migration","framework":"refinery","paths":["/../migrations/*.rs"]}]),
+        ),
     ] {
         workspace.policy(
             &serde_json::from_str(include_str!("../examples/quality-policy.json")).unwrap(),
@@ -2203,6 +2820,12 @@ fn opt_in_scan_metrics_explain_the_exact_join_without_changing_the_report() {
     assert!(metrics["syntax_tokens"].as_u64().unwrap() > 0);
     assert!(metrics["normalized_tokens"].as_u64().unwrap() > 0);
     assert!(metrics["eligible_fingerprints"].as_u64().unwrap() > 0);
+    assert!(
+        metrics["unique_candidates"].as_u64().unwrap()
+            + metrics["candidates_rejected_by_length"].as_u64().unwrap()
+            + metrics["candidates_rejected_by_position"].as_u64().unwrap()
+            > 0
+    );
     assert!(metrics["exact_comparisons_charged"].as_u64().unwrap() > 0);
-    assert!(metrics["peak_resident_bytes"].as_u64().unwrap() > 0);
+    assert!(metrics["peak_resident_bytes"].as_u64().unwrap() > 1);
 }

@@ -2,7 +2,7 @@ use super::{
     common::{location_at, observation, primitive_type, simple_names},
     model::SourceModel,
 };
-use crate::{evidence::Observation, input::Input, policy::Rule, report::Location};
+use crate::{core::model::Input, evidence::Observation, policy::Rule, report::Location};
 use regex::Regex;
 use serde_json::json;
 use std::{
@@ -257,4 +257,188 @@ pub(super) fn primitive_slots(rule: &Rule, model: &SourceModel) -> Vec<Observati
             )
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        collectors::model::{ClassFact, FieldFact},
+        core::model::History,
+        policy::{Limits, Policy, ResolvedSelection},
+    };
+    use std::sync::Arc;
+
+    fn rule(id: &str) -> Rule {
+        Rule {
+            id: id.into(),
+            version: 1,
+            smell: "test".into(),
+            kind: "threshold".into(),
+            implementation: "test".into(),
+            inputs: Vec::new(),
+            parameters: BTreeMap::new(),
+            contract: "test".into(),
+        }
+    }
+
+    fn input(rule_pack: &str, files: &[(&str, &str)]) -> Input {
+        Input {
+            files: files
+                .iter()
+                .map(|(path, source)| ((*path).into(), (*source).into()))
+                .collect(),
+            manifests: BTreeMap::new(),
+            artifacts: BTreeMap::new(),
+            artifact_candidates: BTreeMap::new(),
+            implementations: Vec::new(),
+            source_roles: Vec::new(),
+            history: History::default(),
+            policy: Policy {
+                schema_version: 1,
+                rule_pack: rule_pack.into(),
+                scanner_version: env!("CARGO_PKG_VERSION").into(),
+                scope: "repository".into(),
+                default_groups: vec!["all".into()],
+                exclude_directories: Vec::new(),
+                source_roles: Vec::new(),
+                limits: Limits {
+                    maximum_files: 10,
+                    maximum_pairs: 10,
+                    maximum_group_combinations: 10,
+                },
+                rules: BTreeMap::new(),
+                exceptions: Vec::new(),
+                resolved: ResolvedSelection::default(),
+            },
+            digest: "0".repeat(64),
+            mode: "test",
+        }
+    }
+
+    fn model_with_code(path: &str, source: &str) -> SourceModel {
+        SourceModel {
+            code_by_path: BTreeMap::from([(path.into(), Arc::from(source))]),
+            ..SourceModel::default()
+        }
+    }
+
+    #[test]
+    fn navigation_chains_count_transitions_and_preserve_one_based_locations() {
+        let source = "let value = root.first().second.third;\n  other?.child.run();\n";
+        let input = input("typescript-v1", &[("sample.ts", source)]);
+        let model = model_with_code("sample.ts", source);
+        let mut observations = Vec::new();
+        visit_navigation_chains(&model, &input, |observation| observations.push(observation))
+            .unwrap();
+
+        assert_eq!(observations.len(), 2);
+        assert_eq!(observations[0].measurements["transitions"], 3);
+        assert_eq!(observations[0].location.line, 1);
+        assert_eq!(observations[0].location.column, 13);
+        assert_eq!(observations[1].measurements["transitions"], 2);
+        assert_eq!(observations[1].location.line, 2);
+        assert_eq!(observations[1].location.column, 3);
+    }
+
+    #[test]
+    fn foreign_accesses_exclude_each_owned_receiver_but_keep_total_accesses() {
+        let source = concat!(
+            "self.owned\n",
+            "service.remote\n",
+            "this.owned\n",
+            "object.other\n",
+            "super.owned\n",
+        );
+        let observations = foreign_accesses(
+            &model_with_code("sample.py", source),
+            &input("python-v1", &[("sample.py", source)]),
+        )
+        .unwrap();
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].measurements["foreign_accesses"], 2);
+        assert_eq!(observations[0].measurements["total_accesses"], 5);
+        assert_eq!(observations[0].location.line, 2);
+        assert_eq!(observations[0].location.column, 1);
+    }
+
+    #[test]
+    fn dependency_contract_counts_only_foreign_private_accesses() {
+        let source = concat!(
+            "self._owned\n",
+            "service._token\n",
+            "service._other\n",
+            "this.#owned\n",
+        );
+        let observations = dependency_contract(
+            &rule("python.dependency_contract"),
+            &model_with_code("sample.py", source),
+            &input("python-v1", &[("sample.py", source)]),
+        )
+        .unwrap();
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].measurements["forbidden_accesses"], 2);
+        assert_eq!(observations[0].location.line, 2);
+        assert_eq!(observations[0].location.column, 1);
+    }
+
+    #[test]
+    fn rust_dependency_contract_uses_snake_case_private_field_owners() {
+        let source = concat!(
+            "fn inspect(user_account: UserAccount, other: UserAccount) {\n",
+            "  let first = user_account.secret;\n",
+            "  let second = other.secret;\n",
+            "  let third = user_account.secret;\n",
+            "  let public = user_account.public_value;\n",
+            "  let nested = user_account.nested.secret;\n",
+            "}\n",
+        );
+        let mut model = model_with_code("src/check.rs", source);
+        model.classes.push(ClassFact {
+            name: "UserAccount".into(),
+            symbol: "src/domain.rs::UserAccount".into(),
+            location: Location {
+                path: "src/domain.rs".into(),
+                line: 1,
+                column: 1,
+            },
+            type_parameters: Vec::new(),
+            source: Arc::from(""),
+            bases: Vec::new(),
+            interface: false,
+            private: false,
+            fields: vec![
+                FieldFact {
+                    name: "secret".into(),
+                    authored_type: "String".into(),
+                    temporary: false,
+                    private: true,
+                },
+                FieldFact {
+                    name: "public_value".into(),
+                    authored_type: "String".into(),
+                    temporary: false,
+                    private: false,
+                },
+                FieldFact {
+                    name: "nested.secret".into(),
+                    authored_type: "String".into(),
+                    temporary: false,
+                    private: true,
+                },
+            ],
+            methods: Vec::new(),
+            range: (0, 0),
+        });
+        let observations = dependency_contract(
+            &rule("rust.dependency_contract"),
+            &model,
+            &input("rust-v1", &[("src/check.rs", source)]),
+        )
+        .unwrap();
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].measurements["forbidden_accesses"], 2);
+        assert_eq!(observations[0].location.line, 2);
+        assert_eq!(observations[0].location.column, 15);
+    }
 }

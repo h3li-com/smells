@@ -23,7 +23,7 @@ This is the normative definition of the first Rust rule pack. The [registry](../
 ### 1. Long Method
 
 <a id="rust-function-lines"></a>
-**Implemented: rust.function_lines@1.** Maximum 100 body code lines, using the shared lexical span rule for every authored function/method with a body. Inclusive maximum; 100 passes, 101 matches. No Clippy measurement is substituted. Fixtures: 99/100/101, comments, raw strings, multiline literals, Unicode, nested functions and bodyless trait members.
+**Implemented: rust.function_lines@2.** Maximum 100 body code lines, using the shared lexical span rule for every authored function/method with a body. Inclusive maximum; 100 passes, 101 matches. No Clippy measurement is substituted. An exact Refinery `migration() -> String` Declaration Role in a versioned, embedded migration source retains the matched Measurement and Finding but is reported as a nonblocking `reported_by_role` review signal. Other functions use normal blocking semantics. Fixtures: 99/100/101, comments, raw strings, multiline literals, Unicode, nested functions and bodyless trait members.
 
 <a id="rust-function-crap"></a>
 **Built-in with optional coverage override: rust.function_crap@1.** Maximum 5. The built-in collector counts authored lexical `if`/`else if`/`for`/`while`/`match`-arm/`catch` and boolean-short-circuit decisions and emits the conservative zero-coverage CRAP upper bound `C² + C`. Complete external coverage may replace this pessimistic observation using the exact rational measurement map. This is not a promise of compatibility with cargo-crap's counting convention.
@@ -40,7 +40,7 @@ This is the normative definition of the first Rust rule pack. The [registry](../
 **Implemented: rust.type_functions@1.** Maximum 20 authored associated functions across all resolved local impls. Fixtures: 19/20/21; 12+12 split files, aliases/generics, inherent plus trait impls; same-named unrelated types; inherited default body excluded.
 
 <a id="rust-type-function-lines"></a>
-**Implemented: rust.type_function_lines@1.** Maximum 500 summed associated body code lines. Types with no authored impl bodies have an empty sum of zero, not a claim about generated behavior. Fixtures: 499/500/501 and split bodies.
+**Implemented: rust.type_function_lines@2.** Maximum 500 summed associated body code lines. Types with no authored impl bodies have an empty sum of zero, not a claim about generated behavior. A SeaORM `Migration` registered in the owning Implementation's `MigratorTrait::migrations` collection retains the aggregate Measurement and Finding but is reported as a nonblocking `reported_by_role` review signal; merely declaring the module does not qualify. Fixtures: 499/500/501 and split bodies.
 
 <a id="rust-trait-functions"></a>
 **Implemented: rust.trait_functions@1.** Maximum 20 declared required/default/static associated functions. Exclude associated constants/types and inherited supertrait members. Fixtures: 19/20/21.

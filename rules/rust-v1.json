@@ -29,12 +29,12 @@
     {"id":"middle-man","name":"Middle Man","category":"couplers","applicability":"applicable","rules":["rust.forwarding_share"]}
   ],
   "rules": [
-    {"id":"rust.function_lines","version":1,"smell":"long-method","kind":"metric","implementation":"implemented","inputs":["authored_source"],"parameters":{"maximum":100},"contract":"rust-function-lines"},
+    {"id":"rust.function_lines","version":2,"smell":"long-method","kind":"metric","implementation":"implemented","inputs":["authored_source"],"parameters":{"maximum":100},"contract":"rust-function-lines"},
     {"id":"rust.function_arguments","version":1,"smell":"long-parameter-list","kind":"metric","implementation":"implemented","inputs":["authored_source"],"parameters":{"maximum":7},"contract":"rust-function-arguments"},
     {"id":"rust.type_fields","version":1,"smell":"large-class","kind":"metric","implementation":"implemented","inputs":["authored_source"],"parameters":{"maximum":15},"contract":"rust-type-fields"},
     {"id":"rust.enum_variants","version":1,"smell":"large-class","kind":"metric","implementation":"implemented","inputs":["authored_source"],"parameters":{"maximum":20},"contract":"rust-enum-variants"},
     {"id":"rust.type_functions","version":1,"smell":"large-class","kind":"metric","implementation":"implemented","inputs":["authored_source","local_owner_resolution"],"parameters":{"maximum":20},"contract":"rust-type-functions"},
-    {"id":"rust.type_function_lines","version":1,"smell":"large-class","kind":"metric","implementation":"implemented","inputs":["authored_source","local_owner_resolution"],"parameters":{"maximum":500},"contract":"rust-type-function-lines"},
+    {"id":"rust.type_function_lines","version":2,"smell":"large-class","kind":"metric","implementation":"implemented","inputs":["authored_source","local_owner_resolution"],"parameters":{"maximum":500},"contract":"rust-type-function-lines"},
     {"id":"rust.trait_functions","version":1,"smell":"large-class","kind":"metric","implementation":"implemented","inputs":["authored_source"],"parameters":{"maximum":20},"contract":"rust-trait-functions"},
     {"id":"rust.primitive_slots","version":1,"smell":"primitive-obsession","kind":"indicator","implementation":"implemented","inputs":["authored_source"],"parameters":{"minimum_raw_slots":5,"minimum_share_percent":80},"contract":"rust-primitive-slots"},
     {"id":"rust.data_clumps","version":1,"smell":"data-clumps","kind":"indicator","implementation":"implemented","inputs":["authored_source"],"parameters":{"minimum_group_size":3,"minimum_declarations":3},"contract":"rust-data-clumps"},

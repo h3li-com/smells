@@ -1,5 +1,5 @@
 use crate::{
-    input::Input,
+    core::model::Input,
     metrics::{self, Counter},
     policy::{Policy, Registry},
     report::{FindingRelations, Location, Report},
@@ -44,6 +44,7 @@ struct SourceError {
 #[serde(deny_unknown_fields)]
 struct FunctionFact {
     symbol: String,
+    owner: Option<String>,
     location: Location,
     parameters: Vec<(String, String)>,
     lines: usize,
@@ -119,17 +120,6 @@ impl RuleNeeds {
     }
 }
 
-fn language(path: &str, registry: &Registry) -> Result<Language, String> {
-    match registry.language.as_str() {
-        "python" => Ok(tree_sitter_python::LANGUAGE.into()),
-        "typescript" if Path::new(path).extension().is_some_and(|ext| ext == "tsx") => {
-            Ok(tree_sitter_typescript::LANGUAGE_TSX.into())
-        }
-        "typescript" => Ok(tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()),
-        other => Err(format!("unsupported portable language: {other}")),
-    }
-}
-
 #[derive(Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct SourceStats {
@@ -138,8 +128,7 @@ struct SourceStats {
     normalized_tokens: usize,
 }
 
-fn configured_parser(path: &str, registry: &Registry) -> Result<Parser, String> {
-    let grammar = language(path, registry)?;
+fn configured_parser(path: &str, grammar: Language) -> Result<Parser, String> {
     let mut parser = Parser::new();
     parser
         .set_language(&grammar)
@@ -156,16 +145,19 @@ struct ParserPool {
 
 impl ParserPool {
     fn parser(&mut self, path: &str, registry: &Registry) -> Result<&mut Parser, String> {
-        let slot = match registry.language.as_str() {
-            "python" => &mut self.python,
+        let (slot, grammar) = match registry.language.as_str() {
+            "python" => (&mut self.python, tree_sitter_python::LANGUAGE.into()),
             "typescript" if Path::new(path).extension().is_some_and(|ext| ext == "tsx") => {
-                &mut self.tsx
+                (&mut self.tsx, tree_sitter_typescript::LANGUAGE_TSX.into())
             }
-            "typescript" => &mut self.typescript,
+            "typescript" => (
+                &mut self.typescript,
+                tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+            ),
             other => return Err(format!("unsupported portable language: {other}")),
         };
         if slot.is_none() {
-            *slot = Some(configured_parser(path, registry)?);
+            *slot = Some(configured_parser(path, grammar)?);
         }
         Ok(slot.as_mut().expect("parser initialized"))
     }
@@ -226,7 +218,9 @@ pub fn check(input: &Input, registry: &Registry) -> Report {
         &input.history,
     );
     report.begin_scan(input);
-    rules::validate_required_rules(registry, input, &mut report);
+    for rule_id in crate::policy::required_unimplemented_rule_ids(registry, &input.policy) {
+        report.error(format!("required detector not implemented: {rule_id}"));
+    }
     let needs = RuleNeeds::from_policy(&input.policy, &registry.language);
     let sources = input.files.iter().collect::<Vec<_>>();
     let analyses = sources
@@ -253,6 +247,47 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cache_key_bytes_encode_every_rule_need_independently() {
+        for mask in 0_u8..64 {
+            let needs = RuleNeeds {
+                functions: mask & 1 != 0,
+                parameters: mask & 2 != 0,
+                lines: mask & 4 != 0,
+                comments: mask & 8 != 0,
+                tokens: mask & 16 != 0,
+                classes: mask & 32 != 0,
+            };
+            assert_eq!(
+                needs.cache_bytes(),
+                [
+                    u8::from(mask & 1 != 0),
+                    u8::from(mask & 2 != 0),
+                    u8::from(mask & 4 != 0),
+                    u8::from(mask & 8 != 0),
+                    u8::from(mask & 16 != 0),
+                    u8::from(mask & 32 != 0),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn parser_pool_selects_tsx_grammar_and_reports_real_error_locations() {
+        let registry = crate::policy::registry("typescript-v1").unwrap();
+        let mut parsers = ParserPool::default();
+        let tsx = "export const View = () => <section>ok</section>;";
+        assert!(parse_source("view.tsx", tsx, &registry, &mut parsers).is_ok());
+        assert!(parse_source("view.ts", tsx, &registry, &mut parsers).is_err());
+
+        let broken = "export const ok = 1;\nexport function broken( {";
+        let error = parse_source("broken.ts", broken, &registry, &mut parsers).unwrap_err();
+        assert_eq!(error.message, "parse error in broken.ts");
+        assert_eq!(error.location.path, "broken.ts");
+        assert_eq!(error.location.line, 2);
+        assert_eq!(error.location.column, 1);
+    }
+
+    #[test]
     fn cache_rejects_tampering_and_symlink_redirection() {
         let base =
             std::env::temp_dir().join(format!("smells-portable-cache-test-{}", std::process::id()));
@@ -268,6 +303,13 @@ mod tests {
 
         let mut entry: serde_json::Value =
             serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let analysis_bytes = serde_json::to_vec(&analysis).unwrap();
+        assert_eq!(
+            entry["analysis_sha256"],
+            crate::input::digest(&[b"portable-fact-payload-v1", key.as_bytes(), &analysis_bytes,])
+        );
+        let reopened = cache::initialize_cache_root(&root_path).unwrap();
+        assert!(cache::cached_analysis(&reopened, relative, &key).is_some());
         entry["analysis_sha256"] = json!("0".repeat(64));
         fs::write(&path, serde_json::to_vec(&entry).unwrap()).unwrap();
         assert!(cache::cached_analysis(&root, relative, &key).is_none());
@@ -288,6 +330,18 @@ mod tests {
             assert!(cache::cached_analysis(&root, linked_entry, &key).is_none());
             cache::store_analysis(&root, linked_entry, &key, &analysis);
             assert!(cache::cached_analysis(&root, linked_entry, &key).is_none());
+
+            let blocked_entry = Path::new("blocked-entry");
+            fs::create_dir(root_path.join(blocked_entry)).unwrap();
+            cache::store_analysis(&root, blocked_entry, &key, &analysis);
+            assert!(cache::cached_analysis(&root, blocked_entry, &key).is_none());
+            assert!(fs::read_dir(&root_path).unwrap().all(|entry| {
+                !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".blocked-entry.")
+            }));
 
             let moved = base.join("moved-cache");
             let attacker = base.join("attacker-cache");

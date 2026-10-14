@@ -433,6 +433,26 @@ fn count_minimum(
 mod tests {
     use super::*;
 
+    fn policy() -> Policy {
+        let registry = crate::policy::registry("python-v1").unwrap();
+        crate::policy::parse(
+            include_str!("../examples/python-quality-policy.json"),
+            &registry,
+        )
+        .unwrap()
+    }
+
+    fn measured(values: &[(&str, u64)]) -> BTreeMap<String, u64> {
+        values
+            .iter()
+            .map(|(key, value)| ((*key).into(), *value))
+            .collect()
+    }
+
+    fn matched(id: &str, values: &[(&str, u64)], policy: &Policy) -> bool {
+        evaluate(id, &measured(values), policy).unwrap().matched
+    }
+
     #[test]
     fn every_rule_kind_has_exactly_one_evaluator() {
         let registered = EVALUATORS
@@ -441,5 +461,238 @@ mod tests {
             .collect::<BTreeSet<_>>();
         assert_eq!(registered.len(), EVALUATORS.len());
         assert_eq!(registered, RuleKind::all().collect::<BTreeSet<RuleKind>>());
+    }
+
+    #[test]
+    fn primitive_slot_count_and_share_boundaries_are_independent() {
+        let policy = policy();
+        assert!(matched(
+            "python.primitive_slots",
+            &[("raw_slots", 5), ("total_slots", 5)],
+            &policy
+        ));
+        assert!(!matched(
+            "python.primitive_slots",
+            &[("raw_slots", 4), ("total_slots", 5)],
+            &policy
+        ));
+        assert!(!matched(
+            "python.primitive_slots",
+            &[("raw_slots", 5), ("total_slots", 7)],
+            &policy
+        ));
+        assert!(
+            evaluate(
+                "python.primitive_slots",
+                &measured(&[("raw_slots", 1), ("total_slots", 0)]),
+                &policy
+            )
+            .is_err()
+        );
+        assert!(
+            evaluate(
+                "python.primitive_slots",
+                &measured(&[("raw_slots", 6), ("total_slots", 5)]),
+                &policy
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn interface_similarity_requires_both_token_counts_and_jaccard_share() {
+        let policy = policy();
+        let case = |first, intersection, second, union| {
+            matched(
+                "python.alternative_interfaces",
+                &[
+                    ("first_tokens", first),
+                    ("intersection", intersection),
+                    ("second_tokens", second),
+                    ("union", union),
+                ],
+                &policy,
+            )
+        };
+        assert!(case(20, 82, 20, 100));
+        assert!(!case(19, 82, 20, 100));
+        assert!(!case(20, 82, 19, 100));
+        assert!(!case(20, 81, 20, 100));
+        assert!(
+            evaluate(
+                "python.alternative_interfaces",
+                &measured(&[
+                    ("first_tokens", 20),
+                    ("intersection", 0),
+                    ("second_tokens", 20),
+                    ("union", 0),
+                ]),
+                &policy
+            )
+            .is_err()
+        );
+        assert!(
+            evaluate(
+                "python.alternative_interfaces",
+                &measured(&[
+                    ("first_tokens", 20),
+                    ("intersection", 101),
+                    ("second_tokens", 20),
+                    ("union", 100),
+                ]),
+                &policy
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn composite_count_rules_require_every_threshold() {
+        let policy = policy();
+        for (id, matching, nonmatching) in [
+            (
+                "python.repeated_dispatch",
+                vec![("arms_per_site", 4), ("sites", 3)],
+                vec![
+                    vec![("arms_per_site", 3), ("sites", 3)],
+                    vec![("arms_per_site", 4), ("sites", 2)],
+                ],
+            ),
+            (
+                "python.divergent_change",
+                vec![("changes", 3), ("responsibilities", 3)],
+                vec![
+                    vec![("changes", 2), ("responsibilities", 3)],
+                    vec![("changes", 3), ("responsibilities", 2)],
+                ],
+            ),
+        ] {
+            assert!(matched(id, &matching, &policy));
+            for values in nonmatching {
+                assert!(!matched(id, &values, &policy));
+            }
+        }
+    }
+
+    #[test]
+    fn temporary_field_counts_and_use_share_are_independent() {
+        let policy = policy();
+        let case = |fields, methods, possible, uses| {
+            matched(
+                "python.temporary_fields",
+                &[
+                    ("fields", fields),
+                    ("methods", methods),
+                    ("possible_uses", possible),
+                    ("uses", uses),
+                ],
+                &policy,
+            )
+        };
+        assert!(case(3, 4, 4, 1));
+        assert!(!case(2, 4, 4, 1));
+        assert!(!case(3, 3, 4, 1));
+        assert!(!case(3, 4, 4, 2));
+        assert!(!case(3, 4, 4, 4));
+        for (possible, uses) in [(0, 0), (4, 5)] {
+            assert!(
+                evaluate(
+                    "python.temporary_fields",
+                    &measured(&[
+                        ("fields", 3),
+                        ("methods", 4),
+                        ("possible_uses", possible),
+                        ("uses", uses),
+                    ]),
+                    &policy
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn forwarding_and_refused_bequest_validate_totals_counts_and_shares() {
+        let policy = policy();
+        assert!(matched(
+            "python.forwarding_share",
+            &[("forwarders", 4), ("methods", 5)],
+            &policy
+        ));
+        assert!(!matched(
+            "python.forwarding_share",
+            &[("forwarders", 4), ("methods", 4)],
+            &policy
+        ));
+        assert!(!matched(
+            "python.forwarding_share",
+            &[("forwarders", 3), ("methods", 5)],
+            &policy
+        ));
+        for values in [
+            [("forwarders", 0), ("methods", 0)],
+            [("forwarders", 6), ("methods", 5)],
+        ] {
+            assert!(evaluate("python.forwarding_share", &measured(&values), &policy).is_err());
+        }
+
+        assert!(matched(
+            "python.refused_bequest",
+            &[("inherited_members", 5), ("unused_members", 4)],
+            &policy
+        ));
+        assert!(!matched(
+            "python.refused_bequest",
+            &[("inherited_members", 2), ("unused_members", 2)],
+            &policy
+        ));
+        assert!(!matched(
+            "python.refused_bequest",
+            &[("inherited_members", 5), ("unused_members", 3)],
+            &policy
+        ));
+        for values in [
+            [("inherited_members", 0), ("unused_members", 0)],
+            [("inherited_members", 5), ("unused_members", 6)],
+        ] {
+            assert!(evaluate("python.refused_bequest", &measured(&values), &policy).is_err());
+        }
+    }
+
+    #[test]
+    fn crap_and_foreign_access_ratios_use_exact_integer_boundaries() {
+        let policy = policy();
+        assert!(!matched(
+            "python.function_crap",
+            &[("denominator", 2), ("numerator", 10)],
+            &policy
+        ));
+        assert!(matched(
+            "python.function_crap",
+            &[("denominator", 2), ("numerator", 11)],
+            &policy
+        ));
+
+        assert!(!matched(
+            "python.foreign_accesses",
+            &[("foreign_accesses", 6), ("total_accesses", 10)],
+            &policy
+        ));
+        assert!(matched(
+            "python.foreign_accesses",
+            &[("foreign_accesses", 7), ("total_accesses", 10)],
+            &policy
+        ));
+        assert!(!matched(
+            "python.foreign_accesses",
+            &[("foreign_accesses", 4), ("total_accesses", 5)],
+            &policy
+        ));
+        for values in [
+            [("foreign_accesses", 0), ("total_accesses", 0)],
+            [("foreign_accesses", 6), ("total_accesses", 5)],
+        ] {
+            assert!(evaluate("python.foreign_accesses", &measured(&values), &policy).is_err());
+        }
     }
 }

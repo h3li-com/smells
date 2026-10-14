@@ -1,6 +1,45 @@
 use super::extract::extract_facts;
 use super::*;
 
+#[cfg(unix)]
+fn directory_custom_flags() -> libc::c_int {
+    use std::ops::BitOr;
+
+    libc::O_DIRECTORY
+        .bitor(libc::O_NOFOLLOW)
+        .bitor(libc::O_CLOEXEC)
+}
+
+#[cfg(unix)]
+fn secure_directory_flags() -> libc::c_int {
+    use std::ops::BitOr;
+
+    libc::O_RDONLY
+        .bitor(libc::O_DIRECTORY)
+        .bitor(libc::O_NOFOLLOW)
+        .bitor(libc::O_CLOEXEC)
+}
+
+#[cfg(unix)]
+fn secure_read_file_flags() -> libc::c_int {
+    use std::ops::BitOr;
+
+    libc::O_RDONLY
+        .bitor(libc::O_NOFOLLOW)
+        .bitor(libc::O_CLOEXEC)
+}
+
+#[cfg(unix)]
+fn secure_create_file_flags() -> libc::c_int {
+    use std::ops::BitOr;
+
+    libc::O_WRONLY
+        .bitor(libc::O_CREAT)
+        .bitor(libc::O_EXCL)
+        .bitor(libc::O_NOFOLLOW)
+        .bitor(libc::O_CLOEXEC)
+}
+
 #[derive(Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct SourceAnalysis {
@@ -48,6 +87,7 @@ fn fact_cache_key(path: &str, source: &str, registry: &Registry, needs: RuleNeed
         crate::input::digest(&[
             b"portable-facts-v1",
             include_bytes!("../portable.rs"),
+            include_bytes!("extract.rs"),
             include_bytes!("../../Cargo.lock"),
         ])
     });
@@ -82,12 +122,22 @@ fn cache_components(relative: &Path) -> Option<Vec<CString>> {
 }
 
 #[cfg(unix)]
+fn descriptor_succeeded(descriptor: libc::c_int) -> bool {
+    descriptor >= 0
+}
+
+#[cfg(unix)]
+fn mkdir_succeeded_or_already_exists(result: libc::c_int, error: Option<libc::c_int>) -> bool {
+    result == 0 || error == Some(libc::EEXIST)
+}
+
+#[cfg(unix)]
 fn open_at(parent: &File, name: &OsStr, flags: libc::c_int) -> Option<File> {
     let name = CString::new(name.as_bytes()).ok()?;
     // SAFETY: parent is an open directory descriptor, name is NUL-terminated,
     // and a successful openat returns a uniquely owned descriptor.
     let descriptor = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), flags, 0o600) };
-    if descriptor < 0 {
+    if !descriptor_succeeded(descriptor) {
         None
     } else {
         // SAFETY: the successful openat call transferred ownership of descriptor.
@@ -102,18 +152,14 @@ fn open_absolute_directory(path: &Path) -> Option<File> {
     }
     let mut directory = OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .custom_flags(directory_custom_flags())
         .open("/")
         .ok()?;
     for component in path.components() {
         match component {
             std::path::Component::RootDir => {}
             std::path::Component::Normal(name) => {
-                directory = open_at(
-                    &directory,
-                    name,
-                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-                )?;
+                directory = open_at(&directory, name, secure_directory_flags())?;
             }
             _ => return None,
         }
@@ -147,14 +193,10 @@ fn create_or_open_cache_root(parent: &File, name: &OsStr) -> Option<File> {
     let name_c = CString::new(name.as_bytes()).ok()?;
     // SAFETY: parent and name_c remain valid for the call.
     let created = unsafe { libc::mkdirat(parent.as_raw_fd(), name_c.as_ptr(), 0o700) };
-    if created != 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::EEXIST) {
+    if !mkdir_succeeded_or_already_exists(created, std::io::Error::last_os_error().raw_os_error()) {
         return None;
     }
-    open_at(
-        parent,
-        name,
-        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-    )
+    open_at(parent, name, secure_directory_flags())
 }
 
 #[cfg(unix)]
@@ -196,15 +238,17 @@ fn open_cache_parent(root: &CacheRoot, relative: &Path, create: bool) -> Option<
             // SAFETY: directory and component remain valid for the duration of the call.
             let created =
                 unsafe { libc::mkdirat(directory.as_raw_fd(), component.as_ptr(), 0o700) };
-            if created != 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::EEXIST)
-            {
+            if !mkdir_succeeded_or_already_exists(
+                created,
+                std::io::Error::last_os_error().raw_os_error(),
+            ) {
                 return None;
             }
         }
         directory = open_at(
             &directory,
             OsStr::from_bytes(component.as_bytes()),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            secure_directory_flags(),
         )?;
     }
     Some((directory, target))
@@ -216,7 +260,7 @@ fn open_cached_file(root: &CacheRoot, relative: &Path) -> Option<File> {
     open_at(
         &parent,
         OsStr::from_bytes(target.as_bytes()),
-        libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        secure_read_file_flags(),
     )
     .filter(|file| file.metadata().is_ok_and(|metadata| metadata.is_file()))
 }
@@ -258,7 +302,7 @@ fn write_cache_entry(root: &CacheRoot, relative: &Path, bytes: &[u8], nonce: usi
     let mut file = open_at(
         &parent,
         OsStr::from_bytes(temporary.as_bytes()),
-        libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        secure_create_file_flags(),
     )?;
     if file.write_all(bytes).is_err() {
         // SAFETY: parent and temporary remain valid for the duration of the call.
@@ -388,5 +432,43 @@ fn analyze_source(
         facts,
         errors: Vec::new(),
         stats,
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unix_open_flag_sets_preserve_the_cache_security_contract() {
+        assert_eq!(
+            directory_custom_flags(),
+            libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC
+        );
+        assert_eq!(
+            secure_directory_flags(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC
+        );
+        assert_eq!(
+            secure_read_file_flags(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC
+        );
+        assert_eq!(
+            secure_create_file_flags(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC
+        );
+    }
+
+    #[test]
+    fn unix_result_boundaries_accept_descriptor_zero_and_existing_directories() {
+        assert!(!descriptor_succeeded(-1));
+        assert!(descriptor_succeeded(0));
+        assert!(descriptor_succeeded(1));
+
+        assert!(mkdir_succeeded_or_already_exists(0, None));
+        assert!(mkdir_succeeded_or_already_exists(0, Some(libc::EEXIST)));
+        assert!(mkdir_succeeded_or_already_exists(-1, Some(libc::EEXIST)));
+        assert!(!mkdir_succeeded_or_already_exists(-1, None));
+        assert!(!mkdir_succeeded_or_already_exists(-1, Some(libc::EACCES)));
     }
 }
