@@ -4,6 +4,10 @@ set -eu
 script_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repository_root=$(CDPATH= cd -- "$script_directory/.." && pwd)
 prepare_diff="$repository_root/scripts/prepare-mutation-diff.sh"
+workflow="$repository_root/.github/workflows/mutation.yml"
+
+grep -F -- '- "scripts/prepare-mutation-diff.sh"' "$workflow" >/dev/null
+grep -F -- '- "scripts/run-mutation-test.sh"' "$workflow" >/dev/null
 
 temporary_root=$(mktemp -d "${TMPDIR:-/tmp}/smells-mutation-workflow.XXXXXX")
 trap 'rm -rf "$temporary_root"' EXIT HUP INT TERM

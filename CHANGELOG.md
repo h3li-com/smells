@@ -10,8 +10,10 @@ All notable changes to Smells are recorded here. Release tags use `vMAJOR.MINOR.
 - Inventory recognized Drizzle, Prisma, SQLx, Diesel, and Refinery SQL migration
   artifacts as `migration_body_not_analyzed`, with staged/working parity and
   source-first budget enforcement.
-- Introduce report schema 8 and rule version 2 for the line metrics whose
-  applicability now recognizes exact migration declaration roles.
+- Advance the report contract from schema 7 to schema 11, adding versioned
+  migration detectors, exact declaration provenance, unresolved artifact
+  candidates, and SQLx integrity metadata; introduce rule version 2 for the line
+  metrics whose applicability recognizes exact migration declaration roles.
 - Identify the embedded concept-catalog and source-manifest versions directly in
   every JSON report while retaining `implementation_sha256` for exact artifact
   identity.

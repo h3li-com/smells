@@ -8,6 +8,8 @@ on:
       - "Cargo.toml"
       - "Makefile"
       - "scripts/mutation-summary.py"
+      - "scripts/prepare-mutation-diff.sh"
+      - "scripts/run-mutation-test.sh"
       - "src/**"
       - "tests/**"
   schedule:
