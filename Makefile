@@ -1,4 +1,5 @@
 SHELL := /bin/sh
+mutation_shard_arg = $(if $(strip $(MUTATION_SHARD)),--shard $(MUTATION_SHARD) --sharding round-robin,)
 
 .PHONY: benchmark-release-gate build check-tools crap-gate fmt gitleaks install-hooks \
 	mutation-diff mutation-full mutation-test-core osv-scan pre-commit pre-commit-push \
@@ -23,14 +24,17 @@ mutation-diff:
 	@test -n "$(MUTATION_DIFF)" || \
 		(echo 'MUTATION_DIFF must name a Git patch file' >&2; exit 2)
 	mkdir -p target/mutants
-	@./scripts/run-mutation-test.sh target/mutants/diff \
-		--in-diff "$(MUTATION_DIFF)"
+	@MUTATION_IN_PLACE=false \
+		CARGO_MUTANTS_JOBS="$${CARGO_MUTANTS_JOBS:-4}" \
+		./scripts/run-mutation-test.sh target/mutants/diff \
+		--copy-vcs true $(mutation_shard_arg) --in-diff "$(MUTATION_DIFF)"
 
 mutation-full:
 	mkdir -p target/mutants
 	@MUTATION_IN_PLACE=false \
 		CARGO_MUTANTS_JOBS="$${CARGO_MUTANTS_JOBS:-4}" \
-		./scripts/run-mutation-test.sh target/mutants/full --copy-vcs true
+		./scripts/run-mutation-test.sh target/mutants/full \
+		--copy-vcs true $(mutation_shard_arg)
 
 real-repository-e2e:
 	cargo build --locked --release

@@ -5,9 +5,15 @@ script_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repository_root=$(CDPATH= cd -- "$script_directory/.." && pwd)
 prepare_diff="$repository_root/scripts/prepare-mutation-diff.sh"
 workflow="$repository_root/.github/workflows/mutation.yml"
+makefile="$repository_root/Makefile"
 
 grep -F -- '- "scripts/prepare-mutation-diff.sh"' "$workflow" >/dev/null
 grep -F -- '- "scripts/run-mutation-test.sh"' "$workflow" >/dev/null
+grep -F 'shard: [0, 1, 2, 3, 4, 5, 6, 7]' "$workflow" >/dev/null
+grep -F 'shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]' \
+    "$workflow" >/dev/null
+grep -F 'name: mutation-diff-results-${{ matrix.shard }}-of-8' "$workflow" >/dev/null
+grep -F 'name: mutation-full-results-${{ matrix.shard }}-of-16' "$workflow" >/dev/null
 
 temporary_root=$(mktemp -d "${TMPDIR:-/tmp}/smells-mutation-workflow.XXXXXX")
 trap 'rm -rf "$temporary_root"' EXIT HUP INT TERM
@@ -45,5 +51,20 @@ source_output=$(cd "$fixture" && \
 test "$source_output" = 'has_mutable_source=true'
 test -s "$source_patch"
 grep -F 'src/lib.rs' "$source_patch" >/dev/null
+
+mutation_command=$(make -n -f "$makefile" mutation-diff \
+    MUTATION_DIFF="$source_patch" MUTATION_SHARD=3/8)
+printf '%s\n' "$mutation_command" | grep -F 'MUTATION_IN_PLACE=false' >/dev/null
+printf '%s\n' "$mutation_command" | grep -F 'CARGO_MUTANTS_JOBS="${CARGO_MUTANTS_JOBS:-4}"' >/dev/null
+printf '%s\n' "$mutation_command" | grep -F -- '--copy-vcs true' >/dev/null
+printf '%s\n' "$mutation_command" | grep -F -- '--shard 3/8' >/dev/null
+printf '%s\n' "$mutation_command" | grep -F -- '--sharding round-robin' >/dev/null
+
+full_mutation_command=$(make -n -f "$makefile" mutation-full MUTATION_SHARD=7/16)
+printf '%s\n' "$full_mutation_command" | grep -F 'MUTATION_IN_PLACE=false' >/dev/null
+printf '%s\n' "$full_mutation_command" | grep -F 'CARGO_MUTANTS_JOBS="${CARGO_MUTANTS_JOBS:-4}"' >/dev/null
+printf '%s\n' "$full_mutation_command" | grep -F -- '--copy-vcs true' >/dev/null
+printf '%s\n' "$full_mutation_command" | grep -F -- '--shard 7/16' >/dev/null
+printf '%s\n' "$full_mutation_command" | grep -F -- '--sharding round-robin' >/dev/null
 
 printf 'mutation workflow tests passed\n'

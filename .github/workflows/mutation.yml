@@ -25,10 +25,14 @@ concurrency:
 
 jobs:
   changed-code:
-    name: changed code
+    name: changed code (${{ matrix.shard }}/8)
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -50,22 +54,29 @@ jobs:
 
       - name: Mutate changed Rust code
         if: steps.patch.outputs.has_mutable_source == 'true'
-        run: make mutation-diff MUTATION_DIFF=target/mutation.patch
+        run: >-
+          make mutation-diff
+          MUTATION_DIFF=target/mutation.patch
+          MUTATION_SHARD=${{ matrix.shard }}/8
 
       - name: Preserve mutation evidence
         if: always() && hashFiles('target/mutants/diff/mutants.out/outcomes.json') != ''
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: mutation-diff-results
+          name: mutation-diff-results-${{ matrix.shard }}-of-8
           path: target/mutants/diff/mutants.out
           if-no-files-found: error
           retention-days: 14
 
   full:
-    name: full source tree
+    name: full source tree (${{ matrix.shard }}/16)
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
-    timeout-minutes: 360
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -75,13 +86,13 @@ jobs:
         run: cargo install --locked cargo-mutants --version 27.1.0
 
       - name: Mutate the full Rust source tree
-        run: make mutation-full
+        run: make mutation-full MUTATION_SHARD=${{ matrix.shard }}/16
 
       - name: Preserve mutation evidence
         if: always() && hashFiles('target/mutants/full/mutants.out/outcomes.json') != ''
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: mutation-full-results
+          name: mutation-full-results-${{ matrix.shard }}-of-16
           path: target/mutants/full/mutants.out
           if-no-files-found: error
           retention-days: 14
