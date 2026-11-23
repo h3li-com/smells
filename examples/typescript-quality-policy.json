@@ -116,7 +116,7 @@
       "mode": "required",
       "parameters": {
         "minimum_similarity_basis_points": 8200,
-        "minimum_tokens": 20
+        "minimum_tokens": 40
       }
     },
     "typescript.data_class": {

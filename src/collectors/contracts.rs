@@ -388,6 +388,7 @@ mod tests {
             name: name.into(),
             symbol: format!("domain::{name}"),
             location: location("src/domain.rs"),
+            end_line: 1,
             type_parameters: Vec::new(),
             body: body.map(Arc::from),
             source: Arc::from(body.unwrap_or_default()),
@@ -455,6 +456,7 @@ mod tests {
             },
             digest: "0".repeat(64),
             mode: "test",
+            coverage: None,
         }
     }
 

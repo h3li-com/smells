@@ -725,7 +725,7 @@ fn validate_staged_policy_path(policy_path: &Path) -> Result<&str, String> {
         .ok_or("policy path is not UTF-8".into())
 }
 
-fn repository_root() -> Result<PathBuf, String> {
+pub(crate) fn repository_root() -> Result<PathBuf, String> {
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     let root_text = text(git(&cwd, &["rev-parse", "--show-toplevel"])?, "Git root")?;
     Ok(PathBuf::from(
@@ -1018,6 +1018,7 @@ fn captured_input(
             files,
             policy,
             mode,
+            coverage: None,
         },
         registry,
     })

@@ -3405,6 +3405,7 @@ mod tests {
             policy: policy(rule_pack),
             digest: "0".repeat(64),
             mode: "test",
+            coverage: None,
         }
     }
 

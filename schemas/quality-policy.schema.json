@@ -25,7 +25,8 @@
         "rust.foreign_accesses": {"$ref":"#/$defs/selection_v2"},
         "rust.navigation_chains": {"$ref":"#/$defs/selection_v2"},
         "rust.lazy_class": {"$ref":"#/$defs/selection_v2"},
-        "rust.unused_code": {"$ref":"#/$defs/selection_v2"}
+        "rust.unused_code": {"$ref":"#/$defs/selection_v2"},
+        "rust.dependency_contract": {"$ref":"#/$defs/selection_v2"}
       },
       "additionalProperties": {"$ref":"#/$defs/selection"}
     },

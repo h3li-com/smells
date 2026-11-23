@@ -125,7 +125,11 @@ impl<'a> BuiltInCollectors<'a> {
         rule: &Rule,
     ) -> Result<Vec<Observation>, String> {
         match kind {
-            RuleKind::FunctionCrap => Ok(structural::function_crap(rule, self.model(rule)?)),
+            RuleKind::FunctionCrap => Ok(structural::function_crap(
+                rule,
+                self.model(rule)?,
+                self.input.coverage.as_ref(),
+            )),
             RuleKind::UnusedCode => Ok(structural::unused_code(self.model(rule)?)),
             RuleKind::UnusedTypeParameters => {
                 Ok(structural::unused_type_parameters(self.model(rule)?))

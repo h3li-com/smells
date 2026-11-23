@@ -879,11 +879,16 @@ fn built_in_rust_model_uses_authored_tokens_not_literal_or_comment_text() {
 #[test]
 fn default_rust_scan_uses_rust_match_privacy_and_extension_signals() {
     let workspace = Workspace::new(
-        "pub struct Secret { token: String }\n\
-         pub fn leak(secret: Secret) -> String { secret.token }\n\
+        "mod leak;\n\
+         pub struct Secret { token: String }\n\
+         pub fn own(secret: Secret) -> String { secret.token }\n\
          pub trait PathExt { fn normalized(&self) -> bool; }\n\
          impl PathExt for std::path::Path { fn normalized(&self) -> bool { true } }\n\
          pub fn dispatch(value: u8) -> u8 { match value { 0 => 0, 1 => 1, 2 => 2, _ => 3 } }\n",
+    );
+    workspace.source(
+        "src/leak.rs",
+        "pub fn leak(secret: crate::Secret) -> String { secret.token }\n",
     );
     workspace.git(&["init", "-q"]);
     let output = workspace.command(&[
@@ -897,6 +902,12 @@ fn default_rust_scan_uses_rust_match_privacy_and_extension_signals() {
     ]);
     assert_eq!(output.status.code(), Some(0));
     let data = report(&output);
+    let intimacy = finding(
+        &data,
+        "rust.dependency_contract",
+        "src/leak.rs::foreign-private-field-accesses",
+    );
+    assert_eq!(intimacy["evaluation"]["observed"], 1);
     for rule in [
         "rust.function_crap",
         "rust.dependency_contract",
@@ -1162,6 +1173,10 @@ fn shared_modules_do_not_invent_distinct_clumps_or_duplicate_bodies() {
     let workspace = Workspace::new("mod shared;");
     workspace.source("src/main.rs", "mod shared;");
     workspace.source("src/shared.rs", "fn a(x:i32,y:i32,z:i32)->i32{let p=x+1;let q=y+p;let r=z*q;r}\nfn b(x:i32,y:i32,z:i32)->i32{let p=x+2;let q=y+p;let r=z*q;r}");
+    workspace.modify(
+        "/rules/rust.duplicate_functions/parameters/minimum_tokens",
+        json!(20),
+    );
     let output = workspace.check();
     assert_eq!(output.status.code(), Some(1));
     let data = report(&output);
@@ -1246,6 +1261,10 @@ fn path_attributes_follow_containing_file_and_inline_module_directories() {
 #[test]
 fn catalog_fixture_exercises_every_authored_source_rule() {
     let workspace = Workspace::new(include_str!("fixtures/catalog/lib.rs"));
+    workspace.modify(
+        "/rules/rust.duplicate_functions/parameters/minimum_tokens",
+        json!(20),
+    );
     let output = workspace.check();
     assert_eq!(output.status.code(), Some(1));
     let data = report(&output);
@@ -2370,6 +2389,10 @@ fn duplicate_similarity_compares_the_fraction_without_rounding() {
     for (threshold, expected) in [(9444, true), (9445, false)] {
         let workspace = Workspace::new(source);
         workspace.modify(
+            "/rules/rust.duplicate_functions/parameters/minimum_tokens",
+            json!(20),
+        );
+        workspace.modify(
             "/rules/rust.duplicate_functions/parameters/minimum_similarity_basis_points",
             json!(threshold),
         );
@@ -2412,6 +2435,10 @@ fn rust_duplicate_budget_counts_only_exactly_pruned_candidates() {
         "fn duplicate_a(value:i32)->i32{{{body}}}fn duplicate_b(item:i32)->i32{{{body}}}"
     ));
     let workspace = Workspace::new(&source);
+    workspace.modify(
+        "/rules/rust.duplicate_functions/parameters/minimum_tokens",
+        json!(20),
+    );
     workspace.modify("/limits/maximum_pairs", json!(1));
     workspace.modify(
         "/rules/rust.duplicate_functions/parameters/minimum_similarity_basis_points",
@@ -3508,12 +3535,14 @@ fn doctor_reports_governance_gaps_as_warnings_on_a_complete_repository() {
     assert_eq!(doctor_check(&data, "policy")["status"], "ok");
     assert_eq!(doctor_check(&data, "git_history")["status"], "ok");
     assert_eq!(doctor_check(&data, "suppressions")["status"], "ok");
+    assert_eq!(doctor_check(&data, "coverage")["status"], "warn");
     assert_eq!(doctor_check(&data, "agents_contract")["status"], "warn");
     assert_eq!(doctor_check(&data, "codeowners")["status"], "warn");
 
     workspace.source("AGENTS.md", "# Review contract\n");
     workspace.source("CLAUDE.md", "@AGENTS.md\n");
     workspace.source(".github/CODEOWNERS", "*quality-policy.json @quality\n");
+    workspace.source("lcov.info", "SF:src/lib.rs\nDA:1,1\nend_of_record\n");
     let (code, data) = doctor(&workspace, &["--path", "."]);
     assert_eq!(code, Some(0));
     for check in data["checks"].as_array().unwrap() {
@@ -3787,4 +3816,106 @@ fn policy_defaults_to_quality_policy_json_in_the_scanned_directory() {
             "{args:?}: {output:?}"
         );
     }
+}
+
+#[test]
+fn coverage_replaces_estimated_crap_and_rejects_stale_artifacts() {
+    let workspace = Workspace::new(
+        "pub fn pick(ready: bool) -> u8 {\n    if ready {\n        1\n    } else {\n        2\n    }\n}\n",
+    );
+    init_git_repo(&workspace.path);
+    git_stage_and_commit(&workspace.path, "initial");
+    let check = |extra: &[&str]| {
+        let mut args = vec![
+            "check",
+            "--path",
+            ".",
+            "--policy",
+            "quality-policy.json",
+            "--format",
+            "json",
+        ];
+        args.extend_from_slice(extra);
+        workspace.command(&args)
+    };
+
+    let estimated = check(&[]);
+    assert_eq!(estimated.status.code(), Some(0));
+    let estimated = report(&estimated);
+    let crap = finding(&estimated, "rust.function_crap", "::pick");
+    assert_eq!(
+        crap["evaluation"]["observed"],
+        json!({"numerator": 6, "denominator": 1})
+    );
+    let (code, data) = doctor(&workspace, &[]);
+    assert_eq!(code, Some(0), "{data}");
+    let coverage = doctor_check(&data, "coverage");
+    assert_eq!(coverage["status"], "warn");
+    let detail = coverage["detail"].as_str().unwrap();
+    assert!(
+        detail.contains("hid 1 non-blocking CRAP estimate"),
+        "{detail}"
+    );
+    assert!(detail.contains("cargo llvm-cov --lcov"), "{detail}");
+    assert_eq!(data["diagnostics"]["estimated_crap_hidden"], 1);
+    assert!(
+        data["diagnostics"]["smells"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["smell"] != "Complex Untested Code")
+    );
+
+    workspace.source(
+        "coverage/lcov.info",
+        "SF:src/lib.rs\nDA:1,1\nDA:2,1\nDA:3,1\nDA:5,0\nend_of_record\n",
+    );
+    let measured = check(&["--coverage", "coverage/lcov.info"]);
+    assert_eq!(measured.status.code(), Some(0));
+    let measured = report(&measured);
+    let crap = finding(&measured, "rust.function_crap", "::pick");
+    assert_eq!(
+        crap["evaluation"]["observed"],
+        json!({"numerator": 33, "denominator": 16})
+    );
+    assert!(!matched(&measured, "rust.function_crap"));
+    let (code, data) = doctor(&workspace, &[]);
+    assert_eq!(code, Some(0), "{data}");
+    let coverage = doctor_check(&data, "coverage");
+    assert_eq!(coverage["status"], "ok", "{coverage}");
+    assert!(
+        coverage["detail"]
+            .as_str()
+            .unwrap()
+            .starts_with("coverage/lcov.info covers 1 scanned file(s)")
+    );
+    assert_eq!(data["diagnostics"]["estimated_crap_hidden"], 0);
+
+    workspace.source(
+        "coverage/lcov.info",
+        "SF:src/lib.rs\nDA:99,1\nend_of_record\n",
+    );
+    let (code, data) = doctor(&workspace, &[]);
+    assert_eq!(code, Some(2), "{data}");
+    let coverage = doctor_check(&data, "coverage");
+    assert_eq!(coverage["status"], "error");
+    assert!(
+        coverage["detail"]
+            .as_str()
+            .unwrap()
+            .contains("coverage is stale for src/lib.rs")
+    );
+    let stale = check(&["--coverage", "coverage/lcov.info"]);
+    assert_eq!(stale.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&stale.stderr).contains("coverage is stale"));
+    let missing = check(&["--coverage", "absent.info"]);
+    assert_eq!(missing.status.code(), Some(2));
+    let (code, data) = doctor(&workspace, &["--coverage", "absent.info"]);
+    assert_eq!(code, Some(2), "{data}");
+    assert!(
+        doctor_check(&data, "coverage")["detail"]
+            .as_str()
+            .unwrap()
+            .contains("cannot read coverage")
+    );
 }

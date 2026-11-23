@@ -2855,8 +2855,9 @@ fn matched_rule<'a>(data: &'a Value, rule_id: &str) -> &'a Value {
 
 #[test]
 fn default_python_scan_runs_structural_class_collectors() {
-    let policy: Value =
+    let mut policy: Value =
         serde_json::from_str(include_str!("../examples/python-quality-policy.json")).unwrap();
+    policy["rules"]["python.duplicate_functions"]["parameters"]["minimum_tokens"] = json!(20);
     let workspace = Workspace::new(
         "patterns.py",
         concat!(
@@ -3645,6 +3646,7 @@ fn second(a:i32,b:i32,c:i32)->i32 { let one=a+1; let two=b+one; let three=c+two;
     let mut policy: Value =
         serde_json::from_str(include_str!("../examples/quality-policy.json")).unwrap();
     policy["rules"]["rust.duplicate_functions"]["mode"] = json!("required");
+    policy["rules"]["rust.duplicate_functions"]["parameters"]["minimum_tokens"] = json!(20);
     let workspace = Workspace::new("src/lib.rs", source, &policy);
     let output = workspace.check_path_source_only();
     assert_eq!(output.status.code(), Some(2), "{output:?}");

@@ -16,6 +16,9 @@ pub struct Input {
     pub policy_sha256: String,
     pub digest: String,
     pub mode: &'static str,
+    /// Optional LCOV line coverage used by CRAP collectors instead of the
+    /// zero-coverage upper bound.
+    pub coverage: Option<crate::coverage::LineCoverage>,
 }
 
 #[derive(Clone, Debug, Default)]

@@ -12,7 +12,7 @@ use crate::{
     doctor, metrics, policy, report,
 };
 
-const USAGE: &str = "smells --version\nsmells check (--path DIR | --staged) [--policy FILE] [--base REF] [--evidence FILE] [--format table|json] [--report FILE] [--log FILE] [policy group selectors]\nsmells policy show [--policy FILE] [--format table|json] [policy group selectors]\nsmells contracts validate [--policy FILE]\nsmells doctor [--policy FILE] [--path DIR] [--base REF] [--format table|json]\nsmells rules [--rule-pack rust-v1|python-v1|typescript-v1]\n\n--policy defaults to quality-policy.json in the --path directory (or the current directory).\n\npolicy group selectors: --group NAME | --only-group NAME | --all-groups | --no-default-groups | --no-group NAME";
+const USAGE: &str = "smells --version\nsmells check (--path DIR | --staged) [--policy FILE] [--base REF] [--evidence FILE] [--coverage LCOV] [--format table|json] [--report FILE] [--log FILE] [policy group selectors]\nsmells policy show [--policy FILE] [--format table|json] [policy group selectors]\nsmells contracts validate [--policy FILE]\nsmells doctor [--policy FILE] [--path DIR] [--coverage LCOV] [--base REF] [--format table|json]\nsmells rules [--rule-pack rust-v1|python-v1|typescript-v1]\n\n--policy defaults to quality-policy.json in the --path directory (or the current directory).\n--coverage reads LCOV line coverage for exact CRAP scores; doctor also finds lcov.info, coverage/lcov.info or target/llvm-cov/lcov.info.\n\npolicy group selectors: --group NAME | --only-group NAME | --all-groups | --no-default-groups | --no-group NAME";
 
 enum Command {
     Help,
@@ -27,6 +27,7 @@ enum Command {
 struct DoctorOptions {
     source: PathBuf,
     policy_path: Option<PathBuf>,
+    coverage_path: Option<PathBuf>,
     base_ref: Option<String>,
     format: Option<String>,
 }
@@ -35,6 +36,7 @@ struct CheckOptions {
     source: Option<PathBuf>,
     policy_path: PathBuf,
     evidence_path: Option<PathBuf>,
+    coverage_path: Option<PathBuf>,
     base_ref: Option<String>,
     report_path: Option<PathBuf>,
     log_path: Option<PathBuf>,
@@ -53,6 +55,7 @@ struct PendingOptions {
     source: Option<PathBuf>,
     policy_path: Option<PathBuf>,
     evidence_path: Option<PathBuf>,
+    coverage_path: Option<PathBuf>,
     base_ref: Option<String>,
     report_path: Option<PathBuf>,
     log_path: Option<PathBuf>,
@@ -76,30 +79,29 @@ fn set_option(
     contracts: bool,
     options: &mut PendingOptions,
 ) -> Result<(), String> {
+    if let Some(slot) = scan_path_slot(flag, options) {
+        return set_once(slot, PathBuf::from(value), !contracts, flag);
+    }
     match flag {
         "--policy" => set_once(&mut options.policy_path, PathBuf::from(value), true, flag),
-        "--evidence" => set_once(
-            &mut options.evidence_path,
-            PathBuf::from(value),
-            !contracts,
-            flag,
-        ),
         "--base" => set_base_ref(&mut options.base_ref, value, contracts, flag),
-        "--report" => set_once(
-            &mut options.report_path,
-            PathBuf::from(value),
-            !contracts,
-            flag,
-        ),
-        "--log" => set_once(
-            &mut options.log_path,
-            PathBuf::from(value),
-            !contracts,
-            flag,
-        ),
-        "--path" => set_once(&mut options.source, PathBuf::from(value), !contracts, flag),
         "--format" => set_format(&mut options.format, value, contracts, flag),
         _ => Err(format!("unknown, repeated or invalid option: {flag}")),
+    }
+}
+
+/// Path options that only a scan accepts.
+fn scan_path_slot<'a>(
+    flag: &str,
+    options: &'a mut PendingOptions,
+) -> Option<&'a mut Option<PathBuf>> {
+    match flag {
+        "--evidence" => Some(&mut options.evidence_path),
+        "--coverage" => Some(&mut options.coverage_path),
+        "--report" => Some(&mut options.report_path),
+        "--log" => Some(&mut options.log_path),
+        "--path" => Some(&mut options.source),
+        _ => None,
     }
 }
 
@@ -203,6 +205,7 @@ fn finish_operation(options: PendingOptions, contracts: bool) -> Result<Command,
         source: options.source,
         policy_path,
         evidence_path: options.evidence_path,
+        coverage_path: options.coverage_path,
         base_ref: options.base_ref,
         report_path: options.report_path,
         log_path: options.log_path,
@@ -344,6 +347,7 @@ fn command(args: &[String]) -> Result<Command, String> {
 struct PendingDoctorOptions {
     source: Option<PathBuf>,
     policy_path: Option<PathBuf>,
+    coverage_path: Option<PathBuf>,
     base_ref: Option<String>,
     format: Option<String>,
 }
@@ -356,6 +360,7 @@ fn set_doctor_option(
     match flag {
         "--path" => set_once(&mut pending.source, PathBuf::from(value), true, flag),
         "--policy" => set_once(&mut pending.policy_path, PathBuf::from(value), true, flag),
+        "--coverage" => set_once(&mut pending.coverage_path, PathBuf::from(value), true, flag),
         "--base" => set_base_ref(&mut pending.base_ref, value, false, flag),
         "--format" => set_format(&mut pending.format, value, false, flag),
         _ => Err(format!("unknown, repeated or invalid option: {flag}")),
@@ -373,6 +378,7 @@ fn doctor_command(args: &[String]) -> Result<Command, String> {
     Ok(Command::Doctor(DoctorOptions {
         source: pending.source.unwrap_or_else(|| PathBuf::from(".")),
         policy_path: pending.policy_path,
+        coverage_path: pending.coverage_path,
         base_ref: pending.base_ref,
         format: pending.format,
     }))
@@ -400,6 +406,7 @@ fn run_doctor(options: &DoctorOptions) -> Result<u8, String> {
     let report = doctor::diagnose(
         &options.source,
         options.policy_path.as_deref(),
+        options.coverage_path.as_deref(),
         options.base_ref.as_deref(),
     );
     if options.format.as_deref() == Some("json") {
@@ -583,6 +590,7 @@ fn check(options: CheckOptions, scanner: &dyn Scanner) -> Result<u8, String> {
         target,
         policy_path: &options.policy_path,
         evidence_path: options.evidence_path.as_deref(),
+        coverage_path: options.coverage_path.as_deref(),
         base_ref: options.base_ref.as_deref(),
         selection: &options.selection,
     };

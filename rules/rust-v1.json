@@ -54,7 +54,7 @@
     {"id":"rust.divergent_change","version":1,"smell":"divergent-change","kind":"history","implementation":"implemented","inputs":["built_in_collector"],"parameters":{"minimum_changes":3,"minimum_responsibilities":3},"contract":"rust-divergent-change"},
     {"id":"rust.shotgun_surgery","version":1,"smell":"shotgun-surgery","kind":"history","implementation":"implemented","inputs":["built_in_collector"],"parameters":{"maximum_owners":3},"contract":"rust-shotgun-surgery"},
     {"id":"rust.foreign_accesses","version":2,"smell":"feature-envy","kind":"indicator","implementation":"implemented","inputs":["built_in_collector"],"parameters":{"minimum_foreign_accesses":5,"minimum_share_percent_exclusive":60},"contract":"rust-foreign-accesses"},
-    {"id":"rust.dependency_contract","version":1,"smell":"inappropriate-intimacy","kind":"project_contract","implementation":"implemented","inputs":["built_in_collector"],"parameters":{"maximum_forbidden_accesses":0},"contract":"rust-dependency-contract"},
+    {"id":"rust.dependency_contract","version":2,"smell":"inappropriate-intimacy","kind":"project_contract","implementation":"implemented","inputs":["built_in_collector"],"parameters":{"maximum_forbidden_accesses":0},"contract":"rust-dependency-contract"},
     {"id":"rust.library_capabilities","version":1,"smell":"incomplete-library-class","kind":"project_contract","implementation":"implemented","inputs":["built_in_collector"],"parameters":{"maximum_failures":0},"contract":"rust-library-capabilities"},
     {"id":"rust.navigation_chains","version":2,"smell":"message-chains","kind":"indicator","implementation":"implemented","inputs":["built_in_collector"],"parameters":{"minimum_transitions":3},"contract":"rust-navigation-chains"}
   ]
