@@ -231,6 +231,9 @@ fn actual_imports(path: &str, source: &str) -> Option<Vec<String>> {
 }
 
 fn migration_contract_version(framework: &str) -> &'static str {
+    if let Some(contract) = crate::core::test_suite::contract_version(framework) {
+        return contract;
+    }
     const CONTRACTS: &[(&str, &str)] = &[
         ("alembic", "alembic:revision-v1"),
         ("django", "django:migration-class-v1"),
@@ -1739,6 +1742,11 @@ pub fn function_role(
 ) -> Option<RoleContext> {
     let role = input.source_roles.iter().find(|role| role.path == path)?;
     let source = input.files.get(path)?;
+    if role.role == "test_suite" {
+        let declaration_role =
+            crate::core::test_suite::declaration_role(&role.framework, source, symbol, location)?;
+        return reported_role_at(role, declaration_role, true, source, location);
+    }
     let framework = code_migration_framework(&role.framework)?;
     let declaration_role = framework.declaration_role(symbol)?;
     let canonical = canonical_function(framework, source, symbol, owner, role.source == "declared");

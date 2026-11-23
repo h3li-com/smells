@@ -44,6 +44,8 @@ A confirmed database migration remains in `scanned_files`, implementation owners
 
 When a canonical migration entrypoint exceeds the generic line limit, it remains a matched finding and measurement with `status: "reported_by_role"`, `blocking: false`, and `disposition: "reported_by_role"`. It counts as a review signal. Helpers, callbacks, data transforms, runtime migration launchers, and behavioral-complexity rules retain their normal status. This is auditable rule applicability, not file exclusion or suppression.
 
+Declared `test_suite` source roles (`pytest`, `unittest`, `vitest`, `jest`, `playwright`, `cargo_test`) follow the same applicability contract: test files remain scanned, measured, and digest-bound, and canonical test entrypoints (`test_*`, `describe`/`it`/`test` anonymous callbacks, and `#[test]`-attributed functions) exceeding `function_lines` receive `role_context` (`declaration_role: "test_case"` or `"test_block"`, `disposition: "reported_by_role"`), while non-test helpers and other rules keep normal blocking behavior.
+
 ## Policy selection and coverage
 
 `policy_selection` records the complete uv-style group resolution: defaults, inclusions, only-groups, exclusions, boolean controls, groups and members, and selected/active/excluded rule IDs. `selected_rule_ids` reflects group algebra; `active_rule_ids` additionally removes explicit legacy `off` rules.

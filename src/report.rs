@@ -52,6 +52,7 @@ const IMPLEMENTATION_INPUTS: &[&[u8]] = &[
     include_bytes!("core/ports/outbound/repository.rs"),
     include_bytes!("core/ratchet.rs"),
     include_bytes!("core/scanner.rs"),
+    include_bytes!("core/test_suite.rs"),
     include_bytes!("catalog.rs"),
     include_bytes!("policy.rs"),
     include_bytes!("scan.rs"),

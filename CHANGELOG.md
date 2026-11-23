@@ -16,6 +16,10 @@ All notable changes to Smells are recorded here. Release tags use `vMAJOR.MINOR.
 - Add default-on anti-gaming guardrails and run-completeness attestation
   (`attestation` on every report; burndown lock, suppression-growth blocking,
   and required-rule policy-weakening detection under `--base <REF>`).
+- Add `test_suite` support to `source_roles` (`pytest`, `unittest`, `vitest`,
+  `jest`, `playwright`, and `cargo_test`): canonical test cases and test blocks
+  exceeding `function_lines` are surfaced as auditable `reported_by_role` review
+  signals while test helpers and other rules retain normal enforcement.
 
 ## 0.6.0 - 2026-10-14
 

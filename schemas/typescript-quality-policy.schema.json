@@ -143,8 +143,8 @@
       "additionalProperties": false,
       "required": ["role", "framework", "paths"],
       "properties": {
-        "role": {"const": "database_migration"},
-        "framework": {"enum": ["typeorm", "knex", "mikro_orm", "kysely", "sequelize_umzug", "prisma_8"]},
+        "role": {"enum": ["database_migration", "test_suite"]},
+        "framework": {"enum": ["typeorm", "knex", "mikro_orm", "kysely", "sequelize_umzug", "prisma_8", "vitest", "jest", "playwright"]},
         "paths": {
           "type": "array",
           "minItems": 1,
@@ -157,7 +157,11 @@
           "items": {"type": "string", "pattern": "^/[^*?\\\\\\[\\]{}]+$"},
           "default": []
         }
-      }
+      },
+      "oneOf": [
+        {"properties": {"role": {"const": "database_migration"}, "framework": {"enum": ["typeorm", "knex", "mikro_orm", "kysely", "sequelize_umzug", "prisma_8"]}}},
+        {"properties": {"role": {"const": "test_suite"}, "framework": {"enum": ["vitest", "jest", "playwright"]}}}
+      ]
     },
     "selection_contract": {
       "type": "object",
