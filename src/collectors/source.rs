@@ -425,6 +425,22 @@ mod tests {
     }
 
     #[test]
+    fn navigation_adapters_are_transparent_only_in_their_own_language() {
+        for (language, expression) in [
+            ("rust", "a.b.iter().c"),
+            ("python", "a.b.items().c"),
+            ("typescript", "a.b.toString().c"),
+        ] {
+            assert_eq!(
+                navigation_run(expression, navigation_adapters(language)),
+                2,
+                "{language}"
+            );
+            assert_eq!(navigation_run(expression, &[]), 3, "{language}");
+        }
+    }
+
+    #[test]
     fn navigation_chains_count_the_longest_run_of_navigation_hops() {
         let source = concat!(
             "let value = root.first().second.third;\n",
