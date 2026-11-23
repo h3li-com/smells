@@ -3556,7 +3556,6 @@ fn doctor_fails_closed_on_missing_history_invalid_policy_and_bad_arguments() {
     );
 
     for args in [
-        &["doctor"][..],
         &["doctor", "--policy"][..],
         &[
             "doctor",
@@ -3572,6 +3571,64 @@ fn doctor_fails_closed_on_missing_history_invalid_policy_and_bad_arguments() {
         assert_eq!(output.status.code(), Some(2), "{args:?}");
         assert!(output.stdout.is_empty(), "{args:?}");
     }
+}
+
+#[test]
+fn doctor_works_with_zero_flags_and_auto_discovers_policy_or_starter_and_default_base() {
+    let workspace = Workspace::new("fn dead_helper() -> u8 { 1 }\n");
+    workspace.source(
+        "Cargo.toml",
+        "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+    );
+    init_git_repo(&workspace.path);
+    git_stage_and_commit(&workspace.path, "initial");
+
+    // 1. Zero flags with a checked-in quality-policy.json auto-discovers it.
+    let output = workspace.command(&["doctor", "--format", "json"]);
+    assert_eq!(output.status.code(), Some(0));
+    let data: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(doctor_check(&data, "policy")["status"], "ok");
+    assert_eq!(data["diagnostics"]["blocking_findings"], 1);
+    assert!(data["burndown"].is_null());
+
+    // 2. When origin/main exists, zero-flag doctor automatically reports burndown against it.
+    workspace.git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    workspace.source("src/lib.rs", "pub fn healthy() -> u8 { 1 }\n");
+    let output = workspace.command(&["doctor", "--format", "json"]);
+    assert_eq!(output.status.code(), Some(0));
+    let data: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(data["burndown"]["base_ref"], "origin/main");
+    assert_eq!(data["burndown"]["blocking_delta"], -1);
+    assert_eq!(data["burndown"]["score_delta"], 10);
+
+    // 3. Removing quality-policy.json falls back to the built-in Rust starter with a warning.
+    fs::remove_file(workspace.path.join("quality-policy.json")).unwrap();
+    let output = workspace.command(&["doctor", "--format", "json"]);
+    assert_eq!(output.status.code(), Some(0));
+    let data: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(doctor_check(&data, "policy")["status"], "warn");
+    assert!(
+        doctor_check(&data, "policy")["detail"]
+            .as_str()
+            .unwrap()
+            .contains("built-in rust-v1 starter policy")
+    );
+    assert_eq!(data["diagnostics"]["score"], 100);
+    assert_eq!(data["burndown"]["base_ref"], "origin/main");
+
+    // 4. Multiple policy files without --policy fail closed.
+    workspace.source("quality-policy.json", "{}");
+    workspace.source("python-quality-policy.json", "{}");
+    let output = workspace.command(&["doctor", "--format", "json"]);
+    assert_eq!(output.status.code(), Some(2));
+    let data: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(doctor_check(&data, "policy")["status"], "error");
+    assert!(
+        doctor_check(&data, "policy")["detail"]
+            .as_str()
+            .unwrap()
+            .contains("multiple policy files found")
+    );
 }
 
 #[test]

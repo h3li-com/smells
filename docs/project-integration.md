@@ -18,7 +18,7 @@ Repository implementations are discovered from the nearest ancestor `Cargo.toml`
 smells --version
 smells rules [--rule-pack rust-v1|python-v1|typescript-v1]
 smells contracts validate --policy FILE
-smells doctor --policy FILE [--path DIRECTORY] [--base REF] [--format table|json]
+smells doctor [--policy FILE] [--path DIRECTORY] [--base REF] [--format table|json]
 smells policy show --policy FILE [--format table|json] [group selectors]
 smells check --path DIRECTORY --policy FILE [--base REF] [--evidence FILE] [--format table|json] [--report JSON] [--log LOG] [group selectors]
 smells check --staged --policy FILE [--base REF] [--evidence FILE] [--format table|json] [--report JSON] [--log LOG] [group selectors]
@@ -43,7 +43,7 @@ set before a scan.
 
 ## Integration preflight
 
-`smells doctor` audits an integration before it reaches CI. It reads the policy and source tree under `--path` (default `.`) and reports one row per check, each `ok`, `warn`, or `error`:
+`smells doctor` audits an integration and codebase health with zero required flags. When `--policy` is omitted, it auto-discovers a single standard policy file under `--path` (default `.`), or falls back with a warning to the built-in Rust, Python, or TypeScript starter policy when a single language manifest (`Cargo.toml`, `pyproject.toml`, or `package.json`) is present; ambiguous layouts fail closed. When `--base` is omitted, it automatically compares against `origin/main` or `origin/master` when present. It reports one row per setup check, each `ok`, `warn`, or `error`:
 
 - `policy`: the policy parses, matches its rule pack, and pins the running scanner version.
 - `git_history`: Git history is available and no shallow-clone boundary truncates the 200-commit window.

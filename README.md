@@ -42,20 +42,22 @@ cargo install --locked --version 0.7.0 smells
 
 Standalone binaries for macOS, Linux, and Windows are also on the [v0.7.0 GitHub Release](https://github.com/mindful-time/smells/releases/tag/v0.7.0).
 
-### 2. Add a starter policy and run `smells doctor`
+### 2. Run `smells doctor` (zero config!)
 
-Download the starter policy for your language ([Rust](examples/quality-policy.json), [Python](examples/python-quality-policy.json), or [TypeScript/TSX](examples/typescript-quality-policy.json)):
+```sh
+smells doctor
+```
+
+That's it—no flags or config file required to try it. `smells doctor` auto-detects your checked-in policy (or uses the built-in Rust, Python, or TypeScript starter policy if you don't have one yet), checks Git history and governance wiring, prints your **0–100 Codebase Health Score**, all **23 smells**, **Top Hotspot Files**, and (when `origin/main` or `origin/master` exists) your **Burndown** automatically.
+
+### 3. Commit a policy and gate PRs with `--base`
+
+When you're ready to enforce hard blockers in CI and pre-commit, commit the starter policy for your language ([Rust](examples/quality-policy.json), [Python](examples/python-quality-policy.json), or [TypeScript/TSX](examples/typescript-quality-policy.json)):
 
 ```sh
 curl -fsSLo quality-policy.json \
   https://raw.githubusercontent.com/mindful-time/smells/v0.7.0/examples/python-quality-policy.json
-
-smells doctor --policy quality-policy.json
 ```
-
-`smells doctor` checks that your policy is valid, your Git clone is not shallow, suppressions are well-formed, and governance files (`AGENTS.md`, `CODEOWNERS`) are wired up. Commit `quality-policy.json` so developers, CI, and coding agents all share one contract.
-
-### 3. Run your first scan
 
 **Ratchet a pull request or branch against `main` (best for existing repos):**
 
@@ -118,7 +120,7 @@ Use the two commands for their distinct jobs:
 | Command | Role | Output |
 | --- | --- | --- |
 | **`smells check --base origin/main`** | **PR & pre-commit gate** | 4-line stdout summary with burndown `delta` + full Finding Log & JSON; exits `1` on new/worse `required` smells, `2` on broken setup |
-| **`smells doctor [--base REF]`** | **Setup, health score & burndown** | Colored human-readable terminal report (`NO_COLOR` respected) auditing policy, Git history, suppressions, `AGENTS.md`, `CODEOWNERS`, a **0–100 Health Score**, a compact 23-smell breakdown (`blocking` vs. `review`), top 5 hotspot files, and (with `--base REF`) total & per-smell burndown; exits `2` only if setup/scan is broken |
+| **`smells doctor`** | **Zero-flag health score & burndown** | Just run `smells doctor` (auto-discovers your policy or built-in starter + `origin/main`): colored report (`NO_COLOR` respected) with setup checks, a **0–100 Health Score**, 23-smell breakdown (`blocking` vs. `review`), top 5 hotspots, and burndown; override with `--policy`/`--base` |
 
 ---
 
@@ -274,7 +276,7 @@ All three packs cover the same **23 canonical Refactoring.Guru smells** (28 exec
 | --- | --- |
 | `smells check --path DIR --policy FILE [--base REF]` | Scan a directory (optionally ratcheted against a Git ref) |
 | `smells check --staged --policy FILE [--base REF]` | Scan the exact Git staged index snapshot |
-| `smells doctor --policy FILE [--path DIR] [--base REF]` | Audit setup/governance, print compact 23-smell & hotspot diagnostics, and optionally show burndown since `REF` |
+| `smells doctor [--policy FILE] [--path DIR] [--base REF]` | Zero-flag setup audit, 0–100 health score, 23-smell & hotspot diagnostics, and burndown |
 | `smells contracts validate --policy FILE` | Validate a policy file against its schema and rule pack |
 | `smells policy show --policy FILE` | Print the resolved rule set and parameters |
 | `smells rules [--rule-pack PACK]` | List all rules, categories, and versions in a language pack |

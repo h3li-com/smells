@@ -12,7 +12,7 @@ use crate::{
     doctor, metrics, policy, report,
 };
 
-const USAGE: &str = "smells --version\nsmells check (--path DIR | --staged) --policy FILE [--base REF] [--evidence FILE] [--format table|json] [--report FILE] [--log FILE] [policy group selectors]\nsmells policy show --policy FILE [--format table|json] [policy group selectors]\nsmells contracts validate --policy FILE\nsmells doctor --policy FILE [--path DIR] [--base REF] [--format table|json]\nsmells rules [--rule-pack rust-v1|python-v1|typescript-v1]\n\npolicy group selectors: --group NAME | --only-group NAME | --all-groups | --no-default-groups | --no-group NAME";
+const USAGE: &str = "smells --version\nsmells check (--path DIR | --staged) --policy FILE [--base REF] [--evidence FILE] [--format table|json] [--report FILE] [--log FILE] [policy group selectors]\nsmells policy show --policy FILE [--format table|json] [policy group selectors]\nsmells contracts validate --policy FILE\nsmells doctor [--policy FILE] [--path DIR] [--base REF] [--format table|json]\nsmells rules [--rule-pack rust-v1|python-v1|typescript-v1]\n\npolicy group selectors: --group NAME | --only-group NAME | --all-groups | --no-default-groups | --no-group NAME";
 
 enum Command {
     Help,
@@ -26,7 +26,7 @@ enum Command {
 
 struct DoctorOptions {
     source: PathBuf,
-    policy_path: PathBuf,
+    policy_path: Option<PathBuf>,
     base_ref: Option<String>,
     format: Option<String>,
 }
@@ -353,7 +353,7 @@ fn doctor_command(args: &[String]) -> Result<Command, String> {
     }
     Ok(Command::Doctor(DoctorOptions {
         source: pending.source.unwrap_or_else(|| PathBuf::from(".")),
-        policy_path: pending.policy_path.ok_or("--policy is required")?,
+        policy_path: pending.policy_path,
         base_ref: pending.base_ref,
         format: pending.format,
     }))
@@ -380,7 +380,7 @@ fn color_enabled(is_tty: bool, no_color: bool, force: Option<&str>) -> bool {
 fn run_doctor(options: &DoctorOptions) -> Result<u8, String> {
     let report = doctor::diagnose(
         &options.source,
-        &options.policy_path,
+        options.policy_path.as_deref(),
         options.base_ref.as_deref(),
     );
     if options.format.as_deref() == Some("json") {

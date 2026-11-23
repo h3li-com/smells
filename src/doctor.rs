@@ -6,7 +6,8 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    path::Path,
+    path::{Path, PathBuf},
+    process::Command,
 };
 
 use serde_json::{Value, json};
@@ -21,8 +22,20 @@ use crate::{
 
 /// GitHub resolves the first CODEOWNERS file in this order.
 const CODEOWNERS_PATHS: [&str; 3] = [".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"];
+const STANDARD_POLICY_FILES: [&str; 5] = [
+    "quality-policy.json",
+    "rust-quality-policy.json",
+    "python-quality-policy.json",
+    "typescript-quality-policy.json",
+    "smells-policy.json",
+];
+const DEFAULT_BASE_REFS: [&str; 2] = ["origin/main", "origin/master"];
 const HISTORY_WINDOW: usize = 200;
 const HOTSPOT_LIMIT: usize = 5;
+
+const RUST_STARTER_POLICY: &str = include_str!("../examples/quality-policy.json");
+const PYTHON_STARTER_POLICY: &str = include_str!("../examples/python-quality-policy.json");
+const TYPESCRIPT_STARTER_POLICY: &str = include_str!("../examples/typescript-quality-policy.json");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Status {
@@ -143,40 +156,115 @@ fn check(id: &'static str, status: Status, detail: impl Into<String>) -> Check {
     }
 }
 
-/// Runs every preflight check and, when inputs are valid, builds compact codebase smell
-/// diagnostics plus an optional `--base` burndown comparison.
-pub(crate) fn diagnose(root: &Path, policy_path: &Path, base_ref: Option<&str>) -> DoctorReport {
-    let mut checks = Vec::new();
-    let mut diagnostics = None;
-    let mut burndown = None;
-    match input::working_tree(root, policy_path, &SelectionOptions::default()) {
-        Ok(captured) => {
-            let policy = &captured.input.policy;
-            checks.push(check(
-                "policy",
-                Status::Ok,
-                format!(
-                    "{} pinned to scanner {}, {}/{} rules active",
-                    captured.registry.rule_pack,
-                    policy.scanner_version,
-                    policy.resolved.active_rule_ids.len(),
-                    captured.registry.rules.len()
-                ),
-            ));
-            checks.push(history_check(&captured.input.history));
-            checks.push(suppression_check(&suppressions::parse(
-                &captured.input.files,
-                &captured.registry,
-            )));
-            if exit_code(&checks) == 0 {
-                diagnostics = diagnose_scan(&captured, &mut checks);
-                if let (Some(base), Some(current)) = (base_ref, diagnostics.as_ref()) {
-                    burndown = diagnose_burndown(root, policy_path, base, current, &mut checks);
-                }
-            }
-        }
-        Err(error) => checks.push(check("policy", Status::Error, error)),
+enum ResolvedPolicy {
+    File(PathBuf),
+    BuiltIn {
+        rule_pack: &'static str,
+        text: &'static str,
+    },
+}
+
+fn resolve_policy(root: &Path, explicit: Option<&Path>) -> Result<ResolvedPolicy, String> {
+    if let Some(path) = explicit {
+        return Ok(ResolvedPolicy::File(path.to_path_buf()));
     }
+    let found: Vec<PathBuf> = STANDARD_POLICY_FILES
+        .iter()
+        .map(|name| root.join(name))
+        .filter(|path| path.is_file())
+        .collect();
+    match found.as_slice() {
+        [single] => Ok(ResolvedPolicy::File(single.clone())),
+        [] => infer_starter_policy(root),
+        _ => {
+            let names = found
+                .iter()
+                .filter_map(|path| path.file_name().and_then(|name| name.to_str()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(format!(
+                "multiple policy files found ({names}); pass --policy FILE"
+            ))
+        }
+    }
+}
+
+fn infer_starter_policy(root: &Path) -> Result<ResolvedPolicy, String> {
+    let candidates: [(&[&str], &str, &str); 3] = [
+        (&["Cargo.toml"], "rust-v1", RUST_STARTER_POLICY),
+        (
+            &["pyproject.toml", "setup.py", "requirements.txt"],
+            "python-v1",
+            PYTHON_STARTER_POLICY,
+        ),
+        (
+            &["tsconfig.json", "package.json"],
+            "typescript-v1",
+            TYPESCRIPT_STARTER_POLICY,
+        ),
+    ];
+    let matched: Vec<_> = candidates
+        .into_iter()
+        .filter(|(manifests, _, _)| manifests.iter().any(|file| root.join(file).is_file()))
+        .collect();
+    match matched.as_slice() {
+        [(_, rule_pack, text)] => Ok(ResolvedPolicy::BuiltIn { rule_pack, text }),
+        [] => Err(
+            "no quality-policy.json found and language could not be inferred; pass --policy FILE"
+                .into(),
+        ),
+        _ => Err(
+            "no quality-policy.json found and multiple language manifests exist; pass --policy FILE"
+                .into(),
+        ),
+    }
+}
+
+fn detect_default_base(root: &Path) -> Option<&'static str> {
+    DEFAULT_BASE_REFS.into_iter().find(|candidate| {
+        Command::new("git")
+            .args([
+                "-C",
+                &root.to_string_lossy(),
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                candidate,
+            ])
+            .output()
+            .is_ok_and(|output| output.status.success())
+    })
+}
+
+/// Runs every preflight check and, when inputs are valid, builds compact codebase smell
+/// diagnostics plus an optional (or auto-detected) `--base` burndown comparison.
+pub(crate) fn diagnose(
+    root: &Path,
+    policy_path: Option<&Path>,
+    base_ref: Option<&str>,
+) -> DoctorReport {
+    let mut checks = Vec::new();
+    let resolved = resolve_policy(root, policy_path);
+    let owned_policy_target = match &resolved {
+        Ok(ResolvedPolicy::File(path)) => relative_policy_path(root, path),
+        _ => "quality-policy.json".into(),
+    };
+    let (diagnostics, burndown) = match &resolved {
+        Ok(policy_source) => diagnose_inputs(root, policy_source, base_ref, &mut checks),
+        Err(error) => {
+            checks.push(check("policy", Status::Error, error));
+            (None, None)
+        }
+    };
+    append_governance_checks(root, &owned_policy_target, &mut checks);
+    DoctorReport {
+        checks,
+        diagnostics,
+        burndown,
+    }
+}
+
+fn append_governance_checks(root: &Path, owned_policy_target: &str, checks: &mut Vec<Check>) {
     let read = |name: &str| fs::read_to_string(root.join(name)).ok();
     checks.push(agents_check(read("AGENTS.md").as_deref()));
     checks.push(claude_check(read("CLAUDE.md").as_deref()));
@@ -187,53 +275,106 @@ pub(crate) fn diagnose(root: &Path, policy_path: &Path, base_ref: Option<&str>) 
         codeowners
             .as_ref()
             .map(|(path, text)| (*path, text.as_str())),
-        &relative_policy_path(root, policy_path),
+        owned_policy_target,
     ));
-    DoctorReport {
-        checks,
-        diagnostics,
-        burndown,
+}
+
+fn diagnose_inputs(
+    root: &Path,
+    policy_source: &ResolvedPolicy,
+    base_ref: Option<&str>,
+    checks: &mut Vec<Check>,
+) -> (Option<Diagnostics>, Option<Burndown>) {
+    let captured = match policy_source {
+        ResolvedPolicy::File(path) => input::working_tree(root, path, &SelectionOptions::default()),
+        ResolvedPolicy::BuiltIn { text, .. } => {
+            input::working_tree_with_policy_text(root, text, &SelectionOptions::default())
+        }
+    };
+    let captured = match captured {
+        Ok(captured) => captured,
+        Err(error) => {
+            checks.push(check("policy", Status::Error, error));
+            return (None, None);
+        }
+    };
+    checks.push(policy_check(policy_source, &captured));
+    checks.push(history_check(&captured.input.history));
+    checks.push(suppression_check(&suppressions::parse(
+        &captured.input.files,
+        &captured.registry,
+    )));
+    if exit_code(checks) != 0 {
+        return (None, None);
     }
+    let diagnostics = diagnose_scan(&captured, checks);
+    let burndown = diagnostics
+        .as_ref()
+        .and_then(|current| run_burndown(root, policy_source, base_ref, current, checks));
+    (diagnostics, burndown)
+}
+
+fn policy_check(source: &ResolvedPolicy, captured: &crate::core::model::CapturedInput) -> Check {
+    let policy = &captured.input.policy;
+    match source {
+        ResolvedPolicy::File(_) => check(
+            "policy",
+            Status::Ok,
+            format!(
+                "{} pinned to scanner {}, {}/{} rules active",
+                captured.registry.rule_pack,
+                policy.scanner_version,
+                policy.resolved.active_rule_ids.len(),
+                captured.registry.rules.len()
+            ),
+        ),
+        ResolvedPolicy::BuiltIn { rule_pack, .. } => check(
+            "policy",
+            Status::Warn,
+            format!(
+                "no quality-policy.json found; using built-in {rule_pack} starter policy ({}/{} rules active)",
+                policy.resolved.active_rule_ids.len(),
+                captured.registry.rules.len()
+            ),
+        ),
+    }
+}
+
+fn run_burndown(
+    root: &Path,
+    policy_source: &ResolvedPolicy,
+    explicit_base: Option<&str>,
+    current: &Diagnostics,
+    checks: &mut Vec<Check>,
+) -> Option<Burndown> {
+    let (target_ref, strict) = match explicit_base {
+        Some(base) => (base, true),
+        None => (detect_default_base(root)?, false),
+    };
+    diagnose_burndown(root, policy_source, target_ref, strict, current, checks)
 }
 
 fn diagnose_burndown(
     root: &Path,
-    policy_path: &Path,
+    policy_source: &ResolvedPolicy,
     base_ref: &str,
+    strict: bool,
     current: &Diagnostics,
     checks: &mut Vec<Check>,
 ) -> Option<Burndown> {
-    let reference = match input::git_ref_for_working_tree(
-        root,
-        base_ref,
-        policy_path,
-        &SelectionOptions::default(),
-    ) {
+    let reference = capture_base_reference(root, policy_source, base_ref);
+    let reference = match reference {
         Ok(reference) => reference,
         Err(error) => {
-            checks.push(check("base_ref", Status::Error, error));
+            record_base_error(strict, error, checks);
             return None;
         }
     };
     let base_diagnostics = match reference.captured.as_ref() {
-        Some(captured) => match analyze_captured(captured) {
-            Ok(report) => {
-                if let Some(first) = report.errors.first() {
-                    checks.push(check(
-                        "base_ref",
-                        Status::Error,
-                        format!(
-                            "base {base_ref} has {} scan error(s); first: {}",
-                            report.errors.len(),
-                            first.message
-                        ),
-                    ));
-                    return None;
-                }
-                Some(diagnostics_from_report(&report))
-            }
+        Some(captured) => match analyze_base_snapshot(captured, base_ref) {
+            Ok(diagnostics) => Some(diagnostics),
             Err(error) => {
-                checks.push(check("base_ref", Status::Error, error));
+                record_base_error(strict, error, checks);
                 return None;
             }
         },
@@ -245,6 +386,45 @@ fn diagnose_burndown(
         base_diagnostics.as_ref(),
         current,
     ))
+}
+
+fn capture_base_reference(
+    root: &Path,
+    policy_source: &ResolvedPolicy,
+    base_ref: &str,
+) -> Result<crate::core::model::ReferenceSnapshot, String> {
+    match policy_source {
+        ResolvedPolicy::File(path) => {
+            input::git_ref_for_working_tree(root, base_ref, path, &SelectionOptions::default())
+        }
+        ResolvedPolicy::BuiltIn { text, .. } => input::git_ref_for_working_tree_with_policy_text(
+            root,
+            base_ref,
+            text,
+            &SelectionOptions::default(),
+        ),
+    }
+}
+
+fn analyze_base_snapshot(
+    captured: &crate::core::model::CapturedInput,
+    base_ref: &str,
+) -> Result<Diagnostics, String> {
+    let report = analyze_captured(captured)?;
+    if let Some(first) = report.errors.first() {
+        return Err(format!(
+            "base {base_ref} has {} scan error(s); first: {}",
+            report.errors.len(),
+            first.message
+        ));
+    }
+    Ok(diagnostics_from_report(&report))
+}
+
+fn record_base_error(strict: bool, error: String, checks: &mut Vec<Check>) {
+    if strict {
+        checks.push(check("base_ref", Status::Error, error));
+    }
 }
 
 pub(crate) fn burndown_between(
@@ -740,12 +920,10 @@ impl Palette {
 }
 
 fn delta_color(value: isize, higher_is_better: bool) -> &'static str {
-    if value == 0 {
-        "2"
-    } else if (value > 0) == higher_is_better {
-        "32"
-    } else {
-        "31"
+    match (value.signum(), higher_is_better) {
+        (0, _) => "2",
+        (1, true) | (-1, false) => "32",
+        _ => "31",
     }
 }
 
@@ -1183,6 +1361,7 @@ mod tests {
     fn health_score_and_grade_cover_every_band_and_cap() {
         assert_eq!(health_score(0, 0, 0), 100);
         assert_eq!(health_grade(100), "Great");
+        assert_eq!(health_score(10, 0, 20), 98);
         assert_eq!(health_score(1, 0, 30), 75);
         assert_eq!(health_grade(75), "Great");
         assert_eq!(health_score(1, 2, 6), 74);
@@ -1197,10 +1376,14 @@ mod tests {
         assert_eq!(score_color(50), "33");
         assert_eq!(score_color(49), "31");
         assert_eq!(delta_color(0, true), "2");
+        assert_eq!(delta_color(0, false), "2");
         assert_eq!(delta_color(2, true), "32");
         assert_eq!(delta_color(-2, true), "31");
         assert_eq!(delta_color(-2, false), "32");
         assert_eq!(delta_color(2, false), "31");
+        let palette = Palette { color: true };
+        assert_eq!(palette.count(0, 3, "31"), "\x1b[2m  0\x1b[0m");
+        assert_eq!(palette.count(2, 3, "31"), "\x1b[31m  2\x1b[0m");
     }
 
     #[test]
@@ -1474,5 +1657,49 @@ mod tests {
         assert_eq!(hotspots[1].path, "src/a.rs");
         assert_eq!(hotspots[1].review, 2);
         assert!(!hotspots.iter().any(|row| row.path == "src/b.rs"));
+    }
+
+    #[test]
+    fn infer_starter_policy_and_record_base_error_handle_all_manifest_combinations() {
+        let base_dir =
+            std::env::temp_dir().join(format!("smells-doctor-infer-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base_dir);
+        fs::create_dir_all(&base_dir).unwrap();
+
+        assert!(infer_starter_policy(&base_dir).is_err());
+
+        for (manifest, expected_pack) in [
+            ("Cargo.toml", "rust-v1"),
+            ("pyproject.toml", "python-v1"),
+            ("package.json", "typescript-v1"),
+        ] {
+            let dir = base_dir.join(expected_pack);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join(manifest), "").unwrap();
+            match infer_starter_policy(&dir) {
+                Ok(ResolvedPolicy::BuiltIn { rule_pack, .. }) => {
+                    assert_eq!(rule_pack, expected_pack);
+                }
+                _ => panic!("expected built-in {expected_pack}"),
+            }
+        }
+
+        let multi = base_dir.join("multi");
+        fs::create_dir_all(&multi).unwrap();
+        fs::write(multi.join("Cargo.toml"), "").unwrap();
+        fs::write(multi.join("package.json"), "").unwrap();
+        assert!(
+            infer_starter_policy(&multi)
+                .err()
+                .unwrap()
+                .contains("multiple language manifests")
+        );
+        let _ = fs::remove_dir_all(&base_dir);
+
+        let mut checks = Vec::new();
+        record_base_error(false, "ignored".into(), &mut checks);
+        assert!(checks.is_empty());
+        record_base_error(true, "bad ref".into(), &mut checks);
+        assert_eq!(checks, vec![check("base_ref", Status::Error, "bad ref")]);
     }
 }
