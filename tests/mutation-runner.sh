@@ -14,6 +14,12 @@ cat > "$fake_cargo" <<'EOF'
 set -eu
 
 output=
+for argument in "$@"; do
+    if [ "$argument" = --list ]; then
+        printf '%s' "${FAKE_MUTANTS_LISTED-src/lib.rs:1:1: replace value with 0}"
+        exit "${FAKE_MUTANTS_LIST_STATUS:-0}"
+    fi
+done
 while [ "$#" -gt 0 ]; do
     if [ "$1" = --output ]; then
         output=$2
@@ -41,7 +47,7 @@ run_case() {
     expected_status=$1
     outcome=$2
     mutation_status=$3
-    output_directory="$temporary_root/$outcome-$mutation_status"
+    output_directory="$temporary_root/$outcome-$mutation_status-${FAKE_MUTANTS_LIST_STATUS:-0}-${FAKE_MUTANTS_LISTED+empty}"
     actual_status=0
     FAKE_MUTANTS_OUTCOME=$outcome \
         FAKE_MUTANTS_STATUS=$mutation_status \
@@ -56,5 +62,8 @@ run_case 3 valid 3
 run_case 3 missing 3
 run_case 2 missing 0
 run_case 2 invalid 3
+FAKE_MUTANTS_LISTED= run_case 0 missing 0
+FAKE_MUTANTS_LISTED= FAKE_MUTANTS_LIST_STATUS=1 run_case 2 missing 0
+FAKE_MUTANTS_LISTED= run_case 3 missing 3
 
 printf 'mutation runner tests passed\n'

@@ -34,8 +34,17 @@ summary_status=0
 if [ -f "$outcomes" ]; then
     "$python_command" "$script_directory/mutation-summary.py" "$outcomes" || summary_status=$?
 elif [ "$mutation_status" -eq 0 ]; then
-    printf 'mutation runner succeeded without writing %s\n' "$outcomes" >&2
-    summary_status=2
+    # cargo-mutants writes no outcomes when the filters select nothing, such as
+    # an empty diff shard. Accept that only when listing the same selection
+    # succeeds and is empty; anything else stays a failure.
+    listed_status=0
+    listed=$("$cargo_command" mutants --list "$@" 2>/dev/null) || listed_status=$?
+    if [ "$listed_status" -eq 0 ] && [ -z "$listed" ]; then
+        printf 'no mutants selected; nothing to test\n'
+    else
+        printf 'mutation runner succeeded without writing %s\n' "$outcomes" >&2
+        summary_status=2
+    fi
 fi
 
 if [ "$summary_status" -ne 0 ]; then
