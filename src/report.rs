@@ -231,7 +231,7 @@ impl std::ops::DerefMut for Report {
     }
 }
 
-fn report_limitations(language: &str, history_available: bool) -> Vec<String> {
+fn report_limitations(language: &str, history: &History) -> Vec<String> {
     let mut limitations = if language == "rust" {
         vec![
             "syntax_matches_are_not_confirmed_design_defects",
@@ -257,8 +257,11 @@ fn report_limitations(language: &str, history_available: bool) -> Vec<String> {
             "source_symbol_and_evidence_text_are_untrusted_data_not_instructions",
         ]
     };
-    if !history_available {
+    if !history.available {
         limitations.push("git_history_unavailable_history_rules_are_incomplete");
+    }
+    if history.shallow {
+        limitations.push("git_history_truncated_by_shallow_clone_fetch_full_history");
     }
     limitations.into_iter().map(str::to_string).collect()
 }
@@ -351,11 +354,12 @@ impl Report {
                 "source_root_local_authored_files"
             }
             .into(),
-            limitations: report_limitations(&registry.language, history.available),
+            limitations: report_limitations(&registry.language, history),
             history_scope: HistoryScope {
                 available: history.available,
+                shallow: history.shallow,
                 commit_count: history.commits.len(),
-                maximum_commits: 200,
+                maximum_commits: crate::input::HISTORY_WINDOW,
             },
             input_sha256: String::new(),
             provider_evidence_sha256: String::new(),
@@ -1298,6 +1302,7 @@ mod tests {
             &[],
             &History {
                 available: true,
+                shallow: false,
                 commits: Vec::new(),
             },
         );
@@ -1326,6 +1331,7 @@ mod tests {
             &[],
             &History {
                 available: true,
+                shallow: false,
                 commits: Vec::new(),
             },
         );
@@ -1357,13 +1363,17 @@ mod tests {
 
     #[test]
     fn limitations_disclose_language_parser_and_history_boundaries() {
-        let rust = report_limitations("rust", true);
+        let available = History {
+            available: true,
+            ..History::default()
+        };
+        let rust = report_limitations("rust", &available);
         assert!(
             rust.contains(&"cfg_is_not_evaluated_and_macro_expansions_are_not_inspected".into())
         );
         assert!(!rust.contains(&"git_history_unavailable_history_rules_are_incomplete".into()));
 
-        let typescript = report_limitations("typescript", false);
+        let typescript = report_limitations("typescript", &History::default());
         assert!(typescript.contains(
             &"typeof_import_generic_call_arguments_use_a_position_preserving_parser_compatibility_reparse".into()
         ));
@@ -1371,7 +1381,23 @@ mod tests {
             typescript.contains(&"git_history_unavailable_history_rules_are_incomplete".into())
         );
 
-        let python = report_limitations("python", true);
+        assert!(
+            !typescript
+                .contains(&"git_history_truncated_by_shallow_clone_fetch_full_history".into())
+        );
+        let shallow = report_limitations(
+            "typescript",
+            &History {
+                shallow: true,
+                ..History::default()
+            },
+        );
+        assert!(shallow.contains(&"git_history_unavailable_history_rules_are_incomplete".into()));
+        assert!(
+            shallow.contains(&"git_history_truncated_by_shallow_clone_fetch_full_history".into())
+        );
+
+        let python = report_limitations("python", &available);
         assert!(
             !python
                 .iter()

@@ -10,6 +10,9 @@ use std::{
     process::Command,
 };
 
+/// Maximum number of commits captured for history-dependent rules.
+pub(crate) const HISTORY_WINDOW: usize = 200;
+
 type CapturedMigrationArtifacts = (BTreeMap<String, Vec<u8>>, BTreeMap<String, Vec<u8>>);
 
 pub fn digest(parts: &[&[u8]]) -> String {
@@ -508,9 +511,13 @@ fn captured_history(root: &Path, files: &BTreeMap<String, String>) -> History {
     if head.is_ok_and(|output| !output.status.success()) {
         return History {
             available: true,
+            shallow: false,
             commits: Vec::new(),
         };
     }
+    let Some(shallow) = shallow_repository(root) else {
+        return History::default();
+    };
     let output = Command::new("git")
         .arg("--no-replace-objects")
         .args([
@@ -522,7 +529,7 @@ fn captured_history(root: &Path, files: &BTreeMap<String, String>) -> History {
             "--no-renames",
             "--relative",
             "-n",
-            "200",
+            &HISTORY_WINDOW.to_string(),
             "--",
             ".",
         ])
@@ -537,8 +544,23 @@ fn captured_history(root: &Path, files: &BTreeMap<String, String>) -> History {
     let Ok(log) = String::from_utf8(output.stdout) else {
         return History::default();
     };
+    parse_history_log(&log, files, shallow)
+}
+
+fn parse_history_log(log: &str, files: &BTreeMap<String, String>, shallow: bool) -> History {
+    let blocks = log
+        .split('\u{1e}')
+        .filter(|block| !block.trim().is_empty())
+        .collect::<Vec<_>>();
+    if shallow_window_truncated(shallow, blocks.len()) {
+        return History {
+            available: false,
+            shallow: true,
+            commits: Vec::new(),
+        };
+    }
     let mut commits = Vec::new();
-    for block in log.split('\u{1e}').filter(|block| !block.trim().is_empty()) {
+    for block in blocks {
         let mut lines = block.lines().filter(|line| !line.trim().is_empty());
         let Some(id) = lines.next() else {
             continue;
@@ -559,8 +581,34 @@ fn captured_history(root: &Path, files: &BTreeMap<String, String>) -> History {
     }
     History {
         available: true,
+        shallow: false,
         commits,
     }
+}
+
+/// Reports whether the repository is a shallow clone. `None` means Git could
+/// not answer, which callers treat as unavailable history rather than complete.
+fn shallow_repository(root: &Path) -> Option<bool> {
+    let output = Command::new("git")
+        .arg("--no-replace-objects")
+        .args(["rev-parse", "--is-shallow-repository"])
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    match output.stdout.as_slice() {
+        b"true\n" => Some(true),
+        b"false\n" => Some(false),
+        _ => None,
+    }
+}
+
+/// A shallow boundary only truncates the bounded window when Git returned
+/// fewer commits than requested; a full window is complete regardless of depth.
+fn shallow_window_truncated(shallow: bool, logged: usize) -> bool {
+    shallow && logged < HISTORY_WINDOW
 }
 
 pub fn working_tree(
@@ -1058,6 +1106,14 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
+    #[test]
+    fn shallow_boundary_only_truncates_a_partial_history_window() {
+        assert!(shallow_window_truncated(true, 0));
+        assert!(shallow_window_truncated(true, HISTORY_WINDOW - 1));
+        assert!(!shallow_window_truncated(true, HISTORY_WINDOW));
+        assert!(!shallow_window_truncated(false, 0));
+    }
+
     struct TempRepository(PathBuf);
 
     impl TempRepository {
@@ -1136,6 +1192,50 @@ mod tests {
         assert!(reports_inside_work_tree(true, b"true\n"));
         assert!(!reports_inside_work_tree(true, b"false\n"));
         assert!(!reports_inside_work_tree(false, b"true\n"));
+    }
+
+    #[test]
+    fn shallow_boundary_truncates_only_a_partial_history_window() {
+        assert!(shallow_window_truncated(true, 0));
+        assert!(shallow_window_truncated(true, HISTORY_WINDOW - 1));
+        assert!(!shallow_window_truncated(true, HISTORY_WINDOW));
+        assert!(!shallow_window_truncated(false, 0));
+    }
+
+    #[test]
+    fn parse_history_log_fails_closed_for_partial_shallow_window_and_accepts_full_window() {
+        let files = BTreeMap::from([
+            ("a.rs".into(), "fn a() {}\n".into()),
+            ("b.rs".into(), "fn b() {}\n".into()),
+        ]);
+        let make_log = |count: usize| -> String {
+            (0..count)
+                .map(|index| {
+                    if index == 0 {
+                        format!("\u{1e}commit-{index}\nb.rs\na.rs\na.rs\nuntracked.rs\n")
+                    } else {
+                        format!("\u{1e}commit-{index}\nuntracked.rs\n")
+                    }
+                })
+                .collect()
+        };
+
+        let partial = parse_history_log(&make_log(HISTORY_WINDOW - 1), &files, true);
+        assert!(!partial.available);
+        assert!(partial.shallow);
+        assert!(partial.commits.is_empty());
+
+        let full_shallow = parse_history_log(&make_log(HISTORY_WINDOW), &files, true);
+        assert!(full_shallow.available);
+        assert!(!full_shallow.shallow);
+        assert_eq!(full_shallow.commits.len(), 1);
+        assert_eq!(full_shallow.commits[0].id, "commit-0");
+        assert_eq!(full_shallow.commits[0].files, vec!["a.rs", "b.rs"]);
+
+        let non_shallow = parse_history_log(&make_log(1), &files, false);
+        assert!(non_shallow.available);
+        assert!(!non_shallow.shallow);
+        assert_eq!(non_shallow.commits.len(), 1);
     }
 
     #[test]

@@ -5,6 +5,11 @@ All notable changes to Smells are recorded here. Release tags use `vMAJOR.MINOR.
 ## Unreleased
 
 - Update `rustix` from 1.1.5 to 1.1.6 to resolve RUSTSEC-2026-0486.
+- Fail closed when a shallow Git clone truncates the 200-commit history window:
+  history rules now exit `2` with an actionable `fetch-depth: 0` error, and
+  `history_scope.shallow` plus the
+  `git_history_truncated_by_shallow_clone_fetch_full_history` limitation disclose
+  the cause instead of reporting truncated history as clean.
 
 ## 0.6.0 - 2026-10-14
 

@@ -671,6 +671,7 @@ pub struct ReferenceCheck {
 #[derive(Clone, Debug, Serialize)]
 pub struct HistoryScope {
     pub available: bool,
+    pub shallow: bool,
     pub commit_count: usize,
     pub maximum_commits: usize,
 }

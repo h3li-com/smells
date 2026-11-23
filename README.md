@@ -320,7 +320,7 @@ uvx --from smells==0.6.0 smells check \
   --report smells-report.json
 ```
 
-For GitHub Actions, check out full history with `fetch-depth: 0`. Divergent Change and Shotgun Surgery use up to 200 commits of bounded Git co-change history.
+For GitHub Actions, check out full history with `fetch-depth: 0`. Divergent Change and Shotgun Surgery use up to 200 commits of bounded Git co-change history. A shallow clone that truncates that window makes the scan exit `2` instead of reporting the history rules as clean.
 
 Preserve both artifacts. Let exit `1` block configured violations and exit `2` block incomplete analysis.
 
