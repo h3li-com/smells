@@ -4,6 +4,22 @@ All notable changes to Smells are recorded here. Release tags use `vMAJOR.MINOR.
 
 ## 0.7.0 - 2026-11-23
 
+- Cut detector false positives found by scanning Smells with itself. The
+  observable contract of each changed rule moves to version `2`, so policies must
+  pin the new versions:
+  - `data_clumps` (all languages) reports one finding per closed group, meaning
+    the slots shared by every supporter, instead of one finding per k-subset.
+  - `foreign_accesses` (all languages) measures each method that has an owned
+    receiver instead of the whole file. Free functions and static methods are no
+    longer observed.
+  - `navigation_chains` (all languages) counts the longest run of field reads
+    and zero-argument calls. Calls with arguments start a new run. Standard
+    adapters such as `iter`, `clone`, `unwrap` and `toString` are transparent.
+    The first hop from `self`, `this` or `Self` is not counted.
+  - `rust.lazy_class` excludes enums.
+  - `rust.unused_code` treats crate-level `main`, `#[test]` and `#[bench]`
+    functions, and names referenced as path strings in attributes (such as
+    `#[serde(default = "name")]`) as reachable.
 - Update `rustix` from 1.1.5 to 1.1.6 to resolve RUSTSEC-2026-0486.
 - Fail closed when a shallow Git clone truncates the 200-commit history window:
   history rules now exit `2` with an actionable `fetch-depth: 0` error, and

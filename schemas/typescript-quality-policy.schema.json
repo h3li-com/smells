@@ -126,6 +126,15 @@
         },
         "typescript.class_method_lines": {
           "$ref": "#/$defs/selection_v2"
+        },
+        "typescript.data_clumps": {
+          "$ref": "#/$defs/selection_v2"
+        },
+        "typescript.foreign_accesses": {
+          "$ref": "#/$defs/selection_v2"
+        },
+        "typescript.navigation_chains": {
+          "$ref": "#/$defs/selection_v2"
         }
       },
       "additionalProperties": {

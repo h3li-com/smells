@@ -44,9 +44,9 @@ Match when the sum of authored code lines across direct methods is greater than 
 A TypeORM, MikroORM, or Prisma migration shell bound to its actual imported interface/base—or to the corresponding direct `implements`/`extends` structure inside an explicit anchored framework role—retains the aggregate Measurement and Finding but is reported as a nonblocking `reported_by_role` review signal. Unrelated sibling classes remain blocking.
 
 <a id="typescript-data-clumps"></a>
-### `typescript.data_clumps@1`
+### `typescript.data_clumps@2`
 
-For every callable, form the sorted unique set of `(parameter name, compact authored type syntax)`, excluding an explicit parameter named `this`. Enumerate every subset of exactly `minimum_group_size` (default 3). Match a group supported by at least `minimum_declarations` distinct callables (default 3). Untyped parameters have an empty type string. Exhausting `maximum_group_combinations` errors.
+For every callable, form the sorted unique set of `(parameter name, compact authored type syntax)`, excluding an explicit parameter named `this`. Enumerate every subset of exactly `minimum_group_size` (default 3) and keep those supported by at least `minimum_declarations` distinct callables (default 3). Report one finding per closed group: the slots shared by every supporter of a qualifying subset, so a wider shared population yields one maximal group rather than one finding per subset. Untyped parameters have an empty type string. Exhausting `maximum_group_combinations` errors.
 
 <a id="typescript-comment-share"></a>
 ### `typescript.comment_share@1`
@@ -129,8 +129,8 @@ Compare authored inheritance families and count shared child-role prefixes/suffi
 Inspect up to 200 commits and count distinct top-level source responsibilities changed in each commit. Match owner count greater than `maximum_owners`. Without Git history this rule is incomplete, never clean.
 
 <a id="typescript-foreign-accesses"></a>
-### `typescript.foreign_accesses@1` — built in
-Count dotted member accesses whose receiver is not `self`, `cls`, `this`, `Self`, or `super`. Apply the foreign count and exclusive-share thresholds. External type ownership can replace this lexical classification.
+### `typescript.foreign_accesses@2` — built in
+Measure each method that has an owned receiver: count its dotted member accesses whose receiver is not `self`, `cls`, `this`, `Self`, or `super` against all of its dotted accesses, and apply the foreign count and exclusive-share thresholds. Free functions, static methods, and methods without dotted accesses have no owned data to compare and are not observed. External type ownership can replace this lexical classification.
 
 <a id="typescript-dependency-contract"></a>
 ### `typescript.dependency_contract@1` — built in
@@ -141,5 +141,5 @@ Count foreign accesses to underscore/private-style members. Match forbidden acce
 Count authored prototype or foreign attribute mutation workarounds as missing-capability signals. Match failures greater than `maximum_failures`; capability tests may replace the heuristic.
 
 <a id="typescript-navigation-chains"></a>
-### `typescript.navigation_chains@1` — built in
-Count authored dotted transitions in contiguous navigation expressions and match at least `minimum_transitions`. Fluent APIs may legitimately match; resolved domain-owner evidence may replace the lexical result.
+### `typescript.navigation_chains@2` — built in
+Measure the longest run of consecutive navigation hops in a contiguous dotted expression and match at least `minimum_transitions`. A hop is a member read or a zero-argument call; a call with any argument text starts a new run; standard conversions (`toString`, `valueOf`, `trim`, `keys`, `values`, `entries`, `length`, `slice`, and similar) are transparent; the first hop from `self`, `this`, or `Self` reads owned state and is not counted. Remaining fluent APIs may legitimately match; resolved domain-owner evidence may replace the lexical result.

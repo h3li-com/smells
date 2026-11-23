@@ -21,7 +21,7 @@ fn navigation_expression() -> &'static Regex {
 fn member_access() -> &'static Regex {
     static ACCESS: OnceLock<Regex> = OnceLock::new();
     ACCESS.get_or_init(|| {
-        Regex::new(r"\b([A-Za-z_][A-Za-z0-9_]*)\??\.")
+        Regex::new(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\??\s*\.\s*[A-Za-z_]")
             .expect("valid built-in member-access expression")
     })
 }
@@ -34,11 +34,130 @@ fn private_member_access() -> &'static Regex {
     })
 }
 
+fn navigation_hop() -> &'static Regex {
+    static HOP: OnceLock<Regex> = OnceLock::new();
+    HOP.get_or_init(|| {
+        Regex::new(r"\??\.([A-Za-z_][A-Za-z0-9_]*)(\([^()\n]*\))?")
+            .expect("valid built-in navigation hop expression")
+    })
+}
+
+/// Standard-library adapters and conversions reshape a value without reaching
+/// into another object, so they neither extend nor break a navigation run.
+fn navigation_adapters(language: &str) -> &'static [&'static str] {
+    match language {
+        "rust" => &[
+            "iter",
+            "iter_mut",
+            "into_iter",
+            "clone",
+            "cloned",
+            "copied",
+            "collect",
+            "unwrap",
+            "expect",
+            "as_ref",
+            "as_mut",
+            "as_str",
+            "as_slice",
+            "as_deref",
+            "as_bytes",
+            "to_string",
+            "to_owned",
+            "to_vec",
+            "into",
+            "len",
+            "is_empty",
+            "borrow",
+            "borrow_mut",
+            "keys",
+            "values",
+            "rev",
+            "chars",
+            "bytes",
+            "lines",
+            "trim",
+            "count",
+            "sum",
+            "first",
+            "last",
+            "unwrap_or_default",
+            "ok",
+            "some",
+            "flatten",
+            "peekable",
+            "enumerate",
+            "display",
+        ],
+        "python" => &[
+            "items",
+            "keys",
+            "values",
+            "copy",
+            "strip",
+            "lstrip",
+            "rstrip",
+            "lower",
+            "upper",
+            "encode",
+            "decode",
+            "split",
+            "splitlines",
+            "casefold",
+            "title",
+        ],
+        "typescript" => &[
+            "toString",
+            "valueOf",
+            "trim",
+            "toLowerCase",
+            "toUpperCase",
+            "keys",
+            "values",
+            "entries",
+            "length",
+            "slice",
+            "flat",
+            "reverse",
+            "toJSON",
+        ],
+        _ => &[],
+    }
+}
+
+const NAVIGATION_SELF_ROOTS: [&str; 3] = ["self", "this", "Self"];
+
+/// The longest run of consecutive navigation hops: field reads and zero-argument
+/// calls. A call that takes arguments starts a new run, adapters are transparent,
+/// and the first hop from the method's own receiver reads owned state.
+fn navigation_run(expression: &str, adapters: &[&str]) -> u64 {
+    let root_end = expression.find(['.', '?']).unwrap_or(expression.len());
+    let mut skip_first = NAVIGATION_SELF_ROOTS.contains(&&expression[..root_end]);
+    let (mut run, mut longest) = (0_u64, 0_u64);
+    for hop in navigation_hop().captures_iter(&expression[root_end..]) {
+        if std::mem::take(&mut skip_first) {
+            continue;
+        }
+        let name = hop.get(1).expect("hop name group").as_str();
+        let arguments = hop.get(2).map_or("()", |arguments| arguments.as_str());
+        if arguments != "()" {
+            run = 0;
+        } else if !adapters.contains(&name) {
+            run += 1;
+            longest = longest.max(run);
+        }
+    }
+    longest
+}
+
 pub(super) fn visit_navigation_chains(
+    rule: &Rule,
     model: &SourceModel,
     input: &Input,
     mut emit: impl FnMut(Observation),
 ) -> Result<(), String> {
+    let language = rule.id.split('.').next().unwrap_or_default();
+    let adapters = navigation_adapters(language);
     for path in input.files.keys() {
         let code = model
             .code_by_path
@@ -46,11 +165,7 @@ pub(super) fn visit_navigation_chains(
             .ok_or_else(|| format!("missing authored code for {path}"))?;
         for (line_index, line) in code.lines().enumerate() {
             for candidate in navigation_expression().find_iter(line) {
-                let transitions = candidate
-                    .as_str()
-                    .bytes()
-                    .filter(|byte| *byte == b'.')
-                    .count();
+                let transitions = navigation_run(candidate.as_str(), adapters);
                 emit(Observation {
                     symbol: format!("{path}::navigation@{}", line_index + 1),
                     location: Location {
@@ -60,9 +175,9 @@ pub(super) fn visit_navigation_chains(
                     },
                     related_symbols: Vec::new(),
                     related_locations: Vec::new(),
-                    measurements: BTreeMap::from([("transitions".into(), transitions as u64)]),
+                    measurements: BTreeMap::from([("transitions".into(), transitions)]),
                     evidence: json!({
-                        "collector": "source_navigation_chain_v1",
+                        "collector": "source_navigation_chain_v2",
                         "expression": candidate.as_str(),
                     }),
                 });
@@ -72,57 +187,42 @@ pub(super) fn visit_navigation_chains(
     Ok(())
 }
 
-pub(super) fn foreign_accesses(
-    model: &SourceModel,
-    input: &Input,
-) -> Result<Vec<Observation>, String> {
-    let mut observations = Vec::new();
-    for (path, source) in &input.files {
-        let code = model
-            .code_by_path
-            .get(path)
-            .ok_or_else(|| format!("missing authored code for {path}"))?;
-        let accesses = member_access().captures_iter(code).collect::<Vec<_>>();
-        if accesses.is_empty() {
-            continue;
-        }
-        let foreign = accesses
-            .iter()
-            .filter(|capture| !matches!(&capture[1], "self" | "cls" | "this" | "Self" | "super"))
-            .count();
-        let first = accesses
-            .iter()
-            .find(|capture| !matches!(&capture[1], "self" | "cls" | "this" | "Self" | "super"))
-            .unwrap_or(&accesses[0]);
-        let start = first.get(0).expect("member access match").start();
-        let prefix = &source[..start];
-        let line = prefix.bytes().filter(|byte| *byte == b'\n').count() + 1;
-        let column = prefix
-            .rsplit_once('\n')
-            .map_or(prefix, |(_, suffix)| suffix)
-            .chars()
-            .count()
-            + 1;
-        observations.push(Observation {
-            symbol: format!("{path}::foreign-member-accesses"),
-            location: Location {
-                path: path.clone(),
-                line,
-                column,
-            },
-            related_symbols: Vec::new(),
-            related_locations: Vec::new(),
-            measurements: BTreeMap::from([
-                ("foreign_accesses".into(), foreign as u64),
-                ("total_accesses".into(), accesses.len() as u64),
-            ]),
-            evidence: json!({
-                "collector": "source_member_ownership_v1",
-                "owned_receivers": ["self", "cls", "this", "Self", "super"],
-            }),
-        });
-    }
-    Ok(observations)
+const OWNED_RECEIVERS: [&str; 5] = ["self", "cls", "this", "Self", "super"];
+
+/// Feature Envy is a property of a method: compare its accesses through foreign
+/// receivers with those through its own. Free functions have no own data.
+pub(super) fn foreign_accesses(model: &SourceModel) -> Vec<Observation> {
+    model
+        .functions
+        .iter()
+        .filter(|function| function.receiver)
+        .filter_map(|function| {
+            let body = function.body.as_deref()?;
+            let receivers = member_access()
+                .captures_iter(body)
+                .map(|capture| capture.get(1).expect("receiver group").as_str())
+                .collect::<Vec<_>>();
+            if receivers.is_empty() {
+                return None;
+            }
+            let foreign = receivers
+                .iter()
+                .filter(|receiver| !OWNED_RECEIVERS.contains(receiver))
+                .count();
+            Some(observation(
+                function.symbol.clone(),
+                function.location.clone(),
+                [
+                    ("foreign_accesses", foreign as u64),
+                    ("total_accesses", receivers.len() as u64),
+                ],
+                json!({
+                    "collector": "source_method_member_ownership_v2",
+                    "owned_receivers": OWNED_RECEIVERS,
+                }),
+            ))
+        })
+        .collect()
 }
 
 fn rust_dependency_contract(
@@ -325,42 +425,124 @@ mod tests {
     }
 
     #[test]
-    fn navigation_chains_count_transitions_and_preserve_one_based_locations() {
-        let source = "let value = root.first().second.third;\n  other?.child.run();\n";
-        let input = input("typescript-v1", &[("sample.ts", source)]);
-        let model = model_with_code("sample.ts", source);
-        let mut observations = Vec::new();
-        visit_navigation_chains(&model, &input, |observation| observations.push(observation))
-            .unwrap();
-
-        assert_eq!(observations.len(), 2);
-        assert_eq!(observations[0].measurements["transitions"], 3);
-        assert_eq!(observations[0].location.line, 1);
-        assert_eq!(observations[0].location.column, 13);
-        assert_eq!(observations[1].measurements["transitions"], 2);
-        assert_eq!(observations[1].location.line, 2);
-        assert_eq!(observations[1].location.column, 3);
+    fn navigation_adapters_are_transparent_only_in_their_own_language() {
+        for (language, expression) in [
+            ("rust", "a.b.iter().c"),
+            ("python", "a.b.items().c"),
+            ("typescript", "a.b.toString().c"),
+        ] {
+            assert_eq!(
+                navigation_run(expression, navigation_adapters(language)),
+                2,
+                "{language}"
+            );
+            assert_eq!(navigation_run(expression, &[]), 3, "{language}");
+        }
     }
 
     #[test]
-    fn foreign_accesses_exclude_each_owned_receiver_but_keep_total_accesses() {
+    fn navigation_chains_count_the_longest_run_of_navigation_hops() {
         let source = concat!(
-            "self.owned\n",
-            "service.remote\n",
-            "this.owned\n",
-            "object.other\n",
-            "super.owned\n",
+            "let value = root.first().second.third;\n",
+            "  other?.child.run();\n",
+            "  a.b.c.find(x).d.e;\n",
+            "  self.config.items.iter().cloned().last_seen;\n",
+            "  this.a.b.c;\n",
         );
-        let observations = foreign_accesses(
-            &model_with_code("sample.py", source),
+        let input = input("typescript-v1", &[("sample.ts", source)]);
+        let model = model_with_code("sample.ts", source);
+        let mut observations = Vec::new();
+        visit_navigation_chains(
+            &rule("typescript.navigation_chains"),
+            &model,
+            &input,
+            |observation| observations.push(observation),
+        )
+        .unwrap();
+
+        let measured = observations
+            .iter()
+            .map(|observation| {
+                (
+                    observation.location.line,
+                    observation.location.column,
+                    observation.measurements["transitions"],
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            measured,
+            [(1, 13, 3), (2, 3, 2), (3, 3, 2), (4, 3, 4), (5, 3, 2)]
+        );
+        assert_eq!(
+            navigation_run(
+                "self.config.items.iter().cloned().last_seen",
+                navigation_adapters("rust")
+            ),
+            2
+        );
+        assert_eq!(navigation_run("Self.a.b.c.d", &[]), 3);
+    }
+
+    #[test]
+    fn foreign_accesses_measure_each_receiver_method_against_its_own_accesses() {
+        let source = concat!(
+            "class Service:\n",
+            "    def envy(self, order):\n",
+            "        return order.a + order.b + order.c + self.x\n",
+            "    def own(self):\n",
+            "        return self.x + cls.y + super.z\n",
+            "    @staticmethod\n",
+            "    def helper(order):\n",
+            "        return order.a + order.b\n",
+            "def free(order):\n",
+            "    return order.a + order.b\n",
+        );
+        let model = super::super::model::source_model(
+            &rule("python.foreign_accesses"),
             &input("python-v1", &[("sample.py", source)]),
         )
         .unwrap();
+        let observations = foreign_accesses(&model);
+        let measured = observations
+            .iter()
+            .map(|observation| {
+                (
+                    observation.symbol.as_str(),
+                    observation.location.line,
+                    observation.measurements["foreign_accesses"],
+                    observation.measurements["total_accesses"],
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            measured,
+            [
+                ("sample.py::Service.envy", 2, 3, 4),
+                ("sample.py::Service.own", 4, 0, 3),
+            ]
+        );
+    }
+
+    #[test]
+    fn foreign_accesses_read_token_stream_rust_method_bodies() {
+        let source = concat!(
+            "pub struct S { x: u8 }\n",
+            "impl S {\n",
+            "    pub fn envy(&self, o: &O) -> u8 { o.a + o.b + o.c + self.x + (0..o.d).len() as u8 }\n",
+            "    pub fn new() -> Self { S { x: 0 } }\n",
+            "}\n",
+        );
+        let model = super::super::model::source_model(
+            &rule("rust.foreign_accesses"),
+            &input("rust-v1", &[("src/lib.rs", source)]),
+        )
+        .unwrap();
+        let observations = foreign_accesses(&model);
         assert_eq!(observations.len(), 1);
-        assert_eq!(observations[0].measurements["foreign_accesses"], 2);
+        assert_eq!(observations[0].symbol, "src/lib.rs::S.envy");
+        assert_eq!(observations[0].measurements["foreign_accesses"], 4);
         assert_eq!(observations[0].measurements["total_accesses"], 5);
-        assert_eq!(observations[0].location.line, 2);
-        assert_eq!(observations[0].location.column, 1);
     }
 
     #[test]

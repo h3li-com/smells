@@ -433,31 +433,34 @@ fn corpus_occurrences(model: &SourceModel, name: &str) -> usize {
         .sum()
 }
 
+/// A private declaration is unused when nothing reaches it: no second corpus
+/// occurrence, no attribute path naming it, and no harness invoking it.
+fn unreferenced(model: &SourceModel, private: bool, name: &str) -> bool {
+    private
+        && !name.starts_with("__")
+        && !model.attribute_references.contains(name)
+        && corpus_occurrences(model, name) == 1
+}
+
 pub(super) fn unused_code(model: &SourceModel) -> Vec<Observation> {
+    let functions = model
+        .functions
+        .iter()
+        .filter(|function| !function.entry_point)
+        .filter(|function| unreferenced(model, function.private, &function.name))
+        .map(|function| (&function.location, &function.symbol));
+    let classes = model
+        .classes
+        .iter()
+        .filter(|class| unreferenced(model, class.private, &class.name))
+        .map(|class| (&class.location, &class.symbol));
     let mut by_file: BTreeMap<String, (Location, Vec<String>)> = BTreeMap::new();
-    for function in &model.functions {
-        if function.private
-            && !function.name.starts_with("__")
-            && corpus_occurrences(model, &function.name) == 1
-        {
-            by_file
-                .entry(function.location.path.clone())
-                .or_insert_with(|| (function.location.clone(), Vec::new()))
-                .1
-                .push(function.symbol.clone());
-        }
-    }
-    for class in &model.classes {
-        if class.private
-            && !class.name.starts_with("__")
-            && corpus_occurrences(model, &class.name) == 1
-        {
-            by_file
-                .entry(class.location.path.clone())
-                .or_insert_with(|| (class.location.clone(), Vec::new()))
-                .1
-                .push(class.symbol.clone());
-        }
+    for (location, symbol) in functions.chain(classes) {
+        by_file
+            .entry(location.path.clone())
+            .or_insert_with(|| (location.clone(), Vec::new()))
+            .1
+            .push(symbol.clone());
     }
     by_file
         .into_iter()
@@ -467,9 +470,9 @@ pub(super) fn unused_code(model: &SourceModel) -> Vec<Observation> {
                 location,
                 [("findings", symbols.len() as u64)],
                 json!({
-                    "collector": "authored_private_declaration_references_v1",
+                    "collector": "authored_private_declaration_references_v2",
                     "symbols": symbols,
-                    "scope": "single-underscore private declarations with no corpus reference",
+                    "scope": "private declarations with no corpus, attribute-path, or harness reference",
                 }),
             )
         })
@@ -555,6 +558,8 @@ mod tests {
             body: body.map(Arc::from),
             source: Arc::from(body.unwrap_or_default()),
             private: false,
+            receiver: false,
+            entry_point: false,
         }
     }
 
@@ -741,6 +746,32 @@ mod tests {
         let unused_parameters = unused_type_parameters(&model);
         assert_eq!(unused_parameters.len(), 1);
         assert_eq!(unused_parameters[0].evidence["unused_parameters"][0], "T");
+    }
+
+    #[test]
+    fn unused_code_skips_harness_entry_points_and_attribute_path_references() {
+        let mut entry = function("runs", Some("{}"));
+        entry.private = true;
+        entry.entry_point = true;
+        let mut attribute = function("defaults", Some("{}"));
+        attribute.private = true;
+        let mut unused = function("orphan", Some("{}"));
+        unused.private = true;
+        let model = SourceModel {
+            functions: vec![entry, attribute, unused],
+            attribute_references: BTreeSet::from(["defaults".into()]),
+            code_by_path: BTreeMap::from([(
+                "src/domain.rs".into(),
+                Arc::from("fn runs() {}\nfn defaults() {}\nfn orphan() {}\n") as Arc<str>,
+            )]),
+            ..SourceModel::default()
+        };
+
+        let observations = unused_code(&model);
+        assert_eq!(
+            observations[0].evidence["symbols"],
+            json!(["src/domain.rs::orphan"])
+        );
     }
 
     #[test]

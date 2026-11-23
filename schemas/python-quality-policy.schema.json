@@ -123,6 +123,15 @@
       "properties": {
         "python.function_lines": {
           "$ref": "#/$defs/selection_v2"
+        },
+        "python.data_clumps": {
+          "$ref": "#/$defs/selection_v2"
+        },
+        "python.foreign_accesses": {
+          "$ref": "#/$defs/selection_v2"
+        },
+        "python.navigation_chains": {
+          "$ref": "#/$defs/selection_v2"
         }
       },
       "additionalProperties": {
