@@ -20,6 +20,9 @@ pub struct Input {
 #[derive(Clone, Debug, Default)]
 pub struct History {
     pub available: bool,
+    /// The repository is a shallow clone whose boundary truncates the bounded
+    /// history window, so `available` is false even though Git responded.
+    pub shallow: bool,
     pub commits: Vec<HistoryCommit>,
 }
 

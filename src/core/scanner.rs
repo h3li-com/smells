@@ -158,6 +158,7 @@ mod tests {
                 source_roles: Vec::new(),
                 history: History {
                     available: true,
+                    shallow: false,
                     commits: Vec::new(),
                 },
                 policy,

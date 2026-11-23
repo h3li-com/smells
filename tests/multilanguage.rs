@@ -3059,6 +3059,54 @@ fn every_selected_history_rule_is_incomplete_when_git_history_is_unavailable() {
 }
 
 #[test]
+fn shallow_clone_truncating_the_history_window_fails_closed() {
+    let policy: Value =
+        serde_json::from_str(include_str!("../examples/python-quality-policy.json")).unwrap();
+    let origin = Workspace::new("app.py", "value = 1\n", &policy);
+    origin.stage();
+    origin.commit("baseline");
+    origin.source("app.py", "value = 2\n");
+    origin.commit("second change");
+
+    let clone = Workspace {
+        path: origin.path.with_extension("shallow"),
+    };
+    let cloned = Command::new("git")
+        .args(["clone", "--quiet", "--depth", "1"])
+        .arg(format!("file://{}", origin.path.display()))
+        .arg(&clone.path)
+        .output()
+        .expect("clone shallow repository");
+    assert!(
+        cloned.status.success(),
+        "{}",
+        String::from_utf8_lossy(&cloned.stderr)
+    );
+
+    let output = clone.check_path();
+    assert_eq!(output.status.code(), Some(2));
+    let data = report(&output);
+    assert_eq!(data["history_scope"]["available"], false);
+    assert_eq!(data["history_scope"]["shallow"], true);
+    assert_eq!(data["history_scope"]["commit_count"], 0);
+    assert!(data["limitations"].as_array().unwrap().iter().any(
+        |limitation| limitation == "git_history_truncated_by_shallow_clone_fetch_full_history"
+    ));
+    for (rule, smell) in [
+        ("python.divergent_change", "divergent-change"),
+        ("python.shotgun_surgery", "shotgun-surgery"),
+    ] {
+        assert!(data["errors"].as_array().unwrap().iter().any(|error| {
+            error
+                == &format!(
+                    "rule {rule}: Git history is truncated by a shallow clone; fetch full history (for example `fetch-depth: 0`) for built-in collector: {rule}"
+                )
+        }));
+        assert_eq!(smell_result(&data, smell)["coverage_status"], "incomplete");
+    }
+}
+
+#[test]
 fn default_typescript_scan_runs_every_built_in_source_collector() {
     let policy: Value =
         serde_json::from_str(include_str!("../examples/typescript-quality-policy.json")).unwrap();

@@ -47,6 +47,12 @@ impl<'a> BuiltInCollectors<'a> {
     /// and found no candidate in its defined scope.
     pub(crate) fn collect(&self, rule: &Rule) -> Result<Vec<Observation>, String> {
         let kind = RuleKind::from_id(&rule.id)?;
+        if kind.needs_history() && self.input.history.shallow {
+            return Err(format!(
+                "Git history is truncated by a shallow clone; fetch full history (for example `fetch-depth: 0`) for built-in collector: {}",
+                rule.id
+            ));
+        }
         if kind.needs_history() && !self.input.history.available {
             return Err(format!(
                 "Git history is unavailable for built-in collector: {}",

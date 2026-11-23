@@ -50,7 +50,7 @@ When a canonical migration entrypoint exceeds the generic line limit, it remains
 
 Every rule inside `coverage` repeats `selected` and `groups`. `measurement_status` distinguishes `measured_defined_scope`, `excluded_by_group`, `disabled`, `not_implemented`, and incomplete states. Neither excluded nor disabled means passed.
 
-`history_scope` discloses whether bounded Git history was available, how many commits were captured, and the maximum. If history is unavailable while a history rule is selected, the scan exits `2`; rule mode never converts a missing prerequisite into a clean result.
+`history_scope` discloses whether bounded Git history was available, how many commits were captured, and the maximum. If history is unavailable while a history rule is selected, the scan exits `2`; rule mode never converts a missing prerequisite into a clean result. `history_scope.shallow` is `true` when a shallow clone returned fewer commits than the window; that history is treated as unavailable and the limitation `git_history_truncated_by_shallow_clone_fetch_full_history` tells CI to fetch full history (for example `fetch-depth: 0`). A shallow clone that still yields the complete window is accepted.
 
 ## Repository implementation model
 
