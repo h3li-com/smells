@@ -20,7 +20,12 @@
       "propertyNames": {"enum":["rust.function_lines","rust.function_arguments","rust.type_fields","rust.enum_variants","rust.type_functions","rust.type_function_lines","rust.trait_functions","rust.primitive_slots","rust.data_clumps","rust.alternative_interfaces","rust.repeated_dispatch","rust.temporary_fields","rust.comment_share","rust.duplicate_functions","rust.data_class","rust.lazy_class","rust.forwarding_share","rust.function_crap","rust.unused_code","rust.unused_type_parameters","rust.nominal_slot_contract","rust.port_conformance","rust.divergent_change","rust.shotgun_surgery","rust.foreign_accesses","rust.dependency_contract","rust.library_capabilities","rust.navigation_chains"]},
       "properties": {
         "rust.function_lines": {"$ref":"#/$defs/selection_v2"},
-        "rust.type_function_lines": {"$ref":"#/$defs/selection_v2"}
+        "rust.type_function_lines": {"$ref":"#/$defs/selection_v2"},
+        "rust.data_clumps": {"$ref":"#/$defs/selection_v2"},
+        "rust.foreign_accesses": {"$ref":"#/$defs/selection_v2"},
+        "rust.navigation_chains": {"$ref":"#/$defs/selection_v2"},
+        "rust.lazy_class": {"$ref":"#/$defs/selection_v2"},
+        "rust.unused_code": {"$ref":"#/$defs/selection_v2"}
       },
       "additionalProperties": {"$ref":"#/$defs/selection"}
     },

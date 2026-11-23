@@ -71,7 +71,7 @@
       }
     },
     "python.data_clumps": {
-      "version": 1,
+      "version": 2,
       "mode": "report",
       "parameters": {
         "minimum_group_size": 3,
@@ -210,7 +210,7 @@
       }
     },
     "python.foreign_accesses": {
-      "version": 1,
+      "version": 2,
       "mode": "report",
       "parameters": {
         "minimum_foreign_accesses": 5,
@@ -232,7 +232,7 @@
       }
     },
     "python.navigation_chains": {
-      "version": 1,
+      "version": 2,
       "mode": "report",
       "parameters": {
         "minimum_transitions": 3

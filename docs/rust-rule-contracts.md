@@ -63,7 +63,7 @@ Size is a measurable policy, not proof of cohesion or responsibility count. Unkn
 ### 5. Data Clumps
 
 <a id="rust-data-clumps"></a>
-**Implemented indicator: rust.data_clumps@1.** Enumerate every named-slot subset of exactly minimum_group_size (default 3) in each field/parameter population. Compare sorted sets of (name, exact type-token syntax). Count distinct physical supporting declarations (default minimum 3); each declaration supports a particular group once. Deduplicate shared-file declarations by path/line/column before enumeration, retaining the first sorted module context as their representative. Tuple fields/destructuring parameters lack named slots and are excluded. Larger shared populations yield multiple qualifying subsets; there is no hidden maximal-group algorithm. Types preserve spelled paths/generic arguments/lifetimes, not canonical resolved equivalence. Report group and supporters. Enumeration budget exhaustion errors. Fixtures: 2/3 declarations, 2/3 slots, extra fields, shared modules, duplicate counting, renamed members and aliases with different spellings.
+**Implemented indicator: rust.data_clumps@2.** Enumerate every named-slot subset of exactly minimum_group_size (default 3) in each field/parameter population. Compare sorted sets of (name, exact type-token syntax). Count distinct physical supporting declarations (default minimum 3); each declaration supports a particular group once. Deduplicate shared-file declarations by path/line/column before enumeration, retaining the first sorted module context as their representative. Tuple fields/destructuring parameters lack named slots and are excluded. Each qualifying subset is closed over its supporters: the reported group is the slots shared by every supporting declaration, so a larger shared population yields one maximal group rather than one finding per subset. Types preserve spelled paths/generic arguments/lifetimes, not canonical resolved equivalence. Report group and supporters. Enumeration budget exhaustion errors. Fixtures: 2/3 declarations, 2/3 slots, extra fields, shared modules, duplicate counting, renamed members and aliases with different spellings.
 
 ### 6. Alternative Classes with Different Interfaces
 
@@ -130,7 +130,7 @@ Fixtures: minimum sizes, alpha-renaming/literal changes, operator changes, repea
 ### 16. Lazy Class
 
 <a id="rust-lazy-class"></a>
-**Implemented indicator: rust.lazy_class@1.** At most 1 field, 1 associated function and 5 summed body code lines; all three must match. Empty authored totals are zero, not proof the compiled type does nothing. Same ownership union and enum-field convention as above. Nominal newtypes, markers and small ports can intentionally match. Fixtures: every maximum and plus one, marker/newtype, generated/default scope.
+**Implemented indicator: rust.lazy_class@2.** Enums are excluded because their variants are their content. At most 1 field, 1 associated function and 5 summed body code lines; all three must match. Empty authored totals are zero, not proof the compiled type does nothing. Same ownership union and enum-field convention as above. Nominal newtypes, markers and small ports can intentionally match. Fixtures: every maximum and plus one, marker/newtype, generated/default scope.
 
 ### 17. Speculative Generality
 
@@ -140,12 +140,12 @@ Fixtures: minimum sizes, alpha-renaming/literal changes, operator changes, repea
 ### 18. Feature Envy
 
 <a id="rust-foreign-accesses"></a>
-**Built-in with optional type-resolution override: rust.foreign_accesses@1.** Count dotted member accesses whose receiver is not `self`, `Self`, or `super`; match at least 5 and a share strictly above 60%. This lexical ownership approximation includes method calls and does not choose where behavior belongs. Resolved field-owner evidence may replace it.
+**Built-in with optional type-resolution override: rust.foreign_accesses@2.** Measure each method with a `self` receiver: count its dotted member accesses whose receiver is not `self`, `Self`, or `super` against all of its dotted accesses; match at least 5 and a share strictly above 60%. This lexical ownership approximation includes method calls and does not choose where behavior belongs. Free and associated functions have no owned data to compare and are not observed. Resolved field-owner evidence may replace it.
 
 ### 19. Dead Code
 
 <a id="rust-unused-code"></a>
-**Built-in with optional compiler override: rust.unused_code@1.** Maximum zero findings. Count private functions, methods, structs, and enums with no second identifier occurrence in the captured corpus. Public APIs, features, macro/generated use, imports, and unreachable statements are outside this conservative scope. Frozen compiler diagnostics may replace it.
+**Built-in with optional compiler override: rust.unused_code@2.** Maximum zero findings. Count private functions, methods, structs, and enums with no second identifier occurrence in the captured corpus. Harness entry points (crate-level `main`, and functions with a `test` or `bench` attribute) and names referenced as path strings in non-doc attributes (for example `#[serde(default = "path::name")]`) are reachable and excluded. Public APIs, features, macro/generated use, imports, and unreachable statements are outside this conservative scope. Frozen compiler diagnostics may replace it.
 
 ### 20. Inappropriate Intimacy
 
@@ -160,7 +160,7 @@ Fixtures: minimum sizes, alpha-renaming/literal changes, operator changes, repea
 ### 22. Message Chains
 
 <a id="rust-navigation-chains"></a>
-**Built-in with optional type/domain override: rust.navigation_chains@1.** Count authored dotted transitions in contiguous navigation expressions and match at least 3. Fluent iterator/build pipelines can legitimately match. Resolved domain-owner and role evidence may replace the lexical observation.
+**Built-in with optional type/domain override: rust.navigation_chains@2.** Measure the longest run of consecutive navigation hops in a contiguous dotted expression and match at least 3. A hop is a field read or a zero-argument call; a call with any argument text starts a new run; standard adapters and conversions (`iter`, `clone`, `collect`, `unwrap`, `as_ref`, `to_string`, `into`, `len`, `first`, and similar) are transparent; the first hop from `self` or `Self` reads owned state and is not counted. Remaining fluent builder pipelines can legitimately match. Resolved domain-owner and role evidence may replace the lexical observation.
 
 ### 23. Middle Man
 

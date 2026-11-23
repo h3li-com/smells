@@ -1661,7 +1661,7 @@ fn finding_log_uses_the_rust_parser_failure_span() {
 #[test]
 fn next_declaration_suppression_covers_a_finding_inside_its_body() {
     let workspace = Workspace::new(
-        "pub struct Root;\n// smells: ignore[rust.navigation_chains] -- fluent traversal is the public API\npub fn read(root: Root) { let _ = root.first.second.third; }\n",
+        "pub struct Root;\n// smells: ignore[rust.navigation_chains] -- fluent traversal is the public API\npub fn read(root: Root) { let _ = root.head.second.third; }\n",
     );
     workspace.git(&["init", "-q"]);
     let output = workspace.command(&[
@@ -2574,6 +2574,10 @@ fn tiny_type_indicator_requires_all_three_limits() {
             matched(&report(&workspace.check()), "rust.lazy_class"),
             expected
         );
+    }
+    for enumeration in ["enum A{X}", "enum A{X(i32),Y}"] {
+        let workspace = Workspace::new(enumeration);
+        assert!(!matched(&report(&workspace.check()), "rust.lazy_class"));
     }
 }
 

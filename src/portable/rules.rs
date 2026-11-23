@@ -1,5 +1,6 @@
 use super::extract::{ClassSummary, record_class_metrics};
 use super::*;
+use crate::patterns::closed_slot_groups;
 
 fn data_class_match(fields: usize, operations: usize, minimum: u64, maximum: u64) -> bool {
     fields as u64 >= minimum && operations as u64 <= maximum
@@ -29,10 +30,6 @@ fn comment_share_match(lines: usize, comments: usize, minimum_lines: u64, share:
 
 fn enough_clump_slots(slots: usize, minimum: usize) -> bool {
     slots >= minimum
-}
-
-fn enough_clump_support(declarations: usize, minimum: u64) -> bool {
-    declarations as u64 >= minimum
 }
 
 fn class_patterns(facts: &Facts, policy: &Policy, language: &str, report: &mut Report) {
@@ -109,34 +106,6 @@ fn comments(facts: &Facts, policy: &Policy, language: &str, report: &mut Report)
     }
 }
 
-fn combinations(
-    slots: &[(String, String)],
-    size: usize,
-    start: usize,
-    chosen: &mut Vec<(String, String)>,
-    groups: &mut Vec<Vec<(String, String)>>,
-    remaining: &mut usize,
-) -> Result<(), String> {
-    if chosen.len() == size {
-        if *remaining == 0 {
-            return Err("maximum_group_combinations budget exceeded".into());
-        }
-        *remaining -= 1;
-        groups.push(chosen.clone());
-        return Ok(());
-    }
-    let needed = size - chosen.len();
-    if needed > slots.len().saturating_sub(start) {
-        return Ok(());
-    }
-    for index in start..=slots.len() - needed {
-        chosen.push(slots[index].clone());
-        combinations(slots, size, index + 1, chosen, groups, remaining)?;
-        chosen.pop();
-    }
-    Ok(())
-}
-
 fn clumps(facts: &Facts, policy: &Policy, language: &str, report: &mut Report) {
     let id = format!("{language}.data_clumps");
     if !policy.enabled(&id) {
@@ -145,7 +114,7 @@ fn clumps(facts: &Facts, policy: &Policy, language: &str, report: &mut Report) {
     let size = policy.parameter(&id, "minimum_group_size") as usize;
     let minimum = policy.parameter(&id, "minimum_declarations");
     let mut remaining = policy.limits.maximum_group_combinations;
-    let mut supports: BTreeMap<Vec<(String, String)>, BTreeSet<usize>> = BTreeMap::new();
+    let mut populations = Vec::new();
     for (index, function) in facts.functions.iter().enumerate() {
         let slots: Vec<_> = function
             .parameters
@@ -155,29 +124,18 @@ fn clumps(facts: &Facts, policy: &Policy, language: &str, report: &mut Report) {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
-        if !enough_clump_slots(slots.len(), size) {
-            continue;
+        if enough_clump_slots(slots.len(), size) {
+            populations.push((index, slots));
         }
-        let mut groups = Vec::new();
-        if let Err(error) = combinations(
-            &slots,
-            size,
-            0,
-            &mut Vec::new(),
-            &mut groups,
-            &mut remaining,
-        ) {
+    }
+    let supports = match closed_slot_groups(&populations, size, minimum, &mut remaining) {
+        Ok(supports) => supports,
+        Err(error) => {
             report.error(error);
             return;
         }
-        for group in groups {
-            supports.entry(group).or_default().insert(index);
-        }
-    }
+    };
     for (group, support) in supports {
-        if !enough_clump_support(support.len(), minimum) {
-            continue;
-        }
         let functions: Vec<_> = support
             .into_iter()
             .map(|index| &facts.functions[index])
@@ -318,10 +276,10 @@ pub(super) fn patterns(facts: &Facts, policy: &Policy, language: &str, report: &
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::{
-        FunctionFact, Location, body_line_total, combinations, comment_share_match,
-        data_class_match, enough_clump_slots, enough_clump_support, lazy_class_match,
-        ordered_functions, overlapping_functions,
+        FunctionFact, Location, body_line_total, comment_share_match, data_class_match,
+        enough_clump_slots, lazy_class_match, ordered_functions, overlapping_functions,
     };
+    use crate::patterns::combinations;
 
     fn function(symbol: &str, path: &str, line: usize, body_range: (usize, usize)) -> FunctionFact {
         FunctionFact {
@@ -406,13 +364,10 @@ mod tests {
     }
 
     #[test]
-    fn clump_candidate_and_support_thresholds_are_inclusive_and_independent() {
+    fn clump_candidate_threshold_is_inclusive() {
         assert!(enough_clump_slots(3, 3));
         assert!(enough_clump_slots(4, 3));
         assert!(!enough_clump_slots(2, 3));
-        assert!(enough_clump_support(3, 3));
-        assert!(enough_clump_support(4, 3));
-        assert!(!enough_clump_support(2, 3));
     }
 
     #[test]

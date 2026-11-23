@@ -209,6 +209,12 @@ fn selection(rule: &str, mode: &str, parameters: Value) -> Value {
         "python.function_lines" | "typescript.function_lines" | "typescript.class_method_lines" => {
             2
         }
+        _ if rule.ends_with(".data_clumps")
+            || rule.ends_with(".foreign_accesses")
+            || rule.ends_with(".navigation_chains") =>
+        {
+            2
+        }
         _ => 1,
     };
     json!({"version": version, "mode": mode, "parameters": parameters})
@@ -2755,8 +2761,9 @@ fn default_python_scan_detects_feature_envy_without_external_evidence() {
     let workspace = Workspace::new(
         "billing.py",
         concat!(
-            "def invoice(customer):\n",
-            "    return (customer.name, customer.address, customer.city, ",
+            "class Billing:\n",
+            "    def invoice(self, customer):\n",
+            "        return (customer.name, customer.address, customer.city, ",
             "customer.country, customer.account, customer.currency)\n",
         ),
         &policy,
@@ -3130,7 +3137,7 @@ fn default_typescript_scan_runs_every_built_in_source_collector() {
             "function branching(value:number){ if(value>0){return value;} return 0; }\n",
             "function _unusedHelper(){ return 1; }\n",
             "function generic<T>(value:number){ return value; }\n",
-            "function inspect(order:any, customer:any, account:any){ const city=order.customer.address.city; return [customer.name,customer.address,customer.city,customer.country,customer.account,customer.currency,account._secret,city]; }\n",
+            "class Inspector { inspect(order:any, customer:any, account:any){ const city=order.customer.address.city; return [customer.name,customer.address,customer.city,customer.country,customer.account,customer.currency,account._secret,city]; } }\n",
             "External.prototype.patch = replacement;\n",
         ),
         &policy,

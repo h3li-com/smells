@@ -318,7 +318,9 @@ fn lazy_class(
     report: &mut Report,
 ) {
     let id = "rust.lazy_class";
-    if !policy.enabled(id) {
+    // An enum's variants are its content: a closed value set is not an
+    // abstraction that fails to earn its keep.
+    if !policy.enabled(id) || ty.is_enum {
         return;
     }
     let fields = parameter(policy, id, "maximum_fields");
@@ -451,7 +453,7 @@ fn comments(facts: &Facts, policy: &Policy, report: &mut Report) {
     }
 }
 
-fn combinations(
+pub(crate) fn combinations(
     slots: &[(String, String)],
     k: usize,
     start: usize,
@@ -479,6 +481,45 @@ fn combinations(
     Ok(())
 }
 
+type Slot = (String, String);
+
+/// Supported `size`-slot groups keyed by their closure: the complete slot set
+/// shared by exactly the same supporting populations, so one clump is one group.
+pub(crate) fn closed_slot_groups(
+    populations: &[(usize, Vec<Slot>)],
+    size: usize,
+    minimum: u64,
+    remaining: &mut usize,
+) -> Result<BTreeMap<Vec<Slot>, BTreeSet<usize>>, String> {
+    let mut supports: BTreeMap<Vec<Slot>, BTreeSet<usize>> = BTreeMap::new();
+    for (index, slots) in populations {
+        let mut groups = Vec::new();
+        combinations(slots, size, 0, &mut Vec::new(), &mut groups, remaining)?;
+        for group in groups {
+            supports.entry(group).or_default().insert(*index);
+        }
+    }
+    let slots_by_index: BTreeMap<_, BTreeSet<_>> = populations
+        .iter()
+        .map(|(index, slots)| (*index, slots.iter().collect()))
+        .collect();
+    let mut closed = BTreeMap::new();
+    for support in supports.into_values() {
+        if (support.len() as u64) < minimum {
+            continue;
+        }
+        let closure = support
+            .iter()
+            .map(|index| &slots_by_index[index])
+            .fold(None::<BTreeSet<&Slot>>, |shared, slots| {
+                Some(shared.map_or_else(|| slots.clone(), |shared| &shared & slots))
+            })
+            .unwrap_or_default();
+        closed.insert(closure.into_iter().cloned().collect(), support);
+    }
+    Ok(closed)
+}
+
 fn clumps(facts: &Facts, policy: &Policy, report: &mut Report) {
     let id = "rust.data_clumps";
     if !policy.enabled(id) {
@@ -487,8 +528,8 @@ fn clumps(facts: &Facts, policy: &Policy, report: &mut Report) {
     let size = parameter(policy, id, "minimum_group_size");
     let minimum = parameter(policy, id, "minimum_declarations");
     let mut remaining = policy.limits.maximum_group_combinations;
-    let mut groups: BTreeMap<Vec<(String, String)>, BTreeSet<usize>> = BTreeMap::new();
     let mut declarations = BTreeSet::new();
+    let mut populations = Vec::new();
     for (index, slots) in facts.slots.iter().enumerate() {
         if !declarations.insert((
             &slots.location.path,
@@ -504,29 +545,18 @@ fn clumps(facts: &Facts, policy: &Policy, report: &mut Report) {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
-        if (named.len() as u64) < size {
-            continue;
+        if (named.len() as u64) >= size {
+            populations.push((index, named));
         }
-        let mut subsets = vec![];
-        if let Err(error) = combinations(
-            &named,
-            size as usize,
-            0,
-            &mut vec![],
-            &mut subsets,
-            &mut remaining,
-        ) {
+    }
+    let groups = match closed_slot_groups(&populations, size as usize, minimum, &mut remaining) {
+        Ok(groups) => groups,
+        Err(error) => {
             report.error(error);
             return;
         }
-        for group in subsets {
-            groups.entry(group).or_default().insert(index);
-        }
-    }
+    };
     for (group, support) in groups {
-        if (support.len() as u64) < minimum {
-            continue;
-        }
         let populations: Vec<_> = support.into_iter().map(|i| &facts.slots[i]).collect();
         let first = populations[0];
         report.finding_with_relations(policy,id,&first.symbol,&first.location,"repeated named syntax group",json!({"slots":group.len(),"declarations":populations.len()}),"both >=",
@@ -1014,6 +1044,41 @@ mod tests {
                 &mut remaining,
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn closed_slot_groups_report_one_maximal_group_per_supporting_set() {
+        let slot = |name: &str| (name.to_string(), "i32".to_string());
+        let wide = vec![slot("a"), slot("b"), slot("c"), slot("d"), slot("e")];
+        let narrow = vec![slot("a"), slot("b"), slot("c"), slot("z")];
+        let populations = [(0, wide.clone()), (1, wide.clone()), (2, wide), (3, narrow)];
+        let mut remaining = 100;
+        let groups = closed_slot_groups(&populations, 3, 3, &mut remaining).unwrap();
+        assert_eq!(
+            groups.into_iter().collect::<Vec<_>>(),
+            [
+                (
+                    vec![slot("a"), slot("b"), slot("c")],
+                    BTreeSet::from([0, 1, 2, 3])
+                ),
+                (
+                    vec![slot("a"), slot("b"), slot("c"), slot("d"), slot("e")],
+                    BTreeSet::from([0, 1, 2])
+                ),
+            ]
+        );
+        assert_eq!(remaining, 100 - 3 * 10 - 4);
+        let mut remaining = 100;
+        assert!(
+            closed_slot_groups(&populations, 3, 5, &mut remaining)
+                .unwrap()
+                .is_empty()
+        );
+        let mut remaining = 33;
+        assert_eq!(
+            closed_slot_groups(&populations, 3, 3, &mut remaining).unwrap_err(),
+            "maximum_group_combinations budget exceeded"
         );
     }
 

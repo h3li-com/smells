@@ -74,7 +74,7 @@ impl<'a> BuiltInCollectors<'a> {
     ) -> Result<(), String> {
         let kind = RuleKind::from_id(&rule.id)?;
         if matches!(kind, RuleKind::NavigationChains) {
-            return source::visit_navigation_chains(self.model(rule)?, self.input, emit);
+            return source::visit_navigation_chains(rule, self.model(rule)?, self.input, emit);
         }
         for observation in self.collect(rule)? {
             emit(observation);
@@ -88,7 +88,7 @@ impl<'a> BuiltInCollectors<'a> {
         }
         let model = self.model(rule)?;
         match kind {
-            RuleKind::ForeignAccesses => source::foreign_accesses(model, self.input),
+            RuleKind::ForeignAccesses => Ok(source::foreign_accesses(model)),
             RuleKind::DependencyContract => source::dependency_contract(rule, model, self.input),
             RuleKind::PrimitiveSlots => Ok(source::primitive_slots(rule, model)),
             _ => unreachable!("collector domain and source dispatcher must agree"),

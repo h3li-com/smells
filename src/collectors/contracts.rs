@@ -392,6 +392,8 @@ mod tests {
             body: body.map(Arc::from),
             source: Arc::from(body.unwrap_or_default()),
             private: false,
+            receiver: false,
+            entry_point: false,
         }
     }
 

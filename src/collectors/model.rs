@@ -7,7 +7,7 @@ use quote::ToTokens;
 use rayon::prelude::*;
 use regex::Regex;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::Path,
     sync::{Arc, OnceLock},
 };
@@ -23,6 +23,10 @@ pub(super) struct FunctionFact {
     pub(super) body: Option<Arc<str>>,
     pub(super) source: Arc<str>,
     pub(super) private: bool,
+    /// Called on an owned receiver (`self`, `cls`, or an instance `this`).
+    pub(super) receiver: bool,
+    /// Invoked by a harness or runtime rather than by authored code.
+    pub(super) entry_point: bool,
 }
 
 #[derive(Clone)]
@@ -53,6 +57,9 @@ pub(super) struct SourceModel {
     pub(super) functions: Vec<FunctionFact>,
     pub(super) classes: Vec<ClassFact>,
     pub(super) code_by_path: BTreeMap<String, Arc<str>>,
+    /// Names referenced only through attribute string paths, such as
+    /// `#[serde(default = "defaults")]`, which code masking hides.
+    pub(super) attribute_references: BTreeSet<String>,
 }
 
 fn annotated_slot() -> &'static Regex {
@@ -442,7 +449,52 @@ fn rust_function(
             Arc::from(code_only(path, &body).expect("Rust function-body token masking cannot fail"))
         }),
         private,
+        receiver: signature.receiver().is_some(),
+        entry_point: false,
         name,
+    }
+}
+
+/// Test and benchmark functions run under the harness, and a crate-level
+/// `main` runs as the binary entry point.
+fn rust_entry_point(function: &syn::ItemFn, module_path: &[String]) -> bool {
+    (module_path.is_empty() && function.sig.ident == "main")
+        || function.attrs.iter().any(|attribute| {
+            attribute.path().segments.last().is_some_and(|segment| {
+                matches!(segment.ident.to_string().as_str(), "test" | "bench")
+            })
+        })
+}
+
+#[derive(Default)]
+struct AttributeReferences(BTreeSet<String>);
+
+impl AttributeReferences {
+    fn collect(&mut self, tokens: proc_macro2::TokenStream) {
+        for token in tokens {
+            match token {
+                proc_macro2::TokenTree::Group(group) => self.collect(group.stream()),
+                proc_macro2::TokenTree::Literal(literal) => {
+                    let Ok(literal) = syn::parse_str::<syn::LitStr>(&literal.to_string()) else {
+                        continue;
+                    };
+                    if let Ok(path) = syn::parse_str::<syn::Path>(&literal.value())
+                        && let Some(segment) = path.segments.last()
+                    {
+                        self.0.insert(segment.ident.to_string());
+                    }
+                }
+                proc_macro2::TokenTree::Ident(_) | proc_macro2::TokenTree::Punct(_) => {}
+            }
+        }
+    }
+}
+
+impl<'ast> Visit<'ast> for AttributeReferences {
+    fn visit_attribute(&mut self, attribute: &'ast syn::Attribute) {
+        if !attribute.path().is_ident("doc") {
+            self.collect(attribute.meta.to_token_stream());
+        }
     }
 }
 
@@ -562,6 +614,7 @@ impl<'ast> Visit<'ast> for RustModelVisitor<'_> {
             Some(&function.block),
             matches!(function.vis, syn::Visibility::Inherited),
         );
+        fact.entry_point = rust_entry_point(function, &self.module_path);
         let module = self.module();
         if !module.is_empty() {
             fact.symbol = format!("{}::{module}::{}", self.path, function.sig.ident);
@@ -722,6 +775,9 @@ fn rust_source_model(input: &Input) -> Result<SourceModel, String> {
             .insert(path.clone(), code_only(path, source)?.into());
         let file = syn::parse_file(source)
             .map_err(|error| format!("collector parse error in {path}: {error}"))?;
+        let mut references = AttributeReferences::default();
+        references.visit_file(&file);
+        model.attribute_references.extend(references.0);
         RustModelVisitor {
             path: path.clone(),
             module_path: Vec::new(),
@@ -802,6 +858,20 @@ fn portable_class(
     }
 }
 
+fn portable_receiver(signature: &str, language: &str) -> bool {
+    static PYTHON_RECEIVER: OnceLock<Regex> = OnceLock::new();
+    if language == "python" {
+        PYTHON_RECEIVER
+            .get_or_init(|| {
+                Regex::new(r"\bdef\s+[A-Za-z_][A-Za-z0-9_]*\s*\(\s*(?:self|cls)\b")
+                    .expect("valid Python receiver expression")
+            })
+            .is_match(signature)
+    } else {
+        !signature.split_whitespace().any(|word| word == "static")
+    }
+}
+
 fn portable_function(
     node: Node<'_>,
     source: &str,
@@ -830,6 +900,8 @@ fn portable_function(
         source: text_of(node, authored_code).into(),
         body,
         private: name.starts_with('_') || signature.contains("private "),
+        receiver: owner.is_some() && portable_receiver(&signature, language),
+        entry_point: false,
         name,
     };
     (function, owner_index)
@@ -1235,5 +1307,40 @@ mod tests {
         assert!(!private("::Service.public_method"));
         assert!(private("::Service.private_method"));
         assert!(!private("::Service.trait_method"));
+    }
+
+    #[test]
+    fn rust_model_marks_harness_entry_points_and_attribute_path_references() {
+        let source = concat!(
+            "fn main() {}\n",
+            "#[derive(Deserialize)]\n",
+            "struct Config { #[serde(default = \"defaults::port\", with = \"codec\")] port: u16 }\n",
+            "/// Mentions \"helper\" only in prose.\n",
+            "fn helper() {}\n",
+            "mod nested { fn main() {} #[test] fn runs() {} #[tokio::test] async fn runs_async() {} }\n",
+        );
+        let model = source_model(
+            &rule("rust.unused_code"),
+            &input("rust-v1", &[("src/main.rs", source)]),
+        )
+        .unwrap();
+        let entry_points = model
+            .functions
+            .iter()
+            .filter(|function| function.entry_point)
+            .map(|function| function.symbol.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            entry_points,
+            [
+                "src/main.rs::main",
+                "src/main.rs::nested::runs",
+                "src/main.rs::nested::runs_async"
+            ]
+        );
+        assert_eq!(
+            model.attribute_references,
+            BTreeSet::from(["codec".into(), "port".into()])
+        );
     }
 }
