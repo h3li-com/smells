@@ -18,7 +18,7 @@ Repository implementations are discovered from the nearest ancestor `Cargo.toml`
 smells --version
 smells rules [--rule-pack rust-v1|python-v1|typescript-v1]
 smells contracts validate --policy FILE
-smells doctor --policy FILE [--path DIRECTORY] [--format table|json]
+smells doctor --policy FILE [--path DIRECTORY] [--base REF] [--format table|json]
 smells policy show --policy FILE [--format table|json] [group selectors]
 smells check --path DIRECTORY --policy FILE [--base REF] [--evidence FILE] [--format table|json] [--report JSON] [--log LOG] [group selectors]
 smells check --staged --policy FILE [--base REF] [--evidence FILE] [--format table|json] [--report JSON] [--log LOG] [group selectors]
@@ -52,7 +52,7 @@ set before a scan.
 - `claude_import`: if a `CLAUDE.md` exists, it contains an `@AGENTS.md` import line.
 - `codeowners`: the first of `.github/CODEOWNERS`, `CODEOWNERS`, or `docs/CODEOWNERS` assigns an owner to the policy file. The last matching rule wins, as on GitHub.
 
-Any `error` exits `2`, because the matching scan would be incomplete or rejected. Warnings are governance gaps and exit `0`. When the policy cannot be read, the input-dependent checks are skipped and the governance checks still run. The Debt Envelope is computed in memory from `--base`, so there is no baseline file to verify.
+When the policy, Git history, and suppression syntax checks pass, `smells doctor` also runs the scanner in diagnostic mode and appends a compact **Smell diagnostics** breakdown across all 23 smells (`blocking` vs. `ignored` vs. `review`) plus the top 5 hotspot files (also returned under `"diagnostics"` in `--format json`). Passing `--base REF` (for example `--base v0.6.0` or `--base origin/main`) adds a **Burndown** section and JSON `"burndown"` summary comparing total blockers, review warnings, ignored findings, and per-smell deltas against that Git reference. Any `error` (including a scan parser, budget, or invalid `--base` error) exits `2`, because the matching scan would be incomplete or rejected. Governance warnings and matched smells exit `0` (`smells check` remains the hard CI gate). When the policy cannot be read, the input-dependent checks and diagnostics are skipped and the governance checks still run. The Debt Envelope is computed in memory from `--base`, so there is no baseline file to verify.
 
 ## CI gate templates
 

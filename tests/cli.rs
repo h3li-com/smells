@@ -3568,3 +3568,94 @@ fn doctor_fails_closed_on_missing_history_invalid_policy_and_bad_arguments() {
         assert!(output.stdout.is_empty(), "{args:?}");
     }
 }
+
+#[test]
+fn doctor_reports_compact_smell_diagnostics_and_fails_closed_on_scan_errors() {
+    let workspace = Workspace::new(
+        "pub struct Payload { pub a: u8, pub b: u8 }\n\
+         fn dead_helper() -> u8 { 1 }\n",
+    );
+    init_git_repo(&workspace.path);
+    git_stage_and_commit(&workspace.path, "initial smells");
+
+    let (code, data) = doctor(&workspace, &[]);
+    assert_eq!(code, Some(0), "{data}");
+    assert_eq!(data["status"], "healthy");
+    assert_eq!(data["diagnostics"]["scanned_files"], 1);
+    assert_eq!(data["diagnostics"]["blocking_findings"], 1);
+    assert!(data["diagnostics"]["review_signals"].as_u64().unwrap() >= 1);
+    assert_eq!(data["diagnostics"]["smells"][0]["smell"], "Dead Code");
+    assert_eq!(data["diagnostics"]["smells"][0]["blocking"], 1);
+    assert_eq!(data["diagnostics"]["hotspots"][0]["path"], "src/lib.rs");
+
+    let table = workspace.command(&["doctor", "--policy", "quality-policy.json"]);
+    assert_eq!(table.status.code(), Some(0));
+    let stdout = String::from_utf8(table.stdout).unwrap();
+    assert!(
+        stdout.contains("Smell diagnostics | files: 1 | blocking: 1"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("Dead Code | dispensables | 1 | 0 | 0"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("Top hotspot files\nFile | Blocking | Review\nsrc/lib.rs | 1 | "),
+        "{stdout}"
+    );
+
+    // Paying down the dead helper shows burndown against HEAD in both JSON and table output.
+    workspace.source(
+        "src/lib.rs",
+        "pub struct Payload { pub a: u8, pub b: u8 }\n",
+    );
+    let (code, burned) = doctor(&workspace, &["--base", "HEAD"]);
+    assert_eq!(code, Some(0), "{burned}");
+    assert_eq!(burned["burndown"]["base_ref"], "HEAD");
+    assert_eq!(burned["burndown"]["base_blocking"], 1);
+    assert_eq!(burned["burndown"]["current_blocking"], 0);
+    assert_eq!(burned["burndown"]["blocking_delta"], -1);
+    assert_eq!(burned["burndown"]["smell_deltas"][0]["smell"], "Dead Code");
+    assert_eq!(burned["burndown"]["smell_deltas"][0]["blocking_delta"], -1);
+
+    let burn_table = workspace.command(&[
+        "doctor",
+        "--policy",
+        "quality-policy.json",
+        "--base",
+        "HEAD",
+    ]);
+    assert_eq!(burn_table.status.code(), Some(0));
+    let burn_stdout = String::from_utf8(burn_table.stdout).unwrap();
+    assert!(
+        burn_stdout.contains("Burndown since HEAD ("),
+        "{burn_stdout}"
+    );
+    assert!(
+        burn_stdout.contains("Blockers: 1 -> 0 (-1)"),
+        "{burn_stdout}"
+    );
+    assert!(
+        burn_stdout.contains("Dead Code | 1 | 0 | -1 | +0"),
+        "{burn_stdout}"
+    );
+
+    // Unknown --base ref fails closed with exit 2.
+    let (code, bad_base) = doctor(&workspace, &["--base", "refs/heads/does-not-exist"]);
+    assert_eq!(code, Some(2), "{bad_base}");
+    assert_eq!(doctor_check(&bad_base, "base_ref")["status"], "error");
+
+    // Parser error during diagnostic scan fails closed with exit 2.
+    workspace.source("src/lib.rs", "pub fn broken( {\n");
+    let (code, data) = doctor(&workspace, &[]);
+    assert_eq!(code, Some(2), "{data}");
+    assert_eq!(data["status"], "unhealthy");
+    assert_eq!(doctor_check(&data, "scan")["status"], "error");
+
+    // A base commit with a parser error also fails closed with exit 2.
+    git_stage_and_commit(&workspace.path, "broken base");
+    workspace.source("src/lib.rs", "pub fn healthy() -> u8 { 1 }\n");
+    let (code, broken_base) = doctor(&workspace, &["--base", "HEAD"]);
+    assert_eq!(code, Some(2), "{broken_base}");
+    assert_eq!(doctor_check(&broken_base, "base_ref")["status"], "error");
+}

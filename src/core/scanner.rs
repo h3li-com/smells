@@ -59,6 +59,10 @@ fn apply_reference_ratchet(
     Ok(())
 }
 
+pub(crate) fn analyze_captured(captured: &CapturedInput) -> Result<Report, String> {
+    build_report(captured, None)
+}
+
 fn build_report(captured: &CapturedInput, evidence_bytes: Option<&[u8]>) -> Result<Report, String> {
     let (evidence, evidence_sha256) = load_evidence(evidence_bytes, captured)?;
     let mut report = analyze(captured)?;

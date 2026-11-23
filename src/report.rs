@@ -125,8 +125,8 @@ struct ReportMetadata {
     implementation_sha256: String,
 }
 
-struct ReportError {
-    message: String,
+pub(crate) struct ReportError {
+    pub(crate) message: String,
     rule_id: Option<String>,
     location: Option<Location>,
 }
@@ -163,7 +163,7 @@ where
 pub struct Report {
     #[serde(flatten)]
     metadata: ReportMetadata,
-    scanned_files: Vec<String>,
+    pub(crate) scanned_files: Vec<String>,
     excluded_directories: Vec<String>,
     source_roles: Vec<ResolvedSourceRole>,
     source_role_candidates: Vec<SourceRoleCandidate>,
@@ -180,7 +180,7 @@ pub struct Report {
     #[serde(flatten)]
     pub(crate) evidence: ReportEvidence,
     #[serde(serialize_with = "serialize_report_errors")]
-    errors: Vec<ReportError>,
+    pub(crate) errors: Vec<ReportError>,
     #[serde(skip)]
     policy_sha256: String,
     #[serde(skip)]

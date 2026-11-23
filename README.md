@@ -106,6 +106,20 @@ source + checked-in policy (+ optional --base REF)
 
 Exit `2` **never** means clean. Errors always outrank violations.
 
+### Hard blockers vs. review warnings (`smells check` vs. `smells doctor`)
+
+Every scan checks **all 28 rules across all 23 smells**, separated into two levels so CI stays strict without drowning humans or coding agents in false positives:
+
+- **Hard blockers (`"mode": "required"`):** Fail `smells check` with exit `1` and always appear at the top of the Issue Index. Starter policies set **Bloaters** (Long Method, Long Parameter List, Large Class), **Duplicate Code** (`duplicate_functions`), and **Dead Code** (`unused_code`) to `required` by default—and you can flip any additional rule to `"required"` in `quality-policy.json`.
+- **Review warnings (`"mode": "report"`):** Structural and history heuristics (such as `data_class`, `lazy_class`, `function_crap`, `divergent_change`, `shotgun_surgery`, and `navigation_chains`) that still run on every scan and appear as non-blocking `review` findings in `smells-findings.log` and JSON, without bloating the 4-line stdout summary or failing CI on normal DTOs/wrappers.
+
+Use the two commands for their distinct jobs:
+
+| Command | Role | Output |
+| --- | --- | --- |
+| **`smells check --base origin/main`** | **PR & pre-commit gate** | 4-line stdout summary with burndown `delta` + full Finding Log & JSON; exits `1` on new/worse `required` smells, `2` on broken setup |
+| **`smells doctor [--base REF]`** | **Setup, diagnostics & burndown** | Audits policy, Git history, suppressions, `AGENTS.md`, `CODEOWNERS`, prints a compact 23-smell breakdown (`blocking` vs. `review`) + top 5 hotspot files, and with `--base REF` shows total & per-smell burndown since that commit/tag; exits `2` only if setup/scan is broken |
+
 ---
 
 ## Ratchet existing repos with `--base`
@@ -166,7 +180,8 @@ Add this contract to your repository's root `AGENTS.md` (and put `@AGENTS.md` in
 
 - Run `smells check --path . --policy quality-policy.json --base origin/main --format table --log smells-findings.log --report smells-report.json` before reviewing or refactoring code smells.
 - Treat exit code `2` as an incomplete scan, never as clean.
-- Open `smells-findings.log`, start at the Issue Index, and inspect every referenced error, blocking, ignored, and review detail.
+- Open `smells-findings.log`, start at the Issue Index, and resolve every `scanner_error` and `blocking` finding first (always listed at the top).
+- Check `review` warnings for files touched in the current change; use `smells doctor --policy quality-policy.json` for a compact repo-wide diagnostic overview instead of reading every legacy `review` entry.
 - Before fixing or suppressing a finding, open and read its exact Refactoring.Guru URL and embedded `when_to_ignore` guidance. If the URL cannot be consulted, report research as incomplete and stop.
 - Verify findings against declarations, callers, and tests. Add `smells: ignore[exact-rule-id] -- reason` only when the verified exception applies—never merely to pass a hook.
 - Prefer small, behavior-preserving edits, then rerun project tests and `smells check`.
@@ -259,7 +274,7 @@ All three packs cover the same **23 canonical Refactoring.Guru smells** (28 exec
 | --- | --- |
 | `smells check --path DIR --policy FILE [--base REF]` | Scan a directory (optionally ratcheted against a Git ref) |
 | `smells check --staged --policy FILE [--base REF]` | Scan the exact Git staged index snapshot |
-| `smells doctor --policy FILE [--path DIR]` | Preflight-check policy, Git history, suppressions, `AGENTS.md`, and `CODEOWNERS` |
+| `smells doctor --policy FILE [--path DIR] [--base REF]` | Audit setup/governance, print compact 23-smell & hotspot diagnostics, and optionally show burndown since `REF` |
 | `smells contracts validate --policy FILE` | Validate a policy file against its schema and rule pack |
 | `smells policy show --policy FILE` | Print the resolved rule set and parameters |
 | `smells rules [--rule-pack PACK]` | List all rules, categories, and versions in a language pack |
