@@ -274,11 +274,11 @@ All three packs cover the same **23 canonical Refactoring.Guru smells** (28 exec
 
 | Command | What it does |
 | --- | --- |
-| `smells check --path DIR --policy FILE [--base REF]` | Scan a directory (optionally ratcheted against a Git ref) |
-| `smells check --staged --policy FILE [--base REF]` | Scan the exact Git staged index snapshot |
+| `smells check --path DIR [--policy FILE] [--base REF]` | Scan a directory (optionally ratcheted against a Git ref) |
+| `smells check --staged [--policy FILE] [--base REF]` | Scan the exact Git staged index snapshot |
 | `smells doctor [--policy FILE] [--path DIR] [--base REF]` | Zero-flag setup audit, 0–100 health score, 23-smell & hotspot diagnostics, and burndown |
-| `smells contracts validate --policy FILE` | Validate a policy file against its schema and rule pack |
-| `smells policy show --policy FILE` | Print the resolved rule set and parameters |
+| `smells contracts validate [--policy FILE]` | Validate a policy file against its schema and rule pack |
+| `smells policy show [--policy FILE]` | Print the resolved rule set and parameters |
 | `smells rules [--rule-pack PACK]` | List all rules, categories, and versions in a language pack |
 | `smells --version` | Print the installed scanner version |
 

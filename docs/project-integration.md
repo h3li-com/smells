@@ -17,11 +17,11 @@ Repository implementations are discovered from the nearest ancestor `Cargo.toml`
 ```text
 smells --version
 smells rules [--rule-pack rust-v1|python-v1|typescript-v1]
-smells contracts validate --policy FILE
+smells contracts validate [--policy FILE]
 smells doctor [--policy FILE] [--path DIRECTORY] [--base REF] [--format table|json]
-smells policy show --policy FILE [--format table|json] [group selectors]
-smells check --path DIRECTORY --policy FILE [--base REF] [--evidence FILE] [--format table|json] [--report JSON] [--log LOG] [group selectors]
-smells check --staged --policy FILE [--base REF] [--evidence FILE] [--format table|json] [--report JSON] [--log LOG] [group selectors]
+smells policy show [--policy FILE] [--format table|json] [group selectors]
+smells check --path DIRECTORY [--policy FILE] [--base REF] [--evidence FILE] [--format table|json] [--report JSON] [--log LOG] [group selectors]
+smells check --staged [--policy FILE] [--base REF] [--evidence FILE] [--format table|json] [--report JSON] [--log LOG] [group selectors]
 ```
 
 Group selectors are repeatable `--group NAME`, repeatable `--only-group NAME`,
