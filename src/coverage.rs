@@ -233,6 +233,24 @@ mod tests {
     }
 
     #[test]
+    fn records_under_the_canonical_root_match_a_non_canonical_root() {
+        let base =
+            std::env::temp_dir().join(format!("smells-coverage-root-{}", std::process::id()));
+        fs::create_dir_all(base.join("repo")).unwrap();
+        let root = base.join("repo").join("..").join("repo");
+        let canonical = fs::canonicalize(&root).unwrap();
+        assert_ne!(canonical, root);
+        let lcov = format!(
+            "SF:{}\nDA:1,1\nend_of_record\n",
+            canonical.join("src/lib.rs").display()
+        );
+        let coverage = parse(lcov.as_bytes(), &root, &corpus()).expect("canonical record matches");
+        assert_eq!(coverage.span("src/lib.rs", 1, 1), Some((1, 1)));
+        assert_eq!(candidate_roots(&canonical), vec![canonical.clone()]);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
     fn exact_last_line_is_not_stale() {
         let coverage = parse(
             b"SF:src/lib.rs\nDA:4,1\nend_of_record\n",

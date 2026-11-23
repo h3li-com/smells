@@ -1275,6 +1275,22 @@ mod tests {
     }
 
     #[test]
+    fn coverage_hint_names_each_language_lcov_command() {
+        assert_eq!(
+            coverage_hint("python"),
+            "pytest --cov --cov-report=lcov:lcov.info"
+        );
+        assert_eq!(
+            coverage_hint("typescript"),
+            "vitest run --coverage --coverage.reporter=lcov"
+        );
+        assert_eq!(
+            coverage_hint("rust"),
+            "cargo llvm-cov --lcov --output-path lcov.info"
+        );
+    }
+
+    #[test]
     fn history_is_healthy_only_when_complete_and_unshallow() {
         let commit = |id: &str| HistoryCommit {
             id: id.into(),
