@@ -212,6 +212,64 @@ mod tests {
     }
 
     #[test]
+    fn typescript_call_prefixes_respect_identifier_boundaries() {
+        assert_eq!(
+            classify_js_test_call("await test('x', async () => {"),
+            Some("test_case")
+        );
+        assert_eq!(
+            classify_js_test_call("void it('x', () => {"),
+            Some("test_case")
+        );
+        assert_eq!(classify_js_test_call("$test('x', () => {"), None);
+        assert_eq!(classify_js_test_call("my_test('x', () => {"), None);
+        assert_eq!(classify_js_test_call("latest('x', () => {"), None);
+        assert!(is_ident_byte(b'_'));
+        assert!(is_ident_byte(b'$'));
+        assert!(is_ident_byte(b'a'));
+        assert!(!is_ident_byte(b' '));
+        assert!(!is_ident_byte(b'('));
+    }
+
+    #[test]
+    fn typescript_named_declarations_on_test_lines_are_not_test_callbacks() {
+        let src = "describe('sidebar', () => {\n  it('renders', function named() {});\n});\n";
+        assert_eq!(declaration_role("vitest", src, "named", &loc(2)), None);
+        assert_eq!(
+            declaration_role("vitest", src, "<anonymous>", &loc(2)),
+            Some("test_case")
+        );
+    }
+
+    #[test]
+    fn rust_test_attribute_detection_accepts_each_supported_form() {
+        for line in [
+            "#[test]",
+            "#[tokio::test]",
+            "#[tokio::test(flavor = \"multi_thread\")]",
+            "#[rstest]",
+            "#[rstest(case)]",
+        ] {
+            assert!(line_has_rust_test_attr(line), "{line}");
+        }
+        assert_eq!(
+            declaration_role(
+                "cargo_test",
+                "#[test]\n// note\nfn noted() {}",
+                "noted",
+                &loc(3)
+            ),
+            Some("test_case")
+        );
+        assert_eq!(
+            declaration_role("cargo_test", "#[test]\n\nfn spaced() {}", "spaced", &loc(3)),
+            Some("test_case")
+        );
+        assert!(!line_has_rust_test_attr("#[allow(dead_code)]"));
+        assert!(!line_has_rust_test_attr("fn test() {}"));
+    }
+
+    #[test]
     fn rust_classifies_attributed_test_functions_and_ignores_helpers() {
         let src = "fn helper() {\n    assert!(true);\n}\n\n#[test]\n#[allow(dead_code)]\nfn verifies_behavior() {\n    helper();\n}\n\n#[tokio::test(flavor = \"multi_thread\")]\nasync fn async_case() {}\n";
         assert_eq!(declaration_role("cargo_test", src, "helper", &loc(1)), None);
