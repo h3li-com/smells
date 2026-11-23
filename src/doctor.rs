@@ -1666,7 +1666,12 @@ mod tests {
         let _ = fs::remove_dir_all(&base_dir);
         fs::create_dir_all(&base_dir).unwrap();
 
-        assert!(infer_starter_policy(&base_dir).is_err());
+        assert!(
+            infer_starter_policy(&base_dir)
+                .err()
+                .unwrap()
+                .contains("language could not be inferred")
+        );
 
         for (manifest, expected_pack) in [
             ("Cargo.toml", "rust-v1"),
@@ -1694,6 +1699,23 @@ mod tests {
                 .unwrap()
                 .contains("multiple language manifests")
         );
+
+        let custom = base_dir.join("custom");
+        fs::create_dir_all(custom.join(".github")).unwrap();
+        fs::write(custom.join("custom-policy.json"), "{}").unwrap();
+        fs::write(
+            custom.join(".github/CODEOWNERS"),
+            "/custom-policy.json @team\n",
+        )
+        .unwrap();
+        let report = diagnose(&custom, Some(&custom.join("custom-policy.json")), None);
+        let codeowners = report
+            .checks
+            .iter()
+            .find(|entry| entry.id == "codeowners")
+            .unwrap();
+        assert_eq!(codeowners.status, Status::Ok);
+        assert!(codeowners.detail.contains("custom-policy.json"));
         let _ = fs::remove_dir_all(&base_dir);
 
         let mut checks = Vec::new();
