@@ -1,0 +1,56 @@
+# Smells quality gate for Azure Pipelines.
+#
+# Copy from the release tag that matches the pinned version below. For Azure
+# Repos, YAML `pr:` triggers are ignored: add this pipeline as a required Build
+# Validation branch policy on the target branch instead.
+# Exit 0 passes, exit 1 blocks a new or regressed smell, and exit 2 blocks an
+# incomplete scan. Every non-zero exit fails the job; never add
+# `continueOnError`.
+trigger: none
+
+pr:
+  branches:
+    include:
+      - main
+
+pool:
+  vmImage: ubuntu-latest
+
+jobs:
+  # Independent job: no `dependsOn`, so an upstream failure or skip can never
+  # leave this required check silently absent.
+  - job: smells
+    steps:
+      - checkout: self
+        # Full history: history rules and --base fail closed on a shallow clone.
+        fetchDepth: 0
+        persistCredentials: false
+      - task: UsePythonVersion@0
+        inputs:
+          versionSpec: "3.13"
+      - script: python -m pip install smells==0.6.0
+        displayName: Install pinned Smells
+      - script: |
+          set -eu
+          target="${SYSTEM_PULLREQUEST_TARGETBRANCH:-}"
+          test -n "$target" || { echo "no ratchet base outside a pull request" >&2; exit 2; }
+          base="origin/${target#refs/heads/}"
+          smells check \
+            --path . \
+            --policy quality-policy.json \
+            --base "$base" \
+            --format table \
+            --log smells-findings.log \
+            --report smells-report.json
+        displayName: Scan against the base Debt Envelope
+      - script: |
+          mkdir -p "$(Build.ArtifactStagingDirectory)/smells"
+          cp smells-findings.log smells-report.json "$(Build.ArtifactStagingDirectory)/smells/" || true
+        displayName: Collect Smells artifacts
+        condition: always()
+      - task: PublishPipelineArtifact@1
+        displayName: Preserve Smells artifacts
+        condition: always()
+        inputs:
+          targetPath: $(Build.ArtifactStagingDirectory)/smells
+          artifact: smells

@@ -324,6 +324,8 @@ For GitHub Actions, check out full history with `fetch-depth: 0`. Divergent Chan
 
 Preserve both artifacts. Let exit `1` block configured violations and exit `2` block incomplete analysis.
 
+Ready-made GitHub Actions and Azure Pipelines gates, a CODEOWNERS snippet, and a branch-protection checklist are in [`examples/ci/`](examples/ci/) and [CI gate templates](docs/project-integration.md#ci-gate-templates). They ratchet pull requests against their base with `--base`.
+
 ### Run it before commits
 
 `--staged` scans the complete tracked source snapshot in the Git index. It reads source, runtime manifests, recognized SQL migration artifacts, unresolved migration candidates, policy, and optional evidence from staged blobs rather than unstaged replacements. Recognized and candidate artifact bytes participate in the same file budget and input digest as the source snapshot.

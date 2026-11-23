@@ -25,6 +25,11 @@ All notable changes to Smells are recorded here. Release tags use `vMAJOR.MINOR.
   (`intersection`) instead of `intersection + union`. This lets
   `duplicate_functions` and `unused_code` run as `required` under `--base`, and
   their burden semantics are documented in `docs/report-interface.md`.
+- Add fail-closed CI gate templates in `examples/ci/` (GitHub Actions and Azure
+  Pipelines with full history, a pinned release, `--base`, and always-uploaded
+  artifacts), a governance CODEOWNERS snippet, and a branch-protection
+  checklist. `tests/ci_templates.rs` keeps the template pin equal to the crate
+  version.
 
 ## 0.6.0 - 2026-10-14
 
