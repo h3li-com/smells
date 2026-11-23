@@ -1,0 +1,58 @@
+# Smells quality gate for GitHub Actions.
+#
+# Copy to .github/workflows/smells.yml from the release tag that matches the
+# pinned version below, then mark the `smells` job as a required status check.
+# Exit 0 passes, exit 1 blocks a new or regressed smell, and exit 2 blocks an
+# incomplete scan. Every non-zero exit fails the job; never add
+# `continue-on-error`.
+name: smells
+
+on:
+  pull_request:
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  smells:
+    # Independent job: no `needs:`, so an upstream failure or skip can never
+    # leave this required check silently absent.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          # Full history: history rules and --base fail closed on a shallow clone.
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - name: Install pinned Smells
+        run: python -m pip install smells==0.6.0
+      - name: Resolve the ratchet base
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          MERGE_GROUP_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+        run: |
+          base="${PR_BASE_SHA:-$MERGE_GROUP_BASE_SHA}"
+          test -n "$base" || { echo "no ratchet base for ${GITHUB_EVENT_NAME}" >&2; exit 2; }
+          echo "SMELLS_BASE=$base" >> "$GITHUB_ENV"
+      - name: Scan against the base Debt Envelope
+        run: >-
+          smells check
+          --path .
+          --policy quality-policy.json
+          --base "$SMELLS_BASE"
+          --format table
+          --log smells-findings.log
+          --report smells-report.json
+      - name: Preserve Smells artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: smells
+          path: |
+            smells-findings.log
+            smells-report.json
+          if-no-files-found: warn

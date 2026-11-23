@@ -1,0 +1,11 @@
+# Smells governance owners. Merge these entries into .github/CODEOWNERS (or
+# docs/CODEOWNERS) and require Code Owner review on the protected branch, so
+# loosening the gate needs the same approval as the gate itself.
+# Replace @your-org/quality-owners with the team that owns quality policy.
+*quality-policy.json                  @your-org/quality-owners
+*smells-policy.json                   @your-org/quality-owners
+*smells-baseline.json                 @your-org/quality-owners
+AGENTS.md                             @your-org/quality-owners
+CLAUDE.md                             @your-org/quality-owners
+/.github/workflows/smells.yml         @your-org/quality-owners
+/azure-pipelines-smells.yml           @your-org/quality-owners

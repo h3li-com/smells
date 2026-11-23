@@ -40,6 +40,25 @@ set before a scan.
 - The only exception mechanism is a syntax-aware source comment: `smells: ignore[exact-rule-id] -- non-empty reason`. It applies to that rule on the next declaration, allowing blank lines and decorators/attributes. Separate rules require separate directives. Malformed, unknown, misplaced, duplicate, and unused directives exit 2. Multi-location findings can be suppressed only at the reported primary declaration; scanner failures are unsuppressible. Ignored findings remain visible with `ignored_match` state and their reason. When the targeted rule is incomplete, its directive remains visible as `unverified_due_to_incomplete_rule` because the scanner cannot prove it unused; the scan still exits 2.
 - Automatic provider execution and source active-cfg selection remain outside the scanner. Provider evidence manifests are validated through `--evidence`; unknown fields/groups/rules/parameters or unsupported versions/scope are rejected. A suppression does not alter the policy or hide the underlying match.
 
+## CI gate templates
+
+`examples/ci/` holds copyable, fail-closed templates. Copy them from the release tag that matches the pinned version, because each template pins the scanner release it ships with and `tests/ci_templates.rs` fails if that pin drifts from the crate version.
+
+- `github-actions-smells.yml` runs on `pull_request` and `merge_group`. It checks out full history (`fetch-depth: 0`) without persisted credentials, installs the pinned release, and scans with `--base` set to the pull request or merge-group base commit. It always uploads `smells-findings.log` and `smells-report.json`.
+- `azure-pipelines-smells.yml` does the same with `fetchDepth: 0` and `--base origin/<target branch>`. Azure Repos ignores YAML `pr:` triggers, so attach the pipeline as a Build Validation branch policy.
+- `CODEOWNERS` assigns the policy files, agent instruction files, and gate pipeline files to one owner team, so weakening the gate needs the same review as changing it.
+
+Both templates run the gate as an independent job with no `needs:` or `dependsOn`, never use `continue-on-error`, and exit `2` when no ratchet base is available. Exit `1` and exit `2` both fail the job.
+
+Branch-protection checklist:
+
+1. Mark the `smells` job (GitHub) or the Build Validation policy (Azure) as required on the protected branch.
+2. Require Code Owner review and dismiss stale approvals when new commits are pushed.
+3. Require branches to be up to date before merging, or use a merge queue so `merge_group` runs the gate on the merged result.
+4. Block force pushes and branch deletion, and do not let administrators bypass the rules.
+5. Keep `fetch-depth: 0` (or `fetchDepth: 0`). A shallow clone makes history rules and `--base` exit `2`.
+6. Review the uploaded Finding Log before any suppression is approved.
+
 ## Hook composition
 
 The example hook is not installed. A consuming project must validate the actual scanner release against its fixtures, adopt the selected explicit source scope, and pin the tested revision before integrating it. Add one full-policy invocation per language to the existing quality runner and preserve other hooks. Save one complete numbered Finding Log with `--log` and one normalized JSON Evidence Report with `--report`; do not pipe a huge table through terminal capture.
