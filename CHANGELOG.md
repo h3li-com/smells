@@ -20,6 +20,25 @@ All notable changes to Smells are recorded here. Release tags use `vMAJOR.MINOR.
   - `rust.unused_code` treats crate-level `main`, `#[test]` and `#[bench]`
     functions, and names referenced as path strings in attributes (such as
     `#[serde(default = "name")]`) as reachable.
+- Add `--coverage FILE` to `check` and `doctor`. It reads an LCOV artifact and
+  replaces the zero-coverage CRAP upper bound with the exact score from measured
+  line coverage (`lcov_line_coverage_crap_v1`). Functions with no executable
+  line in the artifact keep the bound. A missing, malformed, unmatched or stale
+  artifact (one recording lines past the end of a scanned file) exits `2`.
+- Make `smells doctor` precise by default. It auto-discovers `lcov.info`,
+  `coverage/lcov.info` or `target/llvm-cov/lcov.info`. Without coverage it hides
+  non-blocking CRAP estimates that assume 0% coverage, reports how many it hid
+  in a `coverage` check (and `estimated_crap_hidden` in JSON), and prints the
+  command that produces LCOV for the project's language. Blocking findings are
+  never hidden. The burndown compares both sides without non-blocking CRAP so
+  that adding coverage does not read as a regression.
+- Move `rust.dependency_contract` to version `2`. A private field is visible in
+  its own module and every descendant module, so only matching accesses from
+  descendant module files of the owner's module count; accesses elsewhere cannot
+  compile and are name collisions.
+- Raise the `duplicate_functions` `minimum_tokens` from 20 to 40 in the Rust,
+  Python and TypeScript starter policies. Shorter pairs were mostly visitor and
+  helper boilerplate. Exclude `fixtures` from the repository's own scan.
 - Make `--policy` optional for `check`, `policy show`, and `contracts validate`:
   it defaults to `quality-policy.json` in the `--path` directory (or the current
   directory); a missing default still exits `2` and names the expected file.

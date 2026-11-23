@@ -150,7 +150,7 @@ Fixtures: minimum sizes, alpha-renaming/literal changes, operator changes, repea
 ### 20. Inappropriate Intimacy
 
 <a id="rust-dependency-contract"></a>
-**Built-in with optional dependency-contract override: rust.dependency_contract@1.** Maximum zero forbidden accesses. The built-in collector gathers private named fields from captured structs and counts dotted accesses where the receiver name matches the struct's snake-case name. It does not resolve the receiver type, so naming collisions can produce a conservative false positive and differently named receivers can evade it. A project may replace it with exact package identities, closed allowed edges, receiver types, and resolved re-exports.
+**Built-in with optional dependency-contract override: rust.dependency_contract@2.** Maximum zero forbidden accesses. The built-in collector gathers private named fields from captured structs and counts dotted accesses where the receiver name matches the struct's snake-case name, only in descendant module files of the owner's module (`foo.rs` owns `foo/`; `mod.rs`, `lib.rs` and `main.rs` own their directory). Rust already rejects private-field access outside that subtree, so a match there is a name collision and is not counted; same-file access is the owner's own. It does not resolve the receiver type, so naming collisions can produce a conservative false positive and differently named receivers can evade it. A project may replace it with exact package identities, closed allowed edges, receiver types, and resolved re-exports.
 
 ### 21. Incomplete Library Class
 

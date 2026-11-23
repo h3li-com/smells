@@ -2,10 +2,10 @@ use std::fs;
 
 use crate::{
     core::{
-        model::{CapturedRepository, ScanRequest, ScanTarget},
+        model::{CapturedInput, CapturedRepository, ScanRequest, ScanTarget},
         ports::outbound::Repository,
     },
-    input,
+    coverage, input,
 };
 
 /// Filesystem and Git implementation of the repository outbound port.
@@ -27,7 +27,8 @@ fn capture_working_tree(
     source: &std::path::Path,
     request: &ScanRequest<'_>,
 ) -> Result<CapturedRepository, String> {
-    let captured = input::working_tree(source, request.policy_path, request.selection)?;
+    let mut captured = input::working_tree(source, request.policy_path, request.selection)?;
+    attach_coverage(&mut captured, source, request)?;
     let evidence_bytes = request
         .evidence_path
         .map(|path| {
@@ -53,11 +54,14 @@ fn capture_working_tree(
 }
 
 fn capture_staged(request: &ScanRequest<'_>) -> Result<CapturedRepository, String> {
-    let (captured, evidence_bytes) = input::staged(
+    let (mut captured, evidence_bytes) = input::staged(
         request.policy_path,
         request.evidence_path,
         request.selection,
     )?;
+    if request.coverage_path.is_some() {
+        attach_coverage(&mut captured, &input::repository_root()?, request)?;
+    }
     let reference = request
         .base_ref
         .map(|base_ref| input::git_ref_for_staged(base_ref, request.policy_path, request.selection))
@@ -67,4 +71,15 @@ fn capture_staged(request: &ScanRequest<'_>) -> Result<CapturedRepository, Strin
         evidence_bytes,
         reference,
     })
+}
+
+fn attach_coverage(
+    captured: &mut CapturedInput,
+    root: &std::path::Path,
+    request: &ScanRequest<'_>,
+) -> Result<(), String> {
+    if let Some(path) = request.coverage_path {
+        captured.input.coverage = Some(coverage::load(path, root, &captured.input.files)?);
+    }
+    Ok(())
 }

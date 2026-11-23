@@ -197,6 +197,7 @@ mod tests {
                 policy,
                 digest: "in-memory-snapshot".into(),
                 mode: "working_tree",
+                coverage: None,
             },
             registry,
         }
@@ -207,6 +208,7 @@ mod tests {
             target: ScanTarget::WorkingTree(Path::new("unused-by-in-memory-repository")),
             policy_path: Path::new("quality-policy.json"),
             evidence_path: None,
+            coverage_path: None,
             base_ref: None,
             selection,
         }

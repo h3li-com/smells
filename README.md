@@ -244,6 +244,7 @@ Instead of excluding test suites or migration directories and losing visibility,
 
 - **Monorepos:** Run from the repo root. Files are grouped automatically under their nearest `Cargo.toml`, `pyproject.toml`, or `package.json` (or `__unowned__`). Mixed-language repos use one policy file and one scan per language pack.
 - **Rule groups:** Starter policies run `all` 28 rules. Narrow intentionally with `--only-group`, `--group`, or `--no-group` (`source`, `evidence`, or any of the five Refactoring.Guru categories). Preview with `smells policy show`.
+- **Measured CRAP:** Pass `--coverage lcov.info` (any LCOV file from `cargo llvm-cov`, `pytest --cov`, or `vitest --coverage`) to score CRAP from real line coverage. `smells doctor` finds `lcov.info` automatically and, without it, hides non-blocking 0%-coverage estimates instead of flooding you.
 - **Optional higher-fidelity evidence:** Built-in collectors work standalone with zero setup. If you already produce compiler, coverage, type, or architecture facts, pass `--evidence provider-evidence.json` (cannot be combined with `--base`). See [provider evidence](docs/provider-evidence.md).
 
 ---

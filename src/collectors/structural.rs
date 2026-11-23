@@ -2,7 +2,10 @@ use super::{
     common::observation,
     model::{FunctionFact, SourceModel},
 };
-use crate::{core::model::Input, evidence::Observation, policy::Rule, report::Location};
+use crate::{
+    core::model::Input, coverage::LineCoverage, evidence::Observation, policy::Rule,
+    report::Location,
+};
 use regex::Regex;
 use serde_json::json;
 use std::{
@@ -397,30 +400,82 @@ fn complexity(body: &str, language: &str) -> u64 {
     1 + decision.find_iter(body).count() as u64 + rust_match_arms
 }
 
-pub(super) fn function_crap(rule: &Rule, model: &SourceModel) -> Vec<Observation> {
+pub(super) fn function_crap(
+    rule: &Rule,
+    model: &SourceModel,
+    coverage: Option<&LineCoverage>,
+) -> Vec<Observation> {
     let language = rule.id.split_once('.').map_or("", |(language, _)| language);
     model
         .functions
         .iter()
         .filter_map(|function| {
             let complexity = complexity(function.body.as_deref()?, language);
+            let measured = coverage.and_then(|coverage| {
+                let (covered, instrumented) = coverage.span(
+                    &function.location.path,
+                    function.location.line,
+                    function.end_line,
+                )?;
+                Some((covered_crap(complexity, covered, instrumented)?, covered, instrumented, &coverage.sha256))
+            });
+            let (numerator, denominator, evidence) = match measured {
+                Some(((numerator, denominator), covered, instrumented, sha256)) => (
+                    numerator,
+                    denominator,
+                    json!({
+                        "collector": "lcov_line_coverage_crap_v1",
+                        "cyclomatic_complexity": complexity,
+                        "covered_lines": covered,
+                        "instrumented_lines": instrumented,
+                        "coverage_sha256": sha256,
+                        "interpretation": "CRAP from supplied LCOV line coverage over the declaration span",
+                    }),
+                ),
+                None => (
+                    complexity * complexity + complexity,
+                    1,
+                    json!({
+                        "collector": "authored_zero_coverage_crap_upper_bound_v1",
+                        "cyclomatic_complexity": complexity,
+                        "coverage_assumption_percent": 0,
+                        "interpretation": "conservative upper bound when no complete coverage artifact is supplied",
+                    }),
+                ),
+            };
             observation(
                 function.symbol.clone(),
                 function.location.clone(),
-                [
-                    ("numerator", complexity * complexity + complexity),
-                    ("denominator", 1),
-                ],
-                json!({
-                    "collector": "authored_zero_coverage_crap_upper_bound_v1",
-                    "cyclomatic_complexity": complexity,
-                    "coverage_assumption_percent": 0,
-                    "interpretation": "conservative upper bound when no complete coverage artifact is supplied",
-                }),
+                [("numerator", numerator), ("denominator", denominator)],
+                evidence,
             )
             .into()
         })
         .collect()
+}
+
+/// Exact `CC^2 * (1 - c)^3 + CC` for line coverage `c = covered / instrumented`, as a
+/// reduced rational. `None` asks the caller to keep the zero-coverage upper bound.
+fn covered_crap(complexity: u64, covered: u64, instrumented: u64) -> Option<(u64, u64)> {
+    let (complexity, total) = (u128::from(complexity), u128::from(instrumented));
+    let uncovered = total - u128::from(covered);
+    let numerator = complexity
+        .checked_mul(complexity)?
+        .checked_mul(uncovered.checked_pow(3)?)?
+        .checked_add(complexity.checked_mul(total.checked_pow(3)?)?)?;
+    let denominator = total.pow(3);
+    let divisor = gcd(numerator, denominator);
+    Some((
+        u64::try_from(numerator / divisor).ok()?,
+        u64::try_from(denominator / divisor).ok()?,
+    ))
+}
+
+fn gcd(mut left: u128, mut right: u128) -> u128 {
+    while right != 0 {
+        (left, right) = (right, left % right);
+    }
+    left
 }
 
 fn corpus_occurrences(model: &SourceModel, name: &str) -> usize {
@@ -554,6 +609,7 @@ mod tests {
             name: name.into(),
             symbol: format!("src/domain.rs::{name}"),
             location: location(1),
+            end_line: 1,
             type_parameters: Vec::new(),
             body: body.map(Arc::from),
             source: Arc::from(body.unwrap_or_default()),
@@ -829,6 +885,65 @@ mod tests {
             observations[0].evidence["unused_parameters"],
             json!(["Unused"])
         );
+    }
+
+    #[test]
+    fn function_crap_uses_measured_line_coverage_and_keeps_the_bound_without_records() {
+        let rule = Rule {
+            id: "rust.function_crap".into(),
+            version: 1,
+            smell: "test".into(),
+            kind: "threshold".into(),
+            implementation: "test".into(),
+            inputs: Vec::new(),
+            parameters: BTreeMap::new(),
+            contract: "test".into(),
+        };
+        let mut covered = function("covered", Some("{ if ready { 1 } else { 2 } }"));
+        covered.end_line = 4;
+        let mut unrecorded = function("unrecorded", Some("{ if ready { 1 } else { 2 } }"));
+        unrecorded.location = location(10);
+        unrecorded.end_line = 12;
+        let model = SourceModel {
+            functions: vec![covered, unrecorded],
+            ..SourceModel::default()
+        };
+        let coverage = LineCoverage {
+            sha256: "abc".into(),
+            files: BTreeMap::from([(
+                "src/domain.rs".to_string(),
+                BTreeMap::from([(2, 3), (3, 0), (13, 1)]),
+            )]),
+        };
+
+        let observations = function_crap(&rule, &model, Some(&coverage));
+        assert_eq!(observations[0].measurements["numerator"], 5);
+        assert_eq!(observations[0].measurements["denominator"], 2);
+        assert_eq!(
+            observations[0].evidence,
+            json!({
+                "collector": "lcov_line_coverage_crap_v1",
+                "cyclomatic_complexity": 2,
+                "covered_lines": 1,
+                "instrumented_lines": 2,
+                "coverage_sha256": "abc",
+                "interpretation": "CRAP from supplied LCOV line coverage over the declaration span",
+            })
+        );
+        assert_eq!(observations[1].measurements["numerator"], 6);
+        assert_eq!(observations[1].measurements["denominator"], 1);
+        assert_eq!(observations[1].evidence["coverage_assumption_percent"], 0);
+        let uncovered = function_crap(&rule, &model, None);
+        assert_eq!(uncovered[0].measurements["numerator"], 6);
+    }
+
+    #[test]
+    fn covered_crap_is_exact_reduced_and_overflow_falls_back() {
+        assert_eq!(covered_crap(3, 5, 5), Some((3, 1)));
+        assert_eq!(covered_crap(3, 0, 5), Some((12, 1)));
+        assert_eq!(covered_crap(4, 1, 3), Some((236, 27)));
+        assert_eq!(covered_crap(u64::MAX, 0, u64::MAX), None);
+        assert_eq!(gcd(12, 18), 6);
     }
 
     proptest! {

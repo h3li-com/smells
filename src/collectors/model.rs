@@ -19,6 +19,8 @@ pub(super) struct FunctionFact {
     pub(super) name: String,
     pub(super) symbol: String,
     pub(super) location: Location,
+    /// Last source line of the declaration, used to map line coverage.
+    pub(super) end_line: usize,
     pub(super) type_parameters: Vec<String>,
     pub(super) body: Option<Arc<str>>,
     pub(super) source: Arc<str>,
@@ -441,6 +443,10 @@ fn rust_function(
             |owner| format!("{path}::{owner}.{name}"),
         ),
         location: rust_location(path, signature.ident.span()),
+        end_line: body.map_or_else(
+            || signature.ident.span().end().line,
+            |body| body.brace_token.span.close().end().line,
+        ),
         source: code_only(path, &raw_source)
             .expect("Rust token masking cannot fail")
             .into(),
@@ -896,6 +902,7 @@ fn portable_function(
             |owner| format!("{path}::{owner}.{name}"),
         ),
         location: node_location(path, node),
+        end_line: node.end_position().row + 1,
         type_parameters: portable_type_parameters(node, source, language),
         source: text_of(node, authored_code).into(),
         body,
@@ -1022,6 +1029,7 @@ mod tests {
             },
             digest: "0".repeat(64),
             mode: "test",
+            coverage: None,
         }
     }
 

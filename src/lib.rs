@@ -2,6 +2,7 @@ mod adapters;
 mod catalog;
 mod collectors;
 mod core;
+mod coverage;
 mod doctor;
 mod evidence;
 mod evidence_evaluators;

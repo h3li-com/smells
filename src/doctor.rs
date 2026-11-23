@@ -13,8 +13,11 @@ use std::{
 use serde_json::{Value, json};
 
 use crate::{
-    core::{analyze_captured, model::History},
-    input,
+    core::{
+        analyze_captured,
+        model::{CapturedInput, History},
+    },
+    coverage, input,
     policy::SelectionOptions,
     report::{Finding, Report},
     suppressions::{self, ParsedSuppressions},
@@ -30,6 +33,12 @@ const STANDARD_POLICY_FILES: [&str; 5] = [
     "smells-policy.json",
 ];
 const DEFAULT_BASE_REFS: [&str; 2] = ["origin/main", "origin/master"];
+/// Conventional LCOV outputs of `cargo llvm-cov`, `pytest-cov` and `vitest`/`jest`.
+const COVERAGE_FILES: [&str; 3] = [
+    "lcov.info",
+    "coverage/lcov.info",
+    "target/llvm-cov/lcov.info",
+];
 const HISTORY_WINDOW: usize = 200;
 const HOTSPOT_LIMIT: usize = 5;
 
@@ -108,8 +117,37 @@ pub(crate) struct Diagnostics {
     pub review_signals: usize,
     pub matched_smells: usize,
     pub total_smells: usize,
+    /// Non-blocking CRAP findings left out because they assume 0% coverage.
+    pub estimated_crap_hidden: usize,
     pub smells: Vec<SmellDiagnostic>,
     pub hotspots: Vec<HotspotFile>,
+}
+
+/// Which non-blocking CRAP findings a diagnostics view leaves out. Blocking findings are
+/// always kept so hiding never weakens the gate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CrapView {
+    /// Hide only findings scored by the zero-coverage upper bound.
+    Measured,
+    /// Hide every non-blocking CRAP finding so a covered tree compares fairly with a base
+    /// that has no coverage artifact.
+    Comparable,
+}
+
+impl CrapView {
+    fn hides(self, finding: &Finding) -> bool {
+        !finding.blocking
+            && finding.rule_id.ends_with(".function_crap")
+            && match self {
+                Self::Measured => {
+                    finding
+                        .evidence
+                        .pointer("/provider_evidence/coverage_assumption_percent")
+                        == Some(&json!(0))
+                }
+                Self::Comparable => true,
+            }
+    }
 }
 
 pub(crate) fn health_score(
@@ -241,6 +279,7 @@ fn detect_default_base(root: &Path) -> Option<&'static str> {
 pub(crate) fn diagnose(
     root: &Path,
     policy_path: Option<&Path>,
+    coverage_path: Option<&Path>,
     base_ref: Option<&str>,
 ) -> DoctorReport {
     let mut checks = Vec::new();
@@ -250,7 +289,13 @@ pub(crate) fn diagnose(
         _ => "quality-policy.json".into(),
     };
     let (diagnostics, burndown) = match &resolved {
-        Ok(policy_source) => diagnose_inputs(root, policy_source, base_ref, &mut checks),
+        Ok(policy_source) => {
+            let options = InputOptions {
+                coverage_path,
+                base_ref,
+            };
+            diagnose_inputs(root, policy_source, options, &mut checks)
+        }
         Err(error) => {
             checks.push(check("policy", Status::Error, error));
             (None, None)
@@ -279,10 +324,16 @@ fn append_governance_checks(root: &Path, owned_policy_target: &str, checks: &mut
     ));
 }
 
+#[derive(Clone, Copy)]
+struct InputOptions<'a> {
+    coverage_path: Option<&'a Path>,
+    base_ref: Option<&'a str>,
+}
+
 fn diagnose_inputs(
     root: &Path,
     policy_source: &ResolvedPolicy,
-    base_ref: Option<&str>,
+    options: InputOptions<'_>,
     checks: &mut Vec<Check>,
 ) -> (Option<Diagnostics>, Option<Burndown>) {
     let captured = match policy_source {
@@ -291,7 +342,7 @@ fn diagnose_inputs(
             input::working_tree_with_policy_text(root, text, &SelectionOptions::default())
         }
     };
-    let captured = match captured {
+    let mut captured = match captured {
         Ok(captured) => captured,
         Err(error) => {
             checks.push(check("policy", Status::Error, error));
@@ -299,6 +350,7 @@ fn diagnose_inputs(
         }
     };
     checks.push(policy_check(policy_source, &captured));
+    let coverage_file = attach_coverage(root, options.coverage_path, &mut captured, checks);
     checks.push(history_check(&captured.input.history));
     checks.push(suppression_check(&suppressions::parse(
         &captured.input.files,
@@ -307,11 +359,82 @@ fn diagnose_inputs(
     if exit_code(checks) != 0 {
         return (None, None);
     }
-    let diagnostics = diagnose_scan(&captured, checks);
-    let burndown = diagnostics
-        .as_ref()
-        .and_then(|current| run_burndown(root, policy_source, base_ref, current, checks));
-    (diagnostics, burndown)
+    let Some(report) = diagnose_scan(&captured, checks) else {
+        return (None, None);
+    };
+    let diagnostics = diagnostics_from_report(&report, CrapView::Measured);
+    checks.push(coverage_check(
+        coverage_file.as_deref(),
+        &captured,
+        diagnostics.estimated_crap_hidden,
+    ));
+    let comparable = diagnostics_from_report(&report, CrapView::Comparable);
+    let burndown = run_burndown(root, policy_source, options.base_ref, &comparable, checks);
+    (Some(diagnostics), burndown)
+}
+
+fn discover_coverage(root: &Path) -> Option<PathBuf> {
+    COVERAGE_FILES
+        .iter()
+        .map(|name| root.join(name))
+        .find(|path| path.is_file())
+}
+
+/// Loads explicit or conventional LCOV into the captured input. A coverage file that is
+/// present but unusable is an error rather than a silent fallback to the upper bound.
+fn attach_coverage(
+    root: &Path,
+    explicit: Option<&Path>,
+    captured: &mut CapturedInput,
+    checks: &mut Vec<Check>,
+) -> Option<String> {
+    let path = explicit
+        .map(Path::to_path_buf)
+        .or_else(|| discover_coverage(root))?;
+    let label = relative_policy_path(root, &path);
+    match coverage::load(&path, root, &captured.input.files) {
+        Ok(loaded) => {
+            captured.input.coverage = Some(loaded);
+            Some(label)
+        }
+        Err(error) => {
+            checks.push(check(
+                "coverage",
+                Status::Error,
+                format!("{label}: {error}"),
+            ));
+            None
+        }
+    }
+}
+
+fn coverage_hint(language: &str) -> &'static str {
+    match language {
+        "python" => "pytest --cov --cov-report=lcov:lcov.info",
+        "typescript" => "vitest run --coverage --coverage.reporter=lcov",
+        _ => "cargo llvm-cov --lcov --output-path lcov.info",
+    }
+}
+
+fn coverage_check(file: Option<&str>, captured: &CapturedInput, hidden: usize) -> Check {
+    match (file, captured.input.coverage.as_ref()) {
+        (Some(file), Some(coverage)) => check(
+            "coverage",
+            Status::Ok,
+            format!(
+                "{file} covers {} scanned file(s); CRAP scores use measured line coverage",
+                coverage.files.len()
+            ),
+        ),
+        _ => check(
+            "coverage",
+            Status::Warn,
+            format!(
+                "no LCOV coverage found; hid {hidden} non-blocking CRAP estimate(s) that assume 0% coverage. Run `{}` or pass --coverage FILE",
+                coverage_hint(&captured.registry.language)
+            ),
+        ),
+    }
 }
 
 fn policy_check(source: &ResolvedPolicy, captured: &crate::core::model::CapturedInput) -> Check {
@@ -418,7 +541,7 @@ fn analyze_base_snapshot(
             first.message
         ));
     }
-    Ok(diagnostics_from_report(&report))
+    Ok(diagnostics_from_report(&report, CrapView::Comparable))
 }
 
 fn record_base_error(strict: bool, error: String, checks: &mut Vec<Check>) {
@@ -498,10 +621,7 @@ fn compute_smell_deltas(base: &[SmellDiagnostic], current: &[SmellDiagnostic]) -
     deltas
 }
 
-fn diagnose_scan(
-    captured: &crate::core::model::CapturedInput,
-    checks: &mut Vec<Check>,
-) -> Option<Diagnostics> {
+fn diagnose_scan(captured: &CapturedInput, checks: &mut Vec<Check>) -> Option<Report> {
     match analyze_captured(captured) {
         Ok(report) => {
             if let Some(first) = report.errors.first() {
@@ -515,7 +635,7 @@ fn diagnose_scan(
                     ),
                 ));
             }
-            Some(diagnostics_from_report(&report))
+            Some(report)
         }
         Err(error) => {
             checks.push(check("scan", Status::Error, error));
@@ -524,30 +644,36 @@ fn diagnose_scan(
     }
 }
 
-pub(crate) fn diagnostics_from_report(report: &Report) -> Diagnostics {
-    let signals: Vec<_> = report
+pub(crate) fn diagnostics_from_report(report: &Report, view: CrapView) -> Diagnostics {
+    let (hidden, shown): (Vec<&Finding>, Vec<&Finding>) = report
         .evidence
         .findings
         .iter()
-        .map(FindingSignal::from_finding)
-        .collect();
+        .partition(|finding| view.hides(finding));
+    let estimated_crap_hidden = hidden
+        .iter()
+        .filter(|finding| CrapView::Measured.hides(finding))
+        .count();
+    let count = |keep: fn(&Finding) -> bool| shown.iter().filter(|finding| keep(finding)).count();
+    let blocking_findings = count(|finding| finding.blocking);
+    let ignored_findings = count(|finding| finding.status == "ignored_match");
+    let review_signals =
+        count(|finding| matches!(finding.status.as_str(), "indicator" | "reported_by_role"));
+    let signals: Vec<_> = shown.into_iter().map(FindingSignal::from_finding).collect();
     let smells = summarize_smells(&signals);
     let hotspots = summarize_hotspots(&signals);
     let scanned_files = report.scanned_files.len();
-    let score = health_score(
-        scanned_files,
-        report.summary.blocking_findings,
-        report.summary.review_signals,
-    );
+    let score = health_score(scanned_files, blocking_findings, review_signals);
     Diagnostics {
         score,
         grade: health_grade(score),
         scanned_files,
-        blocking_findings: report.summary.blocking_findings,
-        ignored_findings: report.summary.ignored_findings,
-        review_signals: report.summary.review_signals,
+        blocking_findings,
+        ignored_findings,
+        review_signals,
         matched_smells: report.summary.matched_smell_patterns,
         total_smells: report.summary.total_smell_patterns,
+        estimated_crap_hidden,
         smells,
         hotspots,
     }
@@ -826,6 +952,7 @@ pub(crate) fn to_json(report: &DoctorReport) -> Value {
             "review_signals": diagnostics.review_signals,
             "matched_smells": diagnostics.matched_smells,
             "total_smells": diagnostics.total_smells,
+            "estimated_crap_hidden": diagnostics.estimated_crap_hidden,
             "smells": diagnostics
                 .smells
                 .iter()
@@ -1399,6 +1526,7 @@ mod tests {
                 review_signals: 4,
                 matched_smells: 2,
                 total_smells: 23,
+                estimated_crap_hidden: 0,
                 smells: vec![
                     SmellDiagnostic {
                         smell: "Dead Code".into(),
@@ -1468,6 +1596,7 @@ mod tests {
                 review_signals: 0,
                 matched_smells: 0,
                 total_smells: 23,
+                estimated_crap_hidden: 0,
                 smells: Vec::new(),
                 hotspots: Vec::new(),
             }),
@@ -1493,6 +1622,7 @@ mod tests {
             review_signals: 12,
             matched_smells: 4,
             total_smells: 23,
+            estimated_crap_hidden: 0,
             smells: vec![
                 SmellDiagnostic {
                     smell: "Long Method".into(),
@@ -1534,6 +1664,7 @@ mod tests {
             review_signals: 7,
             matched_smells: 2,
             total_smells: 23,
+            estimated_crap_hidden: 0,
             smells: vec![
                 SmellDiagnostic {
                     smell: "Long Method".into(),
@@ -1708,7 +1839,12 @@ mod tests {
             "/custom-policy.json @team\n",
         )
         .unwrap();
-        let report = diagnose(&custom, Some(&custom.join("custom-policy.json")), None);
+        let report = diagnose(
+            &custom,
+            Some(&custom.join("custom-policy.json")),
+            None,
+            None,
+        );
         let codeowners = report
             .checks
             .iter()

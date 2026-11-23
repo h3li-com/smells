@@ -225,28 +225,57 @@ pub(super) fn foreign_accesses(model: &SourceModel) -> Vec<Observation> {
         .collect()
 }
 
+/// Directory holding the child modules of the Rust module defined in `path`.
+fn rust_module_dir(path: &str) -> String {
+    let (parent, file) = path.rsplit_once('/').unwrap_or(("", path));
+    let prefix = if parent.is_empty() {
+        String::new()
+    } else {
+        format!("{parent}/")
+    };
+    match file {
+        "mod.rs" | "lib.rs" | "main.rs" => prefix,
+        _ => format!("{prefix}{}/", file.trim_end_matches(".rs")),
+    }
+}
+
+/// Private fields are visible to the owner's module and its descendants, so only a
+/// descendant file can compile against them. Same-file access is the owner's own, and
+/// any other match is a receiver-name collision.
+fn rust_descendant_access(owner_paths: &BTreeSet<String>, path: &str) -> bool {
+    owner_paths
+        .iter()
+        .all(|owner| owner != path && path.starts_with(&rust_module_dir(owner)))
+}
+
 fn rust_dependency_contract(
     model: &SourceModel,
     input: &Input,
 ) -> Result<Vec<Observation>, String> {
-    let private_fields = model
-        .classes
-        .iter()
-        .flat_map(|class| {
-            let mut receiver = String::new();
-            for (index, character) in class.name.chars().enumerate() {
-                if index > 0 && character.is_ascii_uppercase() {
-                    receiver.push('_');
-                }
-                receiver.push(character.to_ascii_lowercase());
+    let mut owners: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
+    for (receiver, field, path) in model.classes.iter().flat_map(|class| {
+        let mut receiver = String::new();
+        for (index, character) in class.name.chars().enumerate() {
+            if index > 0 && character.is_ascii_uppercase() {
+                receiver.push('_');
             }
-            class
-                .fields
-                .iter()
-                .filter(|field| field.private && simple_names(&field.name).len() == 1)
-                .map(move |field| (receiver.clone(), field.name.clone()))
-        })
-        .collect::<BTreeSet<_>>();
+            receiver.push(character.to_ascii_lowercase());
+        }
+        class
+            .fields
+            .iter()
+            .filter(|field| field.private && simple_names(&field.name).len() == 1)
+            .map(move |field| {
+                (
+                    receiver.clone(),
+                    field.name.clone(),
+                    class.location.path.clone(),
+                )
+            })
+    }) {
+        owners.entry((receiver, field)).or_default().insert(path);
+    }
+    let private_fields = owners.keys().cloned().collect::<BTreeSet<_>>();
     let mut observations = Vec::new();
     for (path, source) in &input.files {
         let code = model
@@ -254,7 +283,10 @@ fn rust_dependency_contract(
             .get(path)
             .ok_or_else(|| format!("missing authored code for {path}"))?;
         let mut matches = Vec::new();
-        for (receiver, field) in &private_fields {
+        for ((receiver, field), owner_paths) in &owners {
+            if !rust_descendant_access(owner_paths, path) {
+                continue;
+            }
             let access = Regex::new(&format!(
                 r"\b{}\s*\.\s*{}\b",
                 regex::escape(receiver),
@@ -272,8 +304,8 @@ fn rust_dependency_contract(
             location_at(path, source, *first),
             [("forbidden_accesses", matches.len() as u64)],
             json!({
-                "collector": "rust_private_field_name_access_v1",
-                "scope": "dotted access whose receiver name matches the snake-case private-field owner",
+                "collector": "rust_private_field_name_access_v2",
+                "scope": "dotted access in a descendant module file whose receiver name matches the snake-case private-field owner",
                 "private_owner_fields": private_fields,
             }),
         ));
@@ -414,6 +446,7 @@ mod tests {
             },
             digest: "0".repeat(64),
             mode: "test",
+            coverage: None,
         }
     }
 
@@ -576,7 +609,13 @@ mod tests {
             "  let nested = user_account.nested.secret;\n",
             "}\n",
         );
-        let mut model = model_with_code("src/check.rs", source);
+        let mut model = model_with_code("src/domain/check.rs", source);
+        model
+            .code_by_path
+            .insert("src/domain.rs".into(), source.into());
+        model
+            .code_by_path
+            .insert("src/billing.rs".into(), source.into());
         model.classes.push(ClassFact {
             name: "UserAccount".into(),
             symbol: "src/domain.rs::UserAccount".into(),
@@ -616,12 +655,39 @@ mod tests {
         let observations = dependency_contract(
             &rule("rust.dependency_contract"),
             &model,
-            &input("rust-v1", &[("src/check.rs", source)]),
+            &input(
+                "rust-v1",
+                &[
+                    ("src/billing.rs", source),
+                    ("src/domain.rs", source),
+                    ("src/domain/check.rs", source),
+                ],
+            ),
         )
         .unwrap();
         assert_eq!(observations.len(), 1);
+        assert_eq!(
+            observations[0].symbol,
+            "src/domain/check.rs::foreign-private-field-accesses"
+        );
         assert_eq!(observations[0].measurements["forbidden_accesses"], 2);
         assert_eq!(observations[0].location.line, 2);
         assert_eq!(observations[0].location.column, 15);
+    }
+
+    #[test]
+    fn rust_module_dirs_follow_module_file_conventions() {
+        assert_eq!(rust_module_dir("src/lib.rs"), "src/");
+        assert_eq!(rust_module_dir("src/main.rs"), "src/");
+        assert_eq!(rust_module_dir("src/core/mod.rs"), "src/core/");
+        assert_eq!(rust_module_dir("src/core/scanner.rs"), "src/core/scanner/");
+        assert_eq!(rust_module_dir("build.rs"), "build/");
+        assert_eq!(rust_module_dir("lib.rs"), "");
+        let shared = BTreeSet::from(["src/a.rs".to_string(), "src/b.rs".to_string()]);
+        assert!(!rust_descendant_access(&shared, "src/a/inner.rs"));
+        let single = BTreeSet::from(["src/a.rs".to_string()]);
+        assert!(rust_descendant_access(&single, "src/a/inner.rs"));
+        assert!(!rust_descendant_access(&single, "src/a.rs"));
+        assert!(!rust_descendant_access(&single, "src/ab/inner.rs"));
     }
 }

@@ -293,6 +293,7 @@ mod tests {
                 policy,
                 digest: "captured-input-digest".into(),
                 mode: "working_tree",
+                coverage: None,
             },
             registry,
         )

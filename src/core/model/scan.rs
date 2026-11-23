@@ -16,6 +16,7 @@ pub(crate) struct ScanRequest<'a> {
     pub(crate) target: ScanTarget<'a>,
     pub(crate) policy_path: &'a Path,
     pub(crate) evidence_path: Option<&'a Path>,
+    pub(crate) coverage_path: Option<&'a Path>,
     pub(crate) base_ref: Option<&'a str>,
     pub(crate) selection: &'a SelectionOptions,
 }
