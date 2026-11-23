@@ -161,34 +161,28 @@ fn parameter_weakened(name: &str, reference: u64, candidate: u64) -> bool {
     (name.starts_with("maximum") || name.starts_with("minimum")) && candidate > reference
 }
 
-fn is_required_blocker(finding: &Finding) -> bool {
-    finding.blocking && finding.status == "violation"
-}
-
 fn reference_envelope(reference_report: Option<&Report>) -> (ReferenceEnvelope, usize, usize) {
     let Some(report) = reference_report else {
         return (BTreeMap::new(), 0, 0);
     };
     let scopes = &report.implementation_scopes;
+    let findings = &report.evidence.findings;
+    let suppressions = findings
+        .iter()
+        .filter(|finding| finding.status == "ignored_match")
+        .count();
     let mut envelope: BTreeMap<EnvelopeScope, Vec<f64>> = BTreeMap::new();
-    let mut blockers = 0usize;
-    let mut suppressions = 0usize;
-    for finding in &report.evidence.findings {
-        if finding.status == "ignored_match" {
-            suppressions += 1;
-        }
-        if is_required_blocker(finding) {
-            blockers += 1;
-            let scope = EnvelopeScope {
-                rule_id: finding.rule_id.clone(),
-                implementations: finding_implementation_scope(finding, scopes),
-            };
-            envelope
-                .entry(scope)
-                .or_default()
-                .push(finding_burden(finding));
-        }
+    for finding in findings.iter().filter(|finding| finding.blocking) {
+        let scope = EnvelopeScope {
+            rule_id: finding.rule_id.clone(),
+            implementations: finding_implementation_scope(finding, scopes),
+        };
+        envelope
+            .entry(scope)
+            .or_default()
+            .push(finding_burden(finding));
     }
+    let blockers: usize = envelope.values().map(Vec::len).sum();
     for burdens in envelope.values_mut() {
         burdens.sort_by(|left, right| right.total_cmp(left));
     }
@@ -197,25 +191,26 @@ fn reference_envelope(reference_report: Option<&Report>) -> (ReferenceEnvelope, 
 
 fn candidate_blocker_groups(candidate_report: &Report) -> (CandidateGroups, usize, usize) {
     let scopes = &candidate_report.implementation_scopes;
+    let findings = &candidate_report.evidence.findings;
+    let suppressions = findings
+        .iter()
+        .filter(|finding| finding.status == "ignored_match")
+        .count();
     let mut groups: BTreeMap<EnvelopeScope, Vec<(usize, f64)>> = BTreeMap::new();
-    let mut blockers = 0usize;
-    let mut suppressions = 0usize;
-    for (index, finding) in candidate_report.evidence.findings.iter().enumerate() {
-        if finding.status == "ignored_match" {
-            suppressions += 1;
+    for (index, finding) in findings.iter().enumerate() {
+        if !finding.blocking {
+            continue;
         }
-        if is_required_blocker(finding) {
-            blockers += 1;
-            let scope = EnvelopeScope {
-                rule_id: finding.rule_id.clone(),
-                implementations: finding_implementation_scope(finding, scopes),
-            };
-            groups
-                .entry(scope)
-                .or_default()
-                .push((index, finding_burden(finding)));
-        }
+        let scope = EnvelopeScope {
+            rule_id: finding.rule_id.clone(),
+            implementations: finding_implementation_scope(finding, scopes),
+        };
+        groups
+            .entry(scope)
+            .or_default()
+            .push((index, finding_burden(finding)));
     }
+    let blockers: usize = groups.values().map(Vec::len).sum();
     for entries in groups.values_mut() {
         entries.sort_by(|(left_idx, left_burden), (right_idx, right_burden)| {
             right_burden
@@ -234,7 +229,7 @@ pub(crate) fn apply_ratchet(
     context: &RatchetContext<'_>,
 ) {
     if let Some(reference) = reference_report
-        && reference.summary.error_count > 0
+        && reference.summary.error_count != 0
     {
         candidate_report.error(format!(
             "reference snapshot {} ({}) failed closed with {} error(s)",
@@ -255,14 +250,13 @@ pub(crate) fn apply_ratchet(
         }
     }
 
-    let mut legacy_within_envelope = 0usize;
     for (index, finding) in candidate_report.evidence.findings.iter_mut().enumerate() {
-        if is_required_blocker(finding) && !regressed.contains(&index) {
+        if finding.blocking && !regressed.contains(&index) {
             finding.blocking = false;
             finding.status = "legacy_within_envelope".into();
-            legacy_within_envelope += 1;
         }
     }
+    let legacy_within_envelope = candidate_blockers.saturating_sub(regressed.len());
 
     let new_suppressions = candidate_suppressions.saturating_sub(reference_suppressions);
     let policy_changed = context

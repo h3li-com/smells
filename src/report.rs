@@ -945,19 +945,25 @@ fn report_verdict(
 }
 
 fn build_attestation(report: &Report) -> RunAttestation {
-    let mut rules_measured = 0usize;
-    let mut rules_incomplete = 0usize;
-    for smell in &report.coverage {
-        for rule in smell["rules"].as_array().into_iter().flatten() {
-            match rule["measurement_status"].as_str() {
-                Some("measured_defined_scope") => rules_measured += 1,
-                Some("incomplete_scan" | "error_required_detector_missing") => {
-                    rules_incomplete += 1;
-                }
-                _ => {}
-            }
-        }
-    }
+    let statuses = report.coverage.iter().flat_map(|smell| {
+        smell["rules"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|rule| rule["measurement_status"].as_str())
+    });
+    let rules_measured = statuses
+        .clone()
+        .filter(|status| *status == "measured_defined_scope")
+        .count();
+    let rules_incomplete = statuses
+        .filter(|status| {
+            matches!(
+                *status,
+                "incomplete_scan" | "error_required_detector_missing"
+            )
+        })
+        .count();
     RunAttestation {
         complete: report.errors.is_empty(),
         exit_code: report.exit(),

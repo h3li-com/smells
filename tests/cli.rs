@@ -2910,6 +2910,18 @@ fn git_reference_ratchet_passes_legacy_blocks_regression_and_records_burndown() 
     assert_eq!(pass_data["attestation"]["complete"], true);
     assert_eq!(pass_data["attestation"]["exit_code"], 0);
     assert_eq!(pass_data["attestation"]["ratchet_active"], true);
+    assert_eq!(pass_data["attestation"]["rules_selected"], 28);
+    assert_eq!(pass_data["attestation"]["rules_measured"], 28);
+    assert_eq!(pass_data["attestation"]["rules_incomplete"], 0);
+    assert_eq!(pass_data["attestation"]["history_complete"], true);
+    assert_eq!(pass_data["attestation"]["suppressions_total"], 0);
+    assert_eq!(
+        pass_data["attestation"]["policy_sha256"]
+            .as_str()
+            .unwrap()
+            .len(),
+        64
+    );
     let log_text = fs::read_to_string(&log_path).unwrap();
     assert!(log_text.contains("base: HEAD | legacy: 1 | delta: +0 | new_ignores: 0"));
 
@@ -3178,4 +3190,86 @@ fn git_reference_ratchet_rejects_unknown_base_ref_and_supports_working_tree() {
     let data = report(&wt_ok);
     assert_eq!(data["ratchet"]["reference_ref"], "HEAD");
     assert_eq!(data["attestation"]["ratchet_active"], true);
+}
+
+#[test]
+fn git_reference_ratchet_preserves_existing_suppressions_and_fails_closed_on_reference_errors() {
+    let workspace = Workspace::new(
+        "// smells: ignore[rust.function_arguments] -- reviewed external API\nfn legacy(a: i32, b: i32, c: i32, d: i32, e: i32, f: i32, g: i32, h: i32) -> i32 { a + b + c + d + e + f + g + h }\n",
+    );
+    init_git_repo(&workspace.path);
+    git_stage_and_commit(&workspace.path, "baseline with one reviewed ignore");
+
+    // Keeping the exact existing suppression passes (new_suppressions == 0)
+    let keep_out = Command::new(env!("CARGO_BIN_EXE_smells"))
+        .args([
+            "check",
+            "--staged",
+            "--base",
+            "HEAD",
+            "--policy",
+            "quality-policy.json",
+            "--format",
+            "json",
+        ])
+        .current_dir(&workspace.path)
+        .output()
+        .unwrap();
+    assert_eq!(keep_out.status.code(), Some(0));
+    let keep_data = report(&keep_out);
+    assert_eq!(keep_data["ratchet"]["reference_suppressions"], 1);
+    assert_eq!(keep_data["ratchet"]["candidate_suppressions"], 1);
+    assert_eq!(keep_data["ratchet"]["new_suppressions"], 0);
+    assert_eq!(
+        keep_data["ratchet"]["suppression_guardrail_triggered"],
+        false
+    );
+    assert_eq!(keep_data["attestation"]["suppressions_total"], 1);
+
+    // Commit a broken file as HEAD so the reference snapshot itself has scan errors, then stage a clean fix.
+    // Comparing against a broken reference must fail closed (exit 2) and report incomplete rules in attestation.
+    fs::write(workspace.path.join("src/lib.rs"), "fn broken( {\n").unwrap();
+    git_stage_and_commit(&workspace.path, "broken reference");
+    fs::write(
+        workspace.path.join("src/lib.rs"),
+        "fn fixed() -> i32 { 1 }\n",
+    )
+    .unwrap();
+    assert!(
+        Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(&workspace.path)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let broken_ref = Command::new(env!("CARGO_BIN_EXE_smells"))
+        .args([
+            "check",
+            "--staged",
+            "--base",
+            "HEAD",
+            "--policy",
+            "quality-policy.json",
+            "--format",
+            "json",
+        ])
+        .current_dir(&workspace.path)
+        .output()
+        .unwrap();
+    assert_eq!(broken_ref.status.code(), Some(2));
+    let broken_data = report(&broken_ref);
+    assert_eq!(broken_data["attestation"]["complete"], false);
+    assert_eq!(broken_data["attestation"]["exit_code"], 2);
+    assert!(
+        broken_data["attestation"]["rules_incomplete"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    assert!(broken_data["errors"].as_array().unwrap().iter().any(|err| {
+        err.as_str()
+            .unwrap_or("")
+            .contains("reference snapshot HEAD")
+    }));
 }
