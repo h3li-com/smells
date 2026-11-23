@@ -1096,6 +1096,14 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["__init__", "load", "top_level"]
         );
+        assert_eq!(
+            model
+                .functions
+                .iter()
+                .map(|function| (function.location.line, function.end_line))
+                .collect::<Vec<_>>(),
+            [(4, 5), (6, 7), (9, 10)]
+        );
     }
 
     #[test]
