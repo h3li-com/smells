@@ -629,12 +629,25 @@ pub fn working_tree(
     policy_path: &Path,
     selection: &SelectionOptions,
 ) -> Result<CapturedInput, String> {
+    let policy_text = text(
+        fs::read(policy_path).map_err(|e| format!("cannot read policy: {e}"))?,
+        "policy",
+    )?;
+    working_tree_with_policy_text(root, &policy_text, selection)
+}
+
+pub(crate) fn working_tree_with_policy_text(
+    root: &Path,
+    policy_text: &str,
+    selection: &SelectionOptions,
+) -> Result<CapturedInput, String> {
     let root = working_root(root)?;
-    let (policy_text, registry, policy) = working_policy(policy_path, selection)?;
+    let registry = crate::policy::registry_for_policy(policy_text)?;
+    let policy = crate::policy::parse_with_selection(policy_text, &registry, selection)?;
     let snapshot = working_snapshot(&root, &policy, &registry)?;
     captured_input(
         snapshot,
-        &policy_text,
+        policy_text,
         policy,
         registry,
         "working_tree",
@@ -649,19 +662,6 @@ fn working_root(root: &Path) -> Result<PathBuf, String> {
     } else {
         Err("--path must be a source directory".into())
     }
-}
-
-fn working_policy(
-    policy_path: &Path,
-    selection: &SelectionOptions,
-) -> Result<(String, Registry, Policy), String> {
-    let policy_text = text(
-        fs::read(policy_path).map_err(|e| format!("cannot read policy: {e}"))?,
-        "policy",
-    )?;
-    let registry = crate::policy::registry_for_policy(&policy_text)?;
-    let policy = crate::policy::parse_with_selection(&policy_text, &registry, selection)?;
-    Ok((policy_text, registry, policy))
 }
 
 fn working_snapshot(
@@ -1285,6 +1285,16 @@ pub fn git_ref_for_working_tree(
         &policy_text,
         selection,
     )
+}
+
+pub(crate) fn git_ref_for_working_tree_with_policy_text(
+    source: &Path,
+    reference_ref: &str,
+    policy_text: &str,
+    selection: &SelectionOptions,
+) -> Result<crate::core::model::ReferenceSnapshot, String> {
+    let root = working_root(source)?;
+    capture_git_ref(&root, reference_ref, None, policy_text, selection)
 }
 
 #[cfg(test)]

@@ -3521,9 +3521,14 @@ fn doctor_reports_governance_gaps_as_warnings_on_a_complete_repository() {
     );
     let table = workspace.command(&["doctor", "--policy", "quality-policy.json"]);
     assert_eq!(table.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&table.stdout);
     assert!(
-        String::from_utf8_lossy(&table.stdout)
-            .starts_with("Check | Status | Detail\npolicy | ok | ")
+        stdout.contains("Setup & Governance\n  ✓ policy"),
+        "{stdout}"
+    );
+    assert!(
+        !stdout.contains("\x1b["),
+        "piped output stays plain: {stdout}"
     );
 }
 
@@ -3551,7 +3556,6 @@ fn doctor_fails_closed_on_missing_history_invalid_policy_and_bad_arguments() {
     );
 
     for args in [
-        &["doctor"][..],
         &["doctor", "--policy"][..],
         &[
             "doctor",
@@ -3567,4 +3571,171 @@ fn doctor_fails_closed_on_missing_history_invalid_policy_and_bad_arguments() {
         assert_eq!(output.status.code(), Some(2), "{args:?}");
         assert!(output.stdout.is_empty(), "{args:?}");
     }
+}
+
+#[test]
+fn doctor_works_with_zero_flags_and_auto_discovers_policy_or_starter_and_default_base() {
+    let workspace = Workspace::new("fn dead_helper() -> u8 { 1 }\n");
+    workspace.source(
+        "Cargo.toml",
+        "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+    );
+    init_git_repo(&workspace.path);
+    git_stage_and_commit(&workspace.path, "initial");
+
+    // 1. Zero flags with a checked-in quality-policy.json auto-discovers it.
+    let output = workspace.command(&["doctor", "--format", "json"]);
+    assert_eq!(output.status.code(), Some(0));
+    let data: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(doctor_check(&data, "policy")["status"], "ok");
+    assert_eq!(data["diagnostics"]["blocking_findings"], 1);
+    assert!(data["burndown"].is_null());
+
+    // 2. When origin/main exists, zero-flag doctor automatically reports burndown against it.
+    workspace.git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    workspace.source("src/lib.rs", "pub fn healthy() -> u8 { 1 }\n");
+    let output = workspace.command(&["doctor", "--format", "json"]);
+    assert_eq!(output.status.code(), Some(0));
+    let data: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(data["burndown"]["base_ref"], "origin/main");
+    assert_eq!(data["burndown"]["blocking_delta"], -1);
+    assert_eq!(data["burndown"]["score_delta"], 10);
+
+    // 3. Removing quality-policy.json falls back to the built-in Rust starter with a warning.
+    fs::remove_file(workspace.path.join("quality-policy.json")).unwrap();
+    let output = workspace.command(&["doctor", "--format", "json"]);
+    assert_eq!(output.status.code(), Some(0));
+    let data: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(doctor_check(&data, "policy")["status"], "warn");
+    assert!(
+        doctor_check(&data, "policy")["detail"]
+            .as_str()
+            .unwrap()
+            .contains("built-in rust-v1 starter policy")
+    );
+    assert_eq!(data["diagnostics"]["score"], 100);
+    assert_eq!(data["burndown"]["base_ref"], "origin/main");
+
+    // 4. Multiple policy files without --policy fail closed.
+    workspace.source("quality-policy.json", "{}");
+    workspace.source("python-quality-policy.json", "{}");
+    let output = workspace.command(&["doctor", "--format", "json"]);
+    assert_eq!(output.status.code(), Some(2));
+    let data: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(doctor_check(&data, "policy")["status"], "error");
+    assert!(
+        doctor_check(&data, "policy")["detail"]
+            .as_str()
+            .unwrap()
+            .contains("multiple policy files found")
+    );
+}
+
+#[test]
+fn doctor_reports_compact_smell_diagnostics_and_fails_closed_on_scan_errors() {
+    let workspace = Workspace::new(
+        "pub struct Payload { pub a: u8, pub b: u8 }\n\
+         fn dead_helper() -> u8 { 1 }\n",
+    );
+    init_git_repo(&workspace.path);
+    git_stage_and_commit(&workspace.path, "initial smells");
+
+    let (code, data) = doctor(&workspace, &[]);
+    assert_eq!(code, Some(0), "{data}");
+    assert_eq!(data["status"], "healthy");
+    assert_eq!(data["diagnostics"]["scanned_files"], 1);
+    assert_eq!(data["diagnostics"]["blocking_findings"], 1);
+    assert!(data["diagnostics"]["review_signals"].as_u64().unwrap() >= 1);
+    assert_eq!(data["diagnostics"]["smells"][0]["smell"], "Dead Code");
+    assert_eq!(data["diagnostics"]["smells"][0]["blocking"], 1);
+    assert_eq!(data["diagnostics"]["hotspots"][0]["path"], "src/lib.rs");
+
+    let table = workspace.command(&["doctor", "--policy", "quality-policy.json"]);
+    assert_eq!(table.status.code(), Some(0));
+    let stdout = String::from_utf8(table.stdout).unwrap();
+    assert!(stdout.contains("Codebase Health\n"), "{stdout}");
+    assert!(
+        stdout.contains("1 files · 1 blocking · 0 ignored"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("Dead Code"), "{stdout}");
+    assert!(stdout.contains("Top Hotspot Files\n"), "{stdout}");
+    assert!(stdout.contains("src/lib.rs"), "{stdout}");
+
+    // CLICOLOR_FORCE emits ANSI styling; NO_COLOR always disables it.
+    let colored = Command::new(env!("CARGO_BIN_EXE_smells"))
+        .args(["doctor", "--policy", "quality-policy.json"])
+        .current_dir(&workspace.path)
+        .env("CLICOLOR_FORCE", "1")
+        .env_remove("NO_COLOR")
+        .output()
+        .unwrap();
+    assert_eq!(colored.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&colored.stdout).contains("\x1b["));
+
+    let no_color = Command::new(env!("CARGO_BIN_EXE_smells"))
+        .args(["doctor", "--policy", "quality-policy.json"])
+        .current_dir(&workspace.path)
+        .env("CLICOLOR_FORCE", "1")
+        .env("NO_COLOR", "1")
+        .output()
+        .unwrap();
+    assert_eq!(no_color.status.code(), Some(0));
+    assert!(!String::from_utf8_lossy(&no_color.stdout).contains("\x1b["));
+
+    // Paying down the dead helper shows burndown against HEAD in both JSON and table output.
+    workspace.source(
+        "src/lib.rs",
+        "pub struct Payload { pub a: u8, pub b: u8 }\n",
+    );
+    let (code, burned) = doctor(&workspace, &["--base", "HEAD"]);
+    assert_eq!(code, Some(0), "{burned}");
+    assert_eq!(burned["burndown"]["base_ref"], "HEAD");
+    assert_eq!(burned["burndown"]["base_blocking"], 1);
+    assert_eq!(burned["burndown"]["current_blocking"], 0);
+    assert_eq!(burned["burndown"]["blocking_delta"], -1);
+    assert_eq!(burned["burndown"]["score_delta"], 10);
+    assert_eq!(burned["burndown"]["smell_deltas"][0]["smell"], "Dead Code");
+    assert_eq!(burned["burndown"]["smell_deltas"][0]["blocking_delta"], -1);
+
+    let burn_table = workspace.command(&[
+        "doctor",
+        "--policy",
+        "quality-policy.json",
+        "--base",
+        "HEAD",
+    ]);
+    assert_eq!(burn_table.status.code(), Some(0));
+    let burn_stdout = String::from_utf8(burn_table.stdout).unwrap();
+    assert!(
+        burn_stdout.contains("Burndown since HEAD ("),
+        "{burn_stdout}"
+    );
+    assert!(
+        burn_stdout.contains("Blockers: 1 -> 0 (-1)"),
+        "{burn_stdout}"
+    );
+    assert!(
+        burn_stdout.contains("Dead Code     1        0     -1      +0"),
+        "{burn_stdout}"
+    );
+
+    // Unknown --base ref fails closed with exit 2.
+    let (code, bad_base) = doctor(&workspace, &["--base", "refs/heads/does-not-exist"]);
+    assert_eq!(code, Some(2), "{bad_base}");
+    assert_eq!(doctor_check(&bad_base, "base_ref")["status"], "error");
+
+    // Parser error during diagnostic scan fails closed with exit 2.
+    workspace.source("src/lib.rs", "pub fn broken( {\n");
+    let (code, data) = doctor(&workspace, &[]);
+    assert_eq!(code, Some(2), "{data}");
+    assert_eq!(data["status"], "unhealthy");
+    assert_eq!(doctor_check(&data, "scan")["status"], "error");
+
+    // A base commit with a parser error also fails closed with exit 2.
+    git_stage_and_commit(&workspace.path, "broken base");
+    workspace.source("src/lib.rs", "pub fn healthy() -> u8 { 1 }\n");
+    let (code, broken_base) = doctor(&workspace, &["--base", "HEAD"]);
+    assert_eq!(code, Some(2), "{broken_base}");
+    assert_eq!(doctor_check(&broken_base, "base_ref")["status"], "error");
 }

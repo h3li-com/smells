@@ -34,11 +34,16 @@ All notable changes to Smells are recorded here. Release tags use `vMAJOR.MINOR.
   artifacts), a governance CODEOWNERS snippet, and a branch-protection
   checklist. `tests/ci_templates.rs` keeps the template pin equal to the crate
   version.
-- Add `smells doctor --policy FILE [--path DIR] [--format table|json]`, a
-  deterministic integration preflight that checks policy validity and scanner
-  pin, Git history completeness, suppression health, `AGENTS.md`/`CLAUDE.md`
-  wiring, and CODEOWNERS coverage of the policy file. Errors exit `2`;
-  governance gaps are warnings.
+- Add `smells doctor [--policy FILE] [--path DIR] [--base REF] [--format table|json]`, a
+  zero-flag integration preflight, colored 0–100 codebase health scorecard, and
+  burndown audit. When `--policy` or `--base` is omitted, it auto-discovers a
+  single policy file (or falls back with a warning to the built-in Rust/Python/
+  TypeScript starter) and compares against `origin/main` or `origin/master`
+  when present; checks policy validity and scanner pin, Git history
+  completeness, suppression health, `AGENTS.md`/`CLAUDE.md` wiring, and
+  CODEOWNERS coverage; summarizes all 23 smells (`blocking` vs. `ignored` vs.
+  `review`) plus the top 5 hotspot files. Broken prerequisites or scan errors
+  exit `2`; governance gaps and diagnostic smell summaries exit `0`.
 
 ## 0.6.0 - 2026-10-14
 

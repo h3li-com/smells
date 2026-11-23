@@ -1,6 +1,6 @@
 use std::{
     fs,
-    io::{self, Write},
+    io::{self, IsTerminal, Write},
     path::PathBuf,
 };
 
@@ -12,7 +12,7 @@ use crate::{
     doctor, metrics, policy, report,
 };
 
-const USAGE: &str = "smells --version\nsmells check (--path DIR | --staged) --policy FILE [--base REF] [--evidence FILE] [--format table|json] [--report FILE] [--log FILE] [policy group selectors]\nsmells policy show --policy FILE [--format table|json] [policy group selectors]\nsmells contracts validate --policy FILE\nsmells doctor --policy FILE [--path DIR] [--format table|json]\nsmells rules [--rule-pack rust-v1|python-v1|typescript-v1]\n\npolicy group selectors: --group NAME | --only-group NAME | --all-groups | --no-default-groups | --no-group NAME";
+const USAGE: &str = "smells --version\nsmells check (--path DIR | --staged) --policy FILE [--base REF] [--evidence FILE] [--format table|json] [--report FILE] [--log FILE] [policy group selectors]\nsmells policy show --policy FILE [--format table|json] [policy group selectors]\nsmells contracts validate --policy FILE\nsmells doctor [--policy FILE] [--path DIR] [--base REF] [--format table|json]\nsmells rules [--rule-pack rust-v1|python-v1|typescript-v1]\n\npolicy group selectors: --group NAME | --only-group NAME | --all-groups | --no-default-groups | --no-group NAME";
 
 enum Command {
     Help,
@@ -26,7 +26,8 @@ enum Command {
 
 struct DoctorOptions {
     source: PathBuf,
-    policy_path: PathBuf,
+    policy_path: Option<PathBuf>,
+    base_ref: Option<String>,
     format: Option<String>,
 }
 
@@ -320,36 +321,76 @@ fn command(args: &[String]) -> Result<Command, String> {
     operation_command(args, contracts)
 }
 
+#[derive(Default)]
+struct PendingDoctorOptions {
+    source: Option<PathBuf>,
+    policy_path: Option<PathBuf>,
+    base_ref: Option<String>,
+    format: Option<String>,
+}
+
+fn set_doctor_option(
+    flag: &str,
+    value: &str,
+    pending: &mut PendingDoctorOptions,
+) -> Result<(), String> {
+    match flag {
+        "--path" => set_once(&mut pending.source, PathBuf::from(value), true, flag),
+        "--policy" => set_once(&mut pending.policy_path, PathBuf::from(value), true, flag),
+        "--base" => set_base_ref(&mut pending.base_ref, value, false, flag),
+        "--format" => set_format(&mut pending.format, value, false, flag),
+        _ => Err(format!("unknown, repeated or invalid option: {flag}")),
+    }
+}
+
 fn doctor_command(args: &[String]) -> Result<Command, String> {
-    let (mut source, mut policy_path, mut format) = (None, None, None);
+    let mut pending = PendingDoctorOptions::default();
     for pair in args[1..].chunks(2) {
         let [flag, value] = pair else {
             return Err(format!("missing value for {}", pair[0]));
         };
-        match flag.as_str() {
-            "--path" => set_once(&mut source, PathBuf::from(value), true, flag)?,
-            "--policy" => set_once(&mut policy_path, PathBuf::from(value), true, flag)?,
-            "--format" => set_format(&mut format, value, false, flag)?,
-            _ => return Err(format!("unknown, repeated or invalid option: {flag}")),
-        }
+        set_doctor_option(flag, value, &mut pending)?;
     }
     Ok(Command::Doctor(DoctorOptions {
-        source: source.unwrap_or_else(|| PathBuf::from(".")),
-        policy_path: policy_path.ok_or("--policy is required")?,
-        format,
+        source: pending.source.unwrap_or_else(|| PathBuf::from(".")),
+        policy_path: pending.policy_path,
+        base_ref: pending.base_ref,
+        format: pending.format,
     }))
 }
 
+fn stdout_uses_color() -> bool {
+    color_enabled(
+        io::stdout().is_terminal(),
+        std::env::var_os("NO_COLOR").is_some(),
+        std::env::var("CLICOLOR_FORCE").ok().as_deref(),
+    )
+}
+
+fn color_enabled(is_tty: bool, no_color: bool, force: Option<&str>) -> bool {
+    if no_color {
+        return false;
+    }
+    if force.is_some_and(|value| !value.is_empty() && value != "0") {
+        return true;
+    }
+    is_tty
+}
+
 fn run_doctor(options: &DoctorOptions) -> Result<u8, String> {
-    let checks = doctor::diagnose(&options.source, &options.policy_path);
+    let report = doctor::diagnose(
+        &options.source,
+        options.policy_path.as_deref(),
+        options.base_ref.as_deref(),
+    );
     if options.format.as_deref() == Some("json") {
-        let json = serde_json::to_string_pretty(&doctor::to_json(&checks))
+        let json = serde_json::to_string_pretty(&doctor::to_json(&report))
             .map_err(|error| error.to_string())?;
         println!("{json}");
     } else {
-        print!("{}", doctor::to_table(&checks));
+        print!("{}", doctor::to_table(&report, stdout_uses_color()));
     }
-    Ok(doctor::exit_code(&checks))
+    Ok(doctor::exit_code(&report.checks))
 }
 
 fn validate_contracts(policy_path: &PathBuf) -> Result<u8, String> {
@@ -652,6 +693,16 @@ mod tests {
         fn flush(&mut self) -> io::Result<()> {
             Err(io::Error::other("flush failed"))
         }
+    }
+
+    #[test]
+    fn color_policy_respects_no_color_force_and_tty() {
+        assert!(!color_enabled(true, true, Some("1")));
+        assert!(color_enabled(false, false, Some("1")));
+        assert!(!color_enabled(false, false, Some("0")));
+        assert!(!color_enabled(false, false, Some("")));
+        assert!(color_enabled(true, false, None));
+        assert!(!color_enabled(false, false, None));
     }
 
     #[test]
