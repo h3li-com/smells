@@ -18,6 +18,7 @@ Repository implementations are discovered from the nearest ancestor `Cargo.toml`
 smells --version
 smells rules [--rule-pack rust-v1|python-v1|typescript-v1]
 smells contracts validate --policy FILE
+smells doctor --policy FILE [--path DIRECTORY] [--format table|json]
 smells policy show --policy FILE [--format table|json] [group selectors]
 smells check --path DIRECTORY --policy FILE [--base REF] [--evidence FILE] [--format table|json] [--report JSON] [--log LOG] [group selectors]
 smells check --staged --policy FILE [--base REF] [--evidence FILE] [--format table|json] [--report JSON] [--log LOG] [group selectors]
@@ -39,6 +40,19 @@ set before a scan.
 - Exit 0: configured required checks completed without unsuppressed required matches, including `passed_with_ignored_findings`. Exit 1: at least one blocking match. Exit 2: input/configuration/parser/budget/ownership/suppression/collector-prerequisite error. Errors outrank violations. Missing Git makes selected history rules incomplete regardless of mode.
 - The only exception mechanism is a syntax-aware source comment: `smells: ignore[exact-rule-id] -- non-empty reason`. It applies to that rule on the next declaration, allowing blank lines and decorators/attributes. Separate rules require separate directives. Malformed, unknown, misplaced, duplicate, and unused directives exit 2. Multi-location findings can be suppressed only at the reported primary declaration; scanner failures are unsuppressible. Ignored findings remain visible with `ignored_match` state and their reason. When the targeted rule is incomplete, its directive remains visible as `unverified_due_to_incomplete_rule` because the scanner cannot prove it unused; the scan still exits 2.
 - Automatic provider execution and source active-cfg selection remain outside the scanner. Provider evidence manifests are validated through `--evidence`; unknown fields/groups/rules/parameters or unsupported versions/scope are rejected. A suppression does not alter the policy or hide the underlying match.
+
+## Integration preflight
+
+`smells doctor` audits an integration before it reaches CI. It reads the policy and source tree under `--path` (default `.`) and reports one row per check, each `ok`, `warn`, or `error`:
+
+- `policy`: the policy parses, matches its rule pack, and pins the running scanner version.
+- `git_history`: Git history is available and no shallow-clone boundary truncates the 200-commit window.
+- `suppressions`: total and per-rule `smells: ignore` directives. Malformed or unknown directives are errors. Unused directives need a full scan, so `smells check` reports them.
+- `agents_contract`: `AGENTS.md` exists and is not empty.
+- `claude_import`: if a `CLAUDE.md` exists, it contains an `@AGENTS.md` import line.
+- `codeowners`: the first of `.github/CODEOWNERS`, `CODEOWNERS`, or `docs/CODEOWNERS` assigns an owner to the policy file. The last matching rule wins, as on GitHub.
+
+Any `error` exits `2`, because the matching scan would be incomplete or rejected. Warnings are governance gaps and exit `0`. When the policy cannot be read, the input-dependent checks are skipped and the governance checks still run. The Debt Envelope is computed in memory from `--base`, so there is no baseline file to verify.
 
 ## CI gate templates
 

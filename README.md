@@ -324,6 +324,8 @@ For GitHub Actions, check out full history with `fetch-depth: 0`. Divergent Chan
 
 Preserve both artifacts. Let exit `1` block configured violations and exit `2` block incomplete analysis.
 
+Run `smells doctor --policy quality-policy.json` first to catch a shallow clone, a policy that pins another scanner version, malformed suppressions, or a policy file with no code owner.
+
 Ready-made GitHub Actions and Azure Pipelines gates, a CODEOWNERS snippet, and a branch-protection checklist are in [`examples/ci/`](examples/ci/) and [CI gate templates](docs/project-integration.md#ci-gate-templates). They ratchet pull requests against their base with `--base`.
 
 ### Run it before commits
