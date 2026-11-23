@@ -140,8 +140,8 @@
       "additionalProperties": false,
       "required": ["role", "framework", "paths"],
       "properties": {
-        "role": {"const": "database_migration"},
-        "framework": {"enum": ["alembic", "django"]},
+        "role": {"enum": ["database_migration", "test_suite"]},
+        "framework": {"enum": ["alembic", "django", "pytest", "unittest"]},
         "paths": {
           "type": "array",
           "minItems": 1,
@@ -154,7 +154,11 @@
           "items": {"type": "string", "pattern": "^/[^*?\\\\\\[\\]{}]+$"},
           "default": []
         }
-      }
+      },
+      "oneOf": [
+        {"properties": {"role": {"const": "database_migration"}, "framework": {"enum": ["alembic", "django"]}}},
+        {"properties": {"role": {"const": "test_suite"}, "framework": {"enum": ["pytest", "unittest"]}}}
+      ]
     },
     "selection_contract": {
       "type": "object",

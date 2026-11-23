@@ -5521,3 +5521,104 @@ fn staged_provider_evidence_cannot_be_replaced_by_unstaged_bytes() {
         true
     );
 }
+
+#[test]
+fn python_test_suite_source_role_reports_test_cases_by_role_and_keeps_helpers_blocking() {
+    let mut policy: Value =
+        serde_json::from_str(include_str!("../examples/python-quality-policy.json")).unwrap();
+    policy["rules"]["python.function_lines"]["parameters"]["maximum"] = json!(5);
+    policy["source_roles"] = json!([{
+        "role": "test_suite",
+        "framework": "pytest",
+        "paths": ["/tests/**/*.py"]
+    }]);
+    let body = "    value = 1\n".repeat(10);
+    let workspace = Workspace::new("app.py", "def ok():\n    return 1\n", &policy);
+    workspace.source(
+        "tests/test_checkout.py",
+        &format!("def test_checkout_flow():\n{body}\n\ndef build_fixture():\n{body}\n"),
+    );
+    workspace.stage();
+    workspace.commit("initial");
+
+    let output = workspace.check_path();
+    assert_eq!(output.status.code(), Some(1));
+    let data = report(&output);
+    let findings = data["findings"].as_array().unwrap();
+    let test_case = findings
+        .iter()
+        .find(|f| f["rule_id"] == "python.function_lines" && f["symbol"] == "test_checkout_flow")
+        .expect("test_checkout_flow finding");
+    assert_eq!(test_case["status"], "reported_by_role");
+    assert_eq!(test_case["blocking"], false);
+    assert_eq!(test_case["role_context"]["source_role"], "test_suite");
+    assert_eq!(test_case["role_context"]["declaration_role"], "test_case");
+    assert_eq!(test_case["role_context"]["framework"], "pytest");
+
+    let helper = findings
+        .iter()
+        .find(|f| f["rule_id"] == "python.function_lines" && f["symbol"] == "build_fixture")
+        .expect("build_fixture finding");
+    assert_eq!(helper["status"], "violation");
+    assert_eq!(helper["blocking"], true);
+    assert!(helper["role_context"].is_null());
+}
+
+#[test]
+fn typescript_test_suite_source_role_reports_describe_and_it_callbacks_and_keeps_helpers_blocking()
+{
+    let mut policy: Value =
+        serde_json::from_str(include_str!("../examples/typescript-quality-policy.json")).unwrap();
+    policy["rules"]["typescript.function_lines"]["parameters"]["maximum"] = json!(5);
+    policy["source_roles"] = json!([{
+        "role": "test_suite",
+        "framework": "vitest",
+        "paths": ["/tests/**/*.test.ts"]
+    }]);
+    let stmts = "    const x = 1;\n".repeat(8);
+    let test_source = format!(
+        "describe('sidebar', () => {{\n  it('renders items', () => {{\n{stmts}  }});\n}});\nfunction renderSidebar() {{\n{stmts}}}\n"
+    );
+    let workspace = Workspace::new("src/app.ts", "export const ok = 1;\n", &policy);
+    workspace.source("tests/sidebar.test.ts", &test_source);
+    workspace.stage();
+    workspace.commit("initial");
+
+    let output = workspace.check_path();
+    assert_eq!(output.status.code(), Some(1));
+    let data = report(&output);
+    let findings: Vec<&Value> = data["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["rule_id"] == "typescript.function_lines")
+        .collect();
+
+    let describe_cb = findings
+        .iter()
+        .find(|f| f["symbol"] == "<anonymous>" && f["location"]["line"] == 1)
+        .expect("describe callback finding");
+    assert_eq!(describe_cb["status"], "reported_by_role");
+    assert_eq!(describe_cb["blocking"], false);
+    assert_eq!(describe_cb["role_context"]["source_role"], "test_suite");
+    assert_eq!(
+        describe_cb["role_context"]["declaration_role"],
+        "test_block"
+    );
+
+    let it_cb = findings
+        .iter()
+        .find(|f| f["symbol"] == "<anonymous>" && f["location"]["line"] == 2)
+        .expect("it callback finding");
+    assert_eq!(it_cb["status"], "reported_by_role");
+    assert_eq!(it_cb["blocking"], false);
+    assert_eq!(it_cb["role_context"]["declaration_role"], "test_case");
+
+    let helper = findings
+        .iter()
+        .find(|f| f["symbol"] == "renderSidebar")
+        .expect("renderSidebar helper finding");
+    assert_eq!(helper["status"], "violation");
+    assert_eq!(helper["blocking"], true);
+    assert!(helper["role_context"].is_null());
+}

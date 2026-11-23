@@ -516,14 +516,19 @@ fn valid_anchored_role_path(path: &str, allow_glob: bool) -> bool {
     }
 }
 
-fn framework_supported(language: &str, framework: &str) -> bool {
-    match language {
-        "python" => matches!(framework, "alembic" | "django"),
-        "typescript" => matches!(
+fn role_framework_supported(language: &str, role: &str, framework: &str) -> bool {
+    match (language, role) {
+        ("python", "database_migration") => matches!(framework, "alembic" | "django"),
+        ("python", "test_suite") => matches!(framework, "pytest" | "unittest"),
+        ("typescript", "database_migration") => matches!(
             framework,
             "typeorm" | "knex" | "mikro_orm" | "kysely" | "sequelize_umzug" | "prisma_8"
         ),
-        "rust" => matches!(framework, "sea_orm" | "refinery" | "rusqlite_migration"),
+        ("typescript", "test_suite") => matches!(framework, "vitest" | "jest" | "playwright"),
+        ("rust", "database_migration") => {
+            matches!(framework, "sea_orm" | "refinery" | "rusqlite_migration")
+        }
+        ("rust", "test_suite") => framework == "cargo_test",
         _ => false,
     }
 }
@@ -531,9 +536,11 @@ fn framework_supported(language: &str, framework: &str) -> bool {
 fn valid_source_role_declaration(declaration: &SourceRoleDeclaration, registry: &Registry) -> bool {
     let unique_paths = declaration.paths.iter().collect::<BTreeSet<_>>();
     let unique_configuration = declaration.configuration.iter().collect::<BTreeSet<_>>();
-    declaration.role == "database_migration"
-        && framework_supported(&registry.language, &declaration.framework)
-        && !declaration.paths.is_empty()
+    role_framework_supported(
+        &registry.language,
+        &declaration.role,
+        &declaration.framework,
+    ) && !declaration.paths.is_empty()
         && unique_paths.len() == declaration.paths.len()
         && unique_configuration.len() == declaration.configuration.len()
         && declaration
@@ -1109,9 +1116,16 @@ mod tests {
             ("rust", "rusqlite_migration"),
         ] {
             let expected = framework != "drizzle";
-            assert_eq!(framework_supported(language, framework), expected);
+            assert_eq!(
+                role_framework_supported(language, "database_migration", framework),
+                expected
+            );
         }
-        assert!(!framework_supported("java", "flyway"));
+        assert!(!role_framework_supported(
+            "java",
+            "database_migration",
+            "flyway"
+        ));
     }
 
     #[test]
@@ -1145,6 +1159,70 @@ mod tests {
             .unwrap()
             .push(second);
         assert!(policy_result(&ambiguous).is_err());
+    }
+
+    #[test]
+    fn test_suite_source_roles_validate_language_and_role_framework_pairs() {
+        let mut rust_ok = rust_policy_value();
+        rust_ok["source_roles"] = json!([{
+            "role": "test_suite",
+            "framework": "cargo_test",
+            "paths": ["/tests/**/*.rs"]
+        }]);
+        assert!(policy_result(&rust_ok).is_ok());
+
+        let mut wrong_framework = rust_policy_value();
+        wrong_framework["source_roles"] = json!([{
+            "role": "test_suite",
+            "framework": "pytest",
+            "paths": ["/tests/**/*.rs"]
+        }]);
+        assert!(policy_result(&wrong_framework).is_err());
+
+        let mut wrong_role = rust_policy_value();
+        wrong_role["source_roles"] = json!([{
+            "role": "database_migration",
+            "framework": "cargo_test",
+            "paths": ["/tests/**/*.rs"]
+        }]);
+        assert!(policy_result(&wrong_role).is_err());
+
+        for (pack, raw, fw) in [
+            (
+                "python-v1",
+                include_str!("../examples/python-quality-policy.json"),
+                "pytest",
+            ),
+            (
+                "python-v1",
+                include_str!("../examples/python-quality-policy.json"),
+                "unittest",
+            ),
+            (
+                "typescript-v1",
+                include_str!("../examples/typescript-quality-policy.json"),
+                "vitest",
+            ),
+            (
+                "typescript-v1",
+                include_str!("../examples/typescript-quality-policy.json"),
+                "jest",
+            ),
+            (
+                "typescript-v1",
+                include_str!("../examples/typescript-quality-policy.json"),
+                "playwright",
+            ),
+        ] {
+            let mut val: Value = serde_json::from_str(raw).unwrap();
+            val["source_roles"] = json!([{
+                "role": "test_suite",
+                "framework": fw,
+                "paths": ["/tests/**"]
+            }]);
+            let reg = registry(pack).unwrap();
+            assert!(parse(&serde_json::to_string(&val).unwrap(), &reg).is_ok());
+        }
     }
 
     #[test]

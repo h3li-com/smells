@@ -3273,3 +3273,41 @@ fn git_reference_ratchet_preserves_existing_suppressions_and_fails_closed_on_ref
             .contains("reference snapshot HEAD")
     }));
 }
+
+#[test]
+fn rust_test_suite_source_role_reports_test_functions_by_role_and_keeps_helpers_blocking() {
+    let long_body = "    let x = 1;\n".repeat(12);
+    let test_file = format!(
+        "#[test]\nfn long_integration_case() {{\n{long_body}}}\n\nfn long_helper() {{\n{long_body}}}\n"
+    );
+    let workspace = Workspace::new("pub fn ok() -> i32 { 1 }\n");
+    fs::create_dir_all(workspace.path.join("tests")).unwrap();
+    fs::write(workspace.path.join("tests/integration.rs"), test_file).unwrap();
+    workspace.modify("/rules/rust.function_lines/parameters/maximum", json!(5));
+    workspace.modify(
+        "/source_roles",
+        json!([{
+            "role": "test_suite",
+            "framework": "cargo_test",
+            "paths": ["/tests/**/*.rs"]
+        }]),
+    );
+
+    let output = workspace.check();
+    assert_eq!(output.status.code(), Some(1));
+    let data = report(&output);
+    let test_finding = finding(&data, "rust.function_lines", "long_integration_case");
+    assert_eq!(test_finding["status"], "reported_by_role");
+    assert_eq!(test_finding["blocking"], false);
+    assert_eq!(test_finding["role_context"]["source_role"], "test_suite");
+    assert_eq!(
+        test_finding["role_context"]["declaration_role"],
+        "test_case"
+    );
+    assert_eq!(test_finding["role_context"]["framework"], "cargo_test");
+
+    let helper_finding = finding(&data, "rust.function_lines", "long_helper");
+    assert_eq!(helper_finding["status"], "violation");
+    assert_eq!(helper_finding["blocking"], true);
+    assert!(helper_finding["role_context"].is_null());
+}
