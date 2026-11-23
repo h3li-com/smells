@@ -4,6 +4,8 @@ All notable changes to Smells are recorded here. Release tags use `vMAJOR.MINOR.
 
 ## Unreleased
 
+- Update `rustix` from 1.1.5 to 1.1.6 to resolve RUSTSEC-2026-0486.
+
 ## 0.6.0 - 2026-10-14
 
 - Classify high-confidence Python, TypeScript, and Rust database migration source
