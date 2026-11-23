@@ -1,7 +1,7 @@
 use std::{
     fs,
     io::{self, IsTerminal, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 use crate::{
@@ -12,7 +12,7 @@ use crate::{
     doctor, metrics, policy, report,
 };
 
-const USAGE: &str = "smells --version\nsmells check (--path DIR | --staged) --policy FILE [--base REF] [--evidence FILE] [--format table|json] [--report FILE] [--log FILE] [policy group selectors]\nsmells policy show --policy FILE [--format table|json] [policy group selectors]\nsmells contracts validate --policy FILE\nsmells doctor [--policy FILE] [--path DIR] [--base REF] [--format table|json]\nsmells rules [--rule-pack rust-v1|python-v1|typescript-v1]\n\npolicy group selectors: --group NAME | --only-group NAME | --all-groups | --no-default-groups | --no-group NAME";
+const USAGE: &str = "smells --version\nsmells check (--path DIR | --staged) [--policy FILE] [--base REF] [--evidence FILE] [--format table|json] [--report FILE] [--log FILE] [policy group selectors]\nsmells policy show [--policy FILE] [--format table|json] [policy group selectors]\nsmells contracts validate [--policy FILE]\nsmells doctor [--policy FILE] [--path DIR] [--base REF] [--format table|json]\nsmells rules [--rule-pack rust-v1|python-v1|typescript-v1]\n\n--policy defaults to quality-policy.json in the --path directory (or the current directory).\n\npolicy group selectors: --group NAME | --only-group NAME | --all-groups | --no-default-groups | --no-group NAME";
 
 enum Command {
     Help,
@@ -169,10 +169,27 @@ fn consume_operation_option(
     Ok(())
 }
 
+const DEFAULT_POLICY: &str = "quality-policy.json";
+
+/// Uses `--policy` when given, otherwise `quality-policy.json` in `root`; a missing
+/// default is an error so an unconfigured repository never scans with no policy.
+fn policy_or_default(explicit: Option<PathBuf>, root: &Path) -> Result<PathBuf, String> {
+    if let Some(path) = explicit {
+        return Ok(path);
+    }
+    let path = root.join(DEFAULT_POLICY);
+    if path.is_file() {
+        return Ok(path);
+    }
+    Err(format!(
+        "no --policy given and {} not found; pass --policy FILE",
+        path.display()
+    ))
+}
+
 fn finish_operation(options: PendingOptions, contracts: bool) -> Result<Command, String> {
-    let policy_path = options.policy_path.ok_or("--policy is required")?;
     if contracts {
-        return Ok(Command::Validate(policy_path));
+        return policy_or_default(options.policy_path, Path::new(".")).map(Command::Validate);
     }
     if options.staged == options.source.is_some() {
         return Err("select exactly one of --staged and --path".into());
@@ -180,6 +197,8 @@ fn finish_operation(options: PendingOptions, contracts: bool) -> Result<Command,
     if options.base_ref.is_some() && options.evidence_path.is_some() {
         return Err("--evidence cannot be used with --base".into());
     }
+    let root = options.source.as_deref().unwrap_or(Path::new("."));
+    let policy_path = policy_or_default(options.policy_path, root)?;
     Ok(Command::Check(CheckOptions {
         source: options.source,
         policy_path,
@@ -269,7 +288,7 @@ fn show_command(args: &[String]) -> Result<Command, String> {
         )?;
     }
     Ok(Command::Show(ShowOptions {
-        policy_path: policy_path.ok_or("--policy is required")?,
+        policy_path: policy_or_default(policy_path, Path::new("."))?,
         format,
         selection,
     }))

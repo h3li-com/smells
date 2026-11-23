@@ -3743,3 +3743,48 @@ fn doctor_reports_compact_smell_diagnostics_and_fails_closed_on_scan_errors() {
     assert_eq!(code, Some(2), "{broken_base}");
     assert_eq!(doctor_check(&broken_base, "base_ref")["status"], "error");
 }
+
+#[test]
+fn policy_defaults_to_quality_policy_json_in_the_scanned_directory() {
+    let workspace = Workspace::new("fn concise() {}");
+    let explicit = workspace.check();
+    let implicit = workspace.command(&[
+        "check",
+        "--path",
+        ".",
+        "--only-group",
+        "source",
+        "--format",
+        "json",
+    ]);
+    assert_eq!(
+        implicit.status.code(),
+        explicit.status.code(),
+        "{implicit:?}"
+    );
+    assert_eq!(report(&implicit)["findings"], report(&explicit)["findings"]);
+
+    fs::create_dir(workspace.path.join("nested")).unwrap();
+    fs::rename(
+        workspace.path.join("quality-policy.json"),
+        workspace.path.join("nested/quality-policy.json"),
+    )
+    .unwrap();
+    workspace.source("nested/src/lib.rs", "fn concise() {}");
+    let nested = workspace.command(&["check", "--path", "nested", "--only-group", "source"]);
+    assert_eq!(nested.status.code(), Some(0), "{nested:?}");
+
+    for args in [
+        &["contracts", "validate"][..],
+        &["policy", "show"][..],
+        &["check", "--path", ".", "--only-group", "source"][..],
+    ] {
+        let output = workspace.command(args);
+        assert_eq!(output.status.code(), Some(2), "{args:?}: {output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("no --policy given and ./quality-policy.json not found"),
+            "{args:?}: {output:?}"
+        );
+    }
+}

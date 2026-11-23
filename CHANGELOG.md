@@ -20,6 +20,9 @@ All notable changes to Smells are recorded here. Release tags use `vMAJOR.MINOR.
   - `rust.unused_code` treats crate-level `main`, `#[test]` and `#[bench]`
     functions, and names referenced as path strings in attributes (such as
     `#[serde(default = "name")]`) as reachable.
+- Make `--policy` optional for `check`, `policy show`, and `contracts validate`:
+  it defaults to `quality-policy.json` in the `--path` directory (or the current
+  directory); a missing default still exits `2` and names the expected file.
 - Update `rustix` from 1.1.5 to 1.1.6 to resolve RUSTSEC-2026-0486.
 - Fail closed when a shallow Git clone truncates the 200-commit history window:
   history rules now exit `2` with an actionable `fetch-depth: 0` error, and
