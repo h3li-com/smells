@@ -537,13 +537,14 @@ fn print_hook_summary(
     report_path: Option<&std::path::Path>,
 ) {
     println!(
-        "Scan summary | verdict: {} | findings: {} | blocking: {} | ignored: {} | review: {} | errors: {}",
+        "Scan summary | verdict: {} | findings: {} | blocking: {} | ignored: {} | review: {} | errors: {}{}",
         report.summary.verdict,
         report.summary.matched_findings,
         report.summary.blocking_findings,
         report.summary.ignored_findings,
         report.summary.review_signals,
         report.summary.error_count,
+        report::ratchet_summary_note(report),
     );
     println!("Finding Log: {}", log_path.display());
     println!("Start at the Issue Index, then read every referenced detail.");

@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "rule_pack": "rust-v1",
-  "scanner_version": "0.6.0",
+  "scanner_version": "0.7.0",
   "scope": "authored_all_cfg",
   "default_groups": ["all"],
   "exclude_directories": [
@@ -36,12 +36,12 @@
     "rust.repeated_dispatch": {"version":1,"mode":"report","parameters":{"minimum_sites":3,"minimum_arms":4}},
     "rust.temporary_fields": {"version":1,"mode":"report","parameters":{"minimum_fields":3,"minimum_methods":4,"maximum_use_percent":25}},
     "rust.comment_share": {"version":1,"mode":"report","parameters":{"minimum_code_lines":20,"minimum_share_percent":30}},
-    "rust.duplicate_functions": {"version":1,"mode":"report","parameters":{"minimum_similarity_basis_points":8200,"minimum_tokens":20}},
+    "rust.duplicate_functions": {"version":1,"mode":"required","parameters":{"minimum_similarity_basis_points":8200,"minimum_tokens":20}},
     "rust.data_class": {"version":1,"mode":"report","parameters":{"minimum_fields":2,"maximum_operations":0}},
     "rust.lazy_class": {"version":1,"mode":"report","parameters":{"maximum_fields":1,"maximum_functions":1,"maximum_lines":5}},
     "rust.forwarding_share": {"version":1,"mode":"report","parameters":{"minimum_methods":5,"minimum_share_percent":80}},
     "rust.function_crap": {"version":1,"mode":"report","parameters":{"maximum":5}},
-    "rust.unused_code": {"version":1,"mode":"report","parameters":{"maximum_findings":0}},
+    "rust.unused_code": {"version":1,"mode":"required","parameters":{"maximum_findings":0}},
     "rust.unused_type_parameters": {"version":1,"mode":"report","parameters":{"maximum_findings":0}},
     "rust.nominal_slot_contract": {"version":1,"mode":"report","parameters":{"maximum_mismatches":0}},
     "rust.port_conformance": {"version":1,"mode":"report","parameters":{"maximum_failures":0}},

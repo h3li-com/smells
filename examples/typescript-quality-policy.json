@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "rule_pack": "typescript-v1",
-  "scanner_version": "0.6.0",
+  "scanner_version": "0.7.0",
   "scope": "authored_source",
   "default_groups": ["all"],
   "exclude_directories": [
@@ -113,7 +113,7 @@
     },
     "typescript.duplicate_functions": {
       "version": 1,
-      "mode": "report",
+      "mode": "required",
       "parameters": {
         "minimum_similarity_basis_points": 8200,
         "minimum_tokens": 20
@@ -153,7 +153,7 @@
     },
     "typescript.unused_code": {
       "version": 1,
-      "mode": "report",
+      "mode": "required",
       "parameters": {
         "maximum_findings": 0
       }

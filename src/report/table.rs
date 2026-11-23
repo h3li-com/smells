@@ -388,21 +388,33 @@ fn log_entry(report: &Report, target: FindingLogTarget<'_>) -> FindingLogEntry {
     }
 }
 
+pub(super) fn ratchet_summary_note(
+    ratchet: Option<&crate::core::ratchet::RatchetSummary>,
+) -> String {
+    let Some(ratchet) = ratchet else {
+        return String::new();
+    };
+    let weakened = if ratchet.policy_weakened_rules.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " | weakened_rules: {}",
+            ratchet.policy_weakened_rules.join(",")
+        )
+    };
+    format!(
+        " | base: {} | legacy: {} | delta: {:+} | new_ignores: {}{}",
+        ratchet.reference_ref,
+        ratchet.legacy_within_envelope,
+        ratchet.burndown_delta,
+        ratchet.new_suppressions,
+        weakened
+    )
+}
+
 fn write_finding_log_header(report: &Report, output: &mut impl Write) -> io::Result<()> {
     writeln!(output, "Smells Finding Log")?;
-    let ratchet_note = report
-        .ratchet
-        .as_ref()
-        .map(|ratchet| {
-            format!(
-                " | base: {} | legacy: {} | delta: {:+} | new_ignores: {}",
-                ratchet.reference_ref,
-                ratchet.legacy_within_envelope,
-                ratchet.burndown_delta,
-                ratchet.new_suppressions
-            )
-        })
-        .unwrap_or_default();
+    let ratchet_note = ratchet_summary_note(report.ratchet.as_ref());
     writeln!(
         output,
         "Scan summary | verdict: {} | findings: {} | blocking: {} | ignored: {} | review: {} | errors: {}{}",
@@ -493,7 +505,7 @@ impl Report {
             self.metadata.language,
         );
         println!(
-            "Scan summary | verdict: {} | implementations: {} | matched patterns: {}/{} | blocking patterns: {} | review patterns: {} | matched findings: {} | blocking findings: {} | ignored findings: {} | review signals: {} | errors: {}",
+            "Scan summary | verdict: {} | implementations: {} | matched patterns: {}/{} | blocking patterns: {} | review patterns: {} | matched findings: {} | blocking findings: {} | ignored findings: {} | review signals: {} | errors: {}{}",
             self.summary.verdict,
             self.summary.implementations,
             self.summary.matched_smell_patterns,
@@ -505,6 +517,7 @@ impl Report {
             self.summary.ignored_findings,
             self.summary.review_signals,
             self.summary.error_count,
+            ratchet_summary_note(self.ratchet.as_ref()),
         );
         for (implementation, scope) in self
             .implementation_results
@@ -525,8 +538,39 @@ impl Report {
 mod tests {
     use super::{
         guidance_reference_matches, has_omitted_related_excerpts, matched_finding_in_scope,
-        source_line_marker,
+        ratchet_summary_note, source_line_marker,
     };
+    use crate::core::ratchet::RatchetSummary;
+
+    #[test]
+    fn ratchet_summary_note_formats_clean_burndown_and_weakened_rules() {
+        assert_eq!(ratchet_summary_note(None), "");
+        let mut summary = RatchetSummary {
+            reference_ref: "origin/main".into(),
+            reference_commit: "abc123".into(),
+            reference_blockers: 5,
+            candidate_blockers: 3,
+            regressed_blockers: 0,
+            legacy_within_envelope: 3,
+            burndown_delta: -2,
+            reference_suppressions: 1,
+            candidate_suppressions: 1,
+            new_suppressions: 0,
+            suppression_guardrail_triggered: false,
+            policy_changed: false,
+            policy_weakened_rules: Vec::new(),
+        };
+        assert_eq!(
+            ratchet_summary_note(Some(&summary)),
+            " | base: origin/main | legacy: 3 | delta: -2 | new_ignores: 0"
+        );
+        summary.policy_weakened_rules =
+            vec!["rust.function_lines".into(), "rust.unused_code".into()];
+        assert_eq!(
+            ratchet_summary_note(Some(&summary)),
+            " | base: origin/main | legacy: 3 | delta: -2 | new_ignores: 0 | weakened_rules: rust.function_lines,rust.unused_code"
+        );
+    }
 
     #[test]
     fn table_includes_only_matched_findings_owned_by_the_current_scope() {
