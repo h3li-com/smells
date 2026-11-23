@@ -20,6 +20,11 @@ All notable changes to Smells are recorded here. Release tags use `vMAJOR.MINOR.
   `jest`, `playwright`, and `cargo_test`): canonical test cases and test blocks
   exceeding `function_lines` are surfaced as auditable `reported_by_role` review
   signals while test helpers and other rules retain normal enforcement.
+- Fix `--base` so diverging one copy of a Duplicate Code pair no longer counts
+  as a regression. A duplicate pair's burden is now its shared token count
+  (`intersection`) instead of `intersection + union`. This lets
+  `duplicate_functions` and `unused_code` run as `required` under `--base`, and
+  their burden semantics are documented in `docs/report-interface.md`.
 
 ## 0.6.0 - 2026-10-14
 

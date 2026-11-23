@@ -69,6 +69,12 @@ fn value_burden(value: &serde_json::Value) -> f64 {
         return number;
     }
     if let Some(map) = value.as_object() {
+        // Duplicate-code pairs observe `{intersection, union}`. Only the shared
+        // token mass is debt: counting `union` would make diverging a copy look
+        // worse, while growing both copies in lockstep must still regress.
+        if let Some(shared) = map.get("intersection").and_then(serde_json::Value::as_f64) {
+            return shared;
+        }
         let sum: f64 = map.values().filter_map(serde_json::Value::as_f64).sum();
         if sum > 0.0 {
             return sum;
@@ -318,6 +324,10 @@ mod tests {
         assert_eq!(
             value_burden(&json!({"changes": 5, "responsibilities": 3})),
             8.0
+        );
+        assert_eq!(
+            value_burden(&json!({"intersection": 40, "union": 44})),
+            40.0
         );
         assert_eq!(value_burden(&json!({"flag": true})), 1.0);
         assert_eq!(value_burden(&json!("match")), 1.0);

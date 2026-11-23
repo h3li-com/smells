@@ -56,6 +56,13 @@ Every rule inside `coverage` repeats `selected` and `groups`. `measurement_statu
 
 Every report includes a default-on `attestation` summary (`complete`, `exit_code`, `rules_selected`, `rules_measured`, `rules_incomplete`, `history_complete`, `policy_sha256`, `suppressions_total`, `ratchet_active`) so CI and audits can verify run completeness. When `--base <REF>` is supplied, the report also includes `ratchet`, which compares the candidate snapshot against the resolved Git reference's implementation-scoped Debt Envelope in memory, records `burndown_delta`, and blocks new suppressions (`blocked_by_suppression_growth`) or weakened required rules (`blocked_by_policy_weakening`) by default. `--evidence` cannot be combined with `--base`.
 
+Within one rule and implementation scope, the ratchet orders blockers by a deterministic burden and lets each candidate blocker use one distinct reference blocker of equal or greater burden. Burdens never depend on line numbers, so moving code does not create new debt. A scalar observation is its own burden, and an object observation is the sum of its numeric fields, with one exception: Duplicate Code (`*.duplicate_functions`) observes `{intersection, union}` and uses only `intersection`, the shared token count. This means `duplicate_functions` and `unused_code` can run as `required` under `--base` without blocking legacy debt:
+
+- Duplicate Code: making one copy diverge keeps the pair inside the envelope. A pasted copy adds new pairs and blocks, and so does growing both copies at once. Each pair is one finding whose scope covers the implementations of both locations.
+- Dead Code (`*.unused_code`): one blocker per file, whose burden is the number of unused private declarations in that file. Moving a legacy declaration within the file passes; adding another unused declaration to the file raises the count and blocks.
+
+Both rules are structural indicators. Similar tokens are not proof of shared semantics, and a private name with no second occurrence can still be reached dynamically, through generated code, or through configuration. Follow each rule's `when_to_ignore` guidance before suppressing a finding.
+
 ## Repository implementation model
 
 An implementation is a repository subtree owned by the nearest ancestor `Cargo.toml`, `pyproject.toml`, or `package.json` under the captured root. Nested ownership manifests take precedence. Auxiliary configuration such as `sqlx.toml` is attached to that owner and cannot create an Implementation boundary. Multiple ownership manifests in one directory describe one multi-runtime implementation. Manifests are captured but never executed. Unowned source is reported as `implementation_id: "__unowned__"`.
