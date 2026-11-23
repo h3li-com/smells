@@ -3418,3 +3418,106 @@ fn rust_test_suite_source_role_reports_test_functions_by_role_and_keeps_helpers_
     assert_eq!(helper_finding["blocking"], true);
     assert!(helper_finding["role_context"].is_null());
 }
+
+fn doctor(workspace: &Workspace, extra: &[&str]) -> (Option<i32>, Value) {
+    let mut args = vec![
+        "doctor",
+        "--policy",
+        "quality-policy.json",
+        "--format",
+        "json",
+    ];
+    args.extend_from_slice(extra);
+    let output = workspace.command(&args);
+    let data: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        output.status.code().map(i64::from),
+        data["exit_code"].as_i64()
+    );
+    (output.status.code(), data)
+}
+
+fn doctor_check<'a>(data: &'a Value, id: &str) -> &'a Value {
+    data["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["id"] == id)
+        .unwrap()
+}
+
+#[test]
+fn doctor_reports_governance_gaps_as_warnings_on_a_complete_repository() {
+    let workspace = Workspace::new("pub fn value() -> u8 { 1 }\n");
+    init_git_repo(&workspace.path);
+    git_stage_and_commit(&workspace.path, "initial");
+    let (code, data) = doctor(&workspace, &[]);
+    assert_eq!(code, Some(0), "{data}");
+    assert_eq!(data["status"], "healthy");
+    assert_eq!(doctor_check(&data, "policy")["status"], "ok");
+    assert_eq!(doctor_check(&data, "git_history")["status"], "ok");
+    assert_eq!(doctor_check(&data, "suppressions")["status"], "ok");
+    assert_eq!(doctor_check(&data, "agents_contract")["status"], "warn");
+    assert_eq!(doctor_check(&data, "codeowners")["status"], "warn");
+
+    workspace.source("AGENTS.md", "# Review contract\n");
+    workspace.source("CLAUDE.md", "@AGENTS.md\n");
+    workspace.source(".github/CODEOWNERS", "*quality-policy.json @quality\n");
+    let (code, data) = doctor(&workspace, &["--path", "."]);
+    assert_eq!(code, Some(0));
+    for check in data["checks"].as_array().unwrap() {
+        assert_eq!(check["status"], "ok", "{check}");
+    }
+    assert_eq!(
+        doctor_check(&data, "codeowners")["detail"],
+        ".github/CODEOWNERS assigns quality-policy.json to @quality"
+    );
+    let table = workspace.command(&["doctor", "--policy", "quality-policy.json"]);
+    assert_eq!(table.status.code(), Some(0));
+    assert!(
+        String::from_utf8_lossy(&table.stdout)
+            .starts_with("Check | Status | Detail\npolicy | ok | ")
+    );
+}
+
+#[test]
+fn doctor_fails_closed_on_missing_history_invalid_policy_and_bad_arguments() {
+    let workspace = Workspace::new("pub fn value() -> u8 { 1 }\n");
+    let (code, data) = doctor(&workspace, &[]);
+    assert_eq!(code, Some(2));
+    assert_eq!(data["status"], "unhealthy");
+    assert_eq!(doctor_check(&data, "git_history")["status"], "error");
+
+    workspace.modify("/scanner_version", json!("0.0.0"));
+    let (code, data) = doctor(&workspace, &[]);
+    assert_eq!(code, Some(2));
+    assert_eq!(doctor_check(&data, "policy")["status"], "error");
+    let ids: Vec<_> = data["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|check| check["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        ids,
+        ["policy", "agents_contract", "claude_import", "codeowners"]
+    );
+
+    for args in [
+        &["doctor"][..],
+        &["doctor", "--policy"][..],
+        &[
+            "doctor",
+            "--policy",
+            "quality-policy.json",
+            "--format",
+            "yaml",
+        ][..],
+        &["doctor", "--policy", "a", "--policy", "b"][..],
+        &["doctor", "--policy", "quality-policy.json", "--staged", "x"][..],
+    ] {
+        let output = workspace.command(args);
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+        assert!(output.stdout.is_empty(), "{args:?}");
+    }
+}
