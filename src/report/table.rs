@@ -390,15 +390,29 @@ fn log_entry(report: &Report, target: FindingLogTarget<'_>) -> FindingLogEntry {
 
 fn write_finding_log_header(report: &Report, output: &mut impl Write) -> io::Result<()> {
     writeln!(output, "Smells Finding Log")?;
+    let ratchet_note = report
+        .ratchet
+        .as_ref()
+        .map(|ratchet| {
+            format!(
+                " | base: {} | legacy: {} | delta: {:+} | new_ignores: {}",
+                ratchet.reference_ref,
+                ratchet.legacy_within_envelope,
+                ratchet.burndown_delta,
+                ratchet.new_suppressions
+            )
+        })
+        .unwrap_or_default();
     writeln!(
         output,
-        "Scan summary | verdict: {} | findings: {} | blocking: {} | ignored: {} | review: {} | errors: {}",
+        "Scan summary | verdict: {} | findings: {} | blocking: {} | ignored: {} | review: {} | errors: {}{}",
         report.summary.verdict,
         report.summary.matched_findings,
         report.summary.blocking_findings,
         report.summary.ignored_findings,
         report.summary.review_signals,
-        report.summary.error_count
+        report.summary.error_count,
+        ratchet_note
     )?;
     writeln!(
         output,

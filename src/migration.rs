@@ -3393,6 +3393,7 @@ mod tests {
             implementations: Vec::new(),
             source_roles: Vec::new(),
             history: crate::core::model::History::default(),
+            policy_sha256: String::new(),
             policy: policy(rule_pack),
             digest: "0".repeat(64),
             mode: "test",

@@ -12,7 +12,7 @@ use crate::{
     metrics, policy, report,
 };
 
-const USAGE: &str = "smells --version\nsmells check (--path DIR | --staged) --policy FILE [--evidence FILE] [--format table|json] [--report FILE] [--log FILE] [policy group selectors]\nsmells policy show --policy FILE [--format table|json] [policy group selectors]\nsmells contracts validate --policy FILE\nsmells rules [--rule-pack rust-v1|python-v1|typescript-v1]\n\npolicy group selectors: --group NAME | --only-group NAME | --all-groups | --no-default-groups | --no-group NAME";
+const USAGE: &str = "smells --version\nsmells check (--path DIR | --staged) --policy FILE [--base REF] [--evidence FILE] [--format table|json] [--report FILE] [--log FILE] [policy group selectors]\nsmells policy show --policy FILE [--format table|json] [policy group selectors]\nsmells contracts validate --policy FILE\nsmells rules [--rule-pack rust-v1|python-v1|typescript-v1]\n\npolicy group selectors: --group NAME | --only-group NAME | --all-groups | --no-default-groups | --no-group NAME";
 
 enum Command {
     Help,
@@ -27,6 +27,7 @@ struct CheckOptions {
     source: Option<PathBuf>,
     policy_path: PathBuf,
     evidence_path: Option<PathBuf>,
+    base_ref: Option<String>,
     report_path: Option<PathBuf>,
     log_path: Option<PathBuf>,
     format: Option<String>,
@@ -44,6 +45,7 @@ struct PendingOptions {
     source: Option<PathBuf>,
     policy_path: Option<PathBuf>,
     evidence_path: Option<PathBuf>,
+    base_ref: Option<String>,
     report_path: Option<PathBuf>,
     log_path: Option<PathBuf>,
     format: Option<String>,
@@ -74,6 +76,7 @@ fn set_option(
             !contracts,
             flag,
         ),
+        "--base" => set_base_ref(&mut options.base_ref, value, contracts, flag),
         "--report" => set_once(
             &mut options.report_path,
             PathBuf::from(value),
@@ -90,6 +93,16 @@ fn set_option(
         "--format" => set_format(&mut options.format, value, contracts, flag),
         _ => Err(format!("unknown, repeated or invalid option: {flag}")),
     }
+}
+
+fn set_base_ref(
+    slot: &mut Option<String>,
+    value: &str,
+    contracts: bool,
+    flag: &str,
+) -> Result<(), String> {
+    let allowed = !contracts && !value.is_empty() && !value.starts_with('-');
+    set_once(slot, value.to_string(), allowed, flag)
 }
 
 fn set_format(
@@ -156,10 +169,14 @@ fn finish_operation(options: PendingOptions, contracts: bool) -> Result<Command,
     if options.staged == options.source.is_some() {
         return Err("select exactly one of --staged and --path".into());
     }
+    if options.base_ref.is_some() && options.evidence_path.is_some() {
+        return Err("--evidence cannot be used with --base".into());
+    }
     Ok(Command::Check(CheckOptions {
         source: options.source,
         policy_path,
         evidence_path: options.evidence_path,
+        base_ref: options.base_ref,
         report_path: options.report_path,
         log_path: options.log_path,
         format: options.format,
@@ -464,6 +481,7 @@ fn check(options: CheckOptions, scanner: &dyn Scanner) -> Result<u8, String> {
         target,
         policy_path: &options.policy_path,
         evidence_path: options.evidence_path.as_deref(),
+        base_ref: options.base_ref.as_deref(),
         selection: &options.selection,
     };
     let report = scanner.check(&request)?;
@@ -628,5 +646,55 @@ mod tests {
             panic!("check mode accepted repeated --staged");
         };
         assert_eq!(repeated, "unknown, repeated or invalid option: --staged");
+    }
+
+    #[test]
+    fn base_ref_is_validated_and_mutually_exclusive_with_evidence() {
+        let Ok(Command::Check(parsed)) = command(&arguments(&[
+            "check",
+            "--staged",
+            "--base",
+            "HEAD",
+            "--policy",
+            "quality-policy.json",
+        ])) else {
+            panic!("check mode rejected valid --base");
+        };
+        assert_eq!(parsed.base_ref.as_deref(), Some("HEAD"));
+
+        let Err(conflict) = command(&arguments(&[
+            "check",
+            "--staged",
+            "--base",
+            "HEAD",
+            "--evidence",
+            "provider.json",
+            "--policy",
+            "quality-policy.json",
+        ])) else {
+            panic!("check mode accepted --base with --evidence");
+        };
+        assert_eq!(conflict, "--evidence cannot be used with --base");
+
+        for invalid in [
+            vec![
+                "contracts",
+                "validate",
+                "--base",
+                "HEAD",
+                "--policy",
+                "quality-policy.json",
+            ],
+            vec![
+                "check",
+                "--staged",
+                "--base",
+                "-bad",
+                "--policy",
+                "quality-policy.json",
+            ],
+        ] {
+            assert!(command(&arguments(&invalid)).is_err());
+        }
     }
 }

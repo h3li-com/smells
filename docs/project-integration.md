@@ -19,8 +19,8 @@ smells --version
 smells rules [--rule-pack rust-v1|python-v1|typescript-v1]
 smells contracts validate --policy FILE
 smells policy show --policy FILE [--format table|json] [group selectors]
-smells check --path DIRECTORY --policy FILE [--evidence FILE] [--format table|json] [--report JSON] [--log LOG] [group selectors]
-smells check --staged --policy FILE [--evidence FILE] [--format table|json] [--report JSON] [--log LOG] [group selectors]
+smells check --path DIRECTORY --policy FILE [--base REF] [--evidence FILE] [--format table|json] [--report JSON] [--log LOG] [group selectors]
+smells check --staged --policy FILE [--base REF] [--evidence FILE] [--format table|json] [--report JSON] [--log LOG] [group selectors]
 ```
 
 Group selectors are repeatable `--group NAME`, repeatable `--only-group NAME`,

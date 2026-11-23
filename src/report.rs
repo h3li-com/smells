@@ -1,7 +1,10 @@
 use crate::{
-    core::model::{
-        History, Implementation, Input, MigrationArtifact, MigrationArtifactCandidate,
-        ResolvedSourceRole, RoleContext, SourceRoleCandidate,
+    core::{
+        model::{
+            History, Implementation, Input, MigrationArtifact, MigrationArtifactCandidate,
+            ResolvedSourceRole, RoleContext, SourceRoleCandidate,
+        },
+        ratchet::{RatchetSummary, RunAttestation},
     },
     policy::{Policy, Registry, ResolvedSelection},
 };
@@ -47,6 +50,7 @@ const IMPLEMENTATION_INPUTS: &[&[u8]] = &[
     include_bytes!("core/ports/inbound/scanner.rs"),
     include_bytes!("core/ports/outbound/mod.rs"),
     include_bytes!("core/ports/outbound/repository.rs"),
+    include_bytes!("core/ratchet.rs"),
     include_bytes!("core/scanner.rs"),
     include_bytes!("catalog.rs"),
     include_bytes!("policy.rs"),
@@ -166,19 +170,24 @@ pub struct Report {
     migration_artifact_candidates: Vec<MigrationArtifactCandidate>,
     policy_selection: ResolvedSelection,
     pub(crate) summary: ReportSummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) ratchet: Option<RatchetSummary>,
+    pub(crate) attestation: RunAttestation,
     implementation_results: Vec<ImplementationResult>,
     smell_results: Vec<SmellResult>,
     coverage: Vec<Value>,
     #[serde(flatten)]
-    evidence: ReportEvidence,
+    pub(crate) evidence: ReportEvidence,
     #[serde(serialize_with = "serialize_report_errors")]
     errors: Vec<ReportError>,
+    #[serde(skip)]
+    policy_sha256: String,
     #[serde(skip)]
     has_global_error: bool,
     #[serde(skip)]
     incomplete_rule_ids: BTreeSet<String>,
     #[serde(skip)]
-    implementation_scopes: Vec<Implementation>,
+    pub(crate) implementation_scopes: Vec<Implementation>,
     #[serde(skip)]
     rule_metadata: BTreeMap<String, RuleMetadata>,
 }
@@ -189,7 +198,7 @@ pub struct ReportEvidence {
     evidence_provider_catalog: Vec<Value>,
     suppressions: Vec<Suppression>,
     measurements: Vec<Measurement>,
-    findings: Vec<Finding>,
+    pub(crate) findings: Vec<Finding>,
 }
 
 fn normalized_measurement_evidence(
@@ -375,6 +384,8 @@ impl Report {
             migration_artifact_candidates: vec![],
             policy_selection: policy.resolved.clone(),
             summary: ReportSummary::default(),
+            ratchet: None,
+            attestation: RunAttestation::default(),
             implementation_results: vec![],
             smell_results: vec![],
             coverage,
@@ -386,6 +397,7 @@ impl Report {
                 findings: vec![],
             },
             errors: vec![],
+            policy_sha256: String::new(),
             has_global_error: false,
             incomplete_rule_ids: BTreeSet::new(),
             implementation_scopes: implementations.to_vec(),
@@ -404,6 +416,7 @@ impl Report {
 
     pub fn begin_scan(&mut self, input: &Input) {
         self.metadata.input_sha256.clone_from(&input.digest);
+        self.policy_sha256.clone_from(&input.policy_sha256);
         self.scanned_files = input.files.keys().cloned().collect();
         self.source_roles.clone_from(&input.source_roles);
         self.source_role_candidates = crate::migration::resolve_source_role_candidates(input);
@@ -851,17 +864,13 @@ impl Report {
             .map(|result| result.smell_id.clone())
             .collect();
         self.summary = ReportSummary {
-            verdict: if !self.errors.is_empty() {
-                "incomplete_due_to_errors"
-            } else if blocking_findings > 0 {
-                "blocked_by_required_patterns"
-            } else if review_signals > 0 {
-                "required_checks_passed_with_review_signals"
-            } else if ignored_findings > 0 {
-                "passed_with_ignored_findings"
-            } else {
-                "required_checks_passed"
-            }
+            verdict: report_verdict(
+                !self.errors.is_empty(),
+                blocking_findings,
+                review_signals,
+                ignored_findings,
+                self.ratchet.as_ref(),
+            )
             .into(),
             implementations: self.implementation_results.len(),
             unowned_files: self
@@ -901,6 +910,70 @@ impl Report {
             matched_rule_ids: matched_rule_ids.into_iter().collect(),
             error_count: self.errors.len(),
         };
+        self.attestation = build_attestation(self);
+    }
+}
+
+fn ratchet_guardrail_blocked(ratchet: Option<&RatchetSummary>) -> bool {
+    ratchet.is_some_and(|summary| {
+        summary.suppression_guardrail_triggered || !summary.policy_weakened_rules.is_empty()
+    })
+}
+
+fn report_verdict(
+    has_errors: bool,
+    blocking_findings: usize,
+    review_signals: usize,
+    ignored_findings: usize,
+    ratchet: Option<&RatchetSummary>,
+) -> &'static str {
+    if has_errors {
+        "incomplete_due_to_errors"
+    } else if blocking_findings > 0 {
+        "blocked_by_required_patterns"
+    } else if ratchet.is_some_and(|summary| !summary.policy_weakened_rules.is_empty()) {
+        "blocked_by_policy_weakening"
+    } else if ratchet.is_some_and(|summary| summary.suppression_guardrail_triggered) {
+        "blocked_by_suppression_growth"
+    } else if review_signals > 0 {
+        "required_checks_passed_with_review_signals"
+    } else if ignored_findings > 0 {
+        "passed_with_ignored_findings"
+    } else {
+        "required_checks_passed"
+    }
+}
+
+fn build_attestation(report: &Report) -> RunAttestation {
+    let statuses = report.coverage.iter().flat_map(|smell| {
+        smell["rules"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|rule| rule["measurement_status"].as_str())
+    });
+    let rules_measured = statuses
+        .clone()
+        .filter(|status| *status == "measured_defined_scope")
+        .count();
+    let rules_incomplete = statuses
+        .filter(|status| {
+            matches!(
+                *status,
+                "incomplete_scan" | "error_required_detector_missing"
+            )
+        })
+        .count();
+    RunAttestation {
+        complete: report.errors.is_empty(),
+        exit_code: report.exit(),
+        rules_selected: report.policy_selection.selected_rule_ids.len(),
+        rules_measured,
+        rules_incomplete,
+        history_complete: report.metadata.history_scope.available,
+        policy_sha256: report.policy_sha256.clone(),
+        suppressions_total: report.summary.ignored_findings,
+        ratchet_active: report.ratchet.is_some(),
     }
 }
 
@@ -1161,7 +1234,9 @@ impl Report {
     pub fn exit(&self) -> u8 {
         if !self.errors.is_empty() {
             2
-        } else if self.findings.iter().any(|f| f.blocking) {
+        } else if self.findings.iter().any(|f| f.blocking)
+            || ratchet_guardrail_blocked(self.ratchet.as_ref())
+        {
             1
         } else {
             0
@@ -1178,8 +1253,8 @@ mod tests {
     use super::{
         FindingRelations, Location, Report, SmellState, ignored_status, implementation_summary,
         model::{CoverageStatus, RuleStatusIds, SmellResult, SmellStateInputs},
-        normalized_measurement_evidence, report_limitations, smell_state,
-        sole_implementation_is_repository, write_finding_log,
+        normalized_measurement_evidence, ratchet_guardrail_blocked, report_limitations,
+        report_verdict, smell_state, sole_implementation_is_repository, write_finding_log,
     };
     use crate::core::model::{History, Implementation};
     use serde_json::json;
@@ -1219,6 +1294,47 @@ mod tests {
                 format!("\"{}\"", status.as_str())
             );
         }
+        assert_eq!(
+            report_verdict(true, 1, 1, 1, None),
+            "incomplete_due_to_errors"
+        );
+        let suppression_blocked = crate::core::ratchet::RatchetSummary {
+            reference_ref: "HEAD".into(),
+            reference_commit: "0".repeat(40),
+            reference_blockers: 1,
+            candidate_blockers: 0,
+            regressed_blockers: 0,
+            legacy_within_envelope: 0,
+            burndown_delta: -1,
+            reference_suppressions: 0,
+            candidate_suppressions: 1,
+            new_suppressions: 1,
+            suppression_guardrail_triggered: true,
+            policy_changed: false,
+            policy_weakened_rules: vec![],
+        };
+        assert!(ratchet_guardrail_blocked(Some(&suppression_blocked)));
+        assert_eq!(
+            report_verdict(false, 0, 0, 1, Some(&suppression_blocked)),
+            "blocked_by_suppression_growth"
+        );
+
+        let mut policy_blocked = suppression_blocked.clone();
+        policy_blocked.suppression_guardrail_triggered = false;
+        policy_blocked.policy_weakened_rules = vec!["rust.function_lines".into()];
+        assert!(ratchet_guardrail_blocked(Some(&policy_blocked)));
+        assert_eq!(
+            report_verdict(false, 0, 0, 0, Some(&policy_blocked)),
+            "blocked_by_policy_weakening"
+        );
+
+        let mut clean_ratchet = policy_blocked;
+        clean_ratchet.policy_weakened_rules.clear();
+        assert!(!ratchet_guardrail_blocked(Some(&clean_ratchet)));
+        assert_eq!(
+            report_verdict(false, 0, 0, 0, Some(&clean_ratchet)),
+            "required_checks_passed"
+        );
     }
 
     #[test]

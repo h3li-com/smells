@@ -1,7 +1,8 @@
 use crate::{
     core::{
-        model::{CapturedInput, ScanRequest},
+        model::{CapturedInput, ReferenceSnapshot, ScanRequest},
         ports::{inbound::Scanner, outbound::Repository},
+        ratchet::{RatchetContext, apply_ratchet},
     },
     evidence, metrics, portable,
     report::Report,
@@ -25,11 +26,37 @@ impl Scanner for ScanEngine<'_> {
             metrics::Counter::Files,
             captured_repository.captured.input.files.len(),
         );
-        build_report(
+        let mut report = build_report(
             &captured_repository.captured,
             captured_repository.evidence_bytes.as_deref(),
-        )
+        )?;
+        if let Some(reference) = &captured_repository.reference {
+            apply_reference_ratchet(reference, &captured_repository.captured, &mut report)?;
+        }
+        Ok(report)
     }
+}
+
+fn apply_reference_ratchet(
+    reference: &ReferenceSnapshot,
+    candidate: &CapturedInput,
+    candidate_report: &mut Report,
+) -> Result<(), String> {
+    let reference_report = reference
+        .captured
+        .as_ref()
+        .map(|captured| build_report(captured, None))
+        .transpose()?;
+    let context = RatchetContext {
+        reference_ref: &reference.reference_ref,
+        reference_commit: &reference.reference_commit,
+        reference_policy_sha256: reference.reference_policy_sha256.as_deref(),
+        candidate_policy_sha256: &candidate.input.policy_sha256,
+        reference_policy: reference.reference_policy.as_ref(),
+        candidate_policy: &candidate.input.policy,
+    };
+    apply_ratchet(reference_report.as_ref(), candidate_report, &context);
+    Ok(())
 }
 
 fn build_report(captured: &CapturedInput, evidence_bytes: Option<&[u8]>) -> Result<Report, String> {
@@ -125,6 +152,7 @@ mod tests {
             Ok(CapturedRepository {
                 captured: captured_input(),
                 evidence_bytes: self.evidence_bytes.clone(),
+                reference: None,
             })
         }
     }
@@ -161,6 +189,7 @@ mod tests {
                     shallow: false,
                     commits: Vec::new(),
                 },
+                policy_sha256: String::new(),
                 policy,
                 digest: "in-memory-snapshot".into(),
                 mode: "working_tree",
@@ -174,6 +203,7 @@ mod tests {
             target: ScanTarget::WorkingTree(Path::new("unused-by-in-memory-repository")),
             policy_path: Path::new("quality-policy.json"),
             evidence_path: None,
+            base_ref: None,
             selection,
         }
     }

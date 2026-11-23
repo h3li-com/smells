@@ -433,6 +433,7 @@ mod tests {
             implementations: Vec::new(),
             source_roles: Vec::new(),
             history: History::default(),
+            policy_sha256: String::new(),
             policy: Policy {
                 schema_version: 1,
                 rule_pack: "rust-v1".into(),
