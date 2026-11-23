@@ -289,6 +289,7 @@ mod tests {
                 }],
                 source_roles: Vec::new(),
                 history: History::default(),
+                policy_sha256: String::new(),
                 policy,
                 digest: "captured-input-digest".into(),
                 mode: "working_tree",

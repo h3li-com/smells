@@ -10,6 +10,12 @@ All notable changes to Smells are recorded here. Release tags use `vMAJOR.MINOR.
   `history_scope.shallow` plus the
   `git_history_truncated_by_shallow_clone_fetch_full_history` limitation disclose
   the cause instead of reporting truncated history as clean.
+- Add native in-memory Git-reference Debt Envelope ratcheting (`--base <REF>`)
+  for both `--staged` and `--path` scans, enforcing implementation-scoped
+  non-regression without committed baseline files.
+- Add default-on anti-gaming guardrails and run-completeness attestation
+  (`attestation` on every report; burndown lock, suppression-growth blocking,
+  and required-rule policy-weakening detection under `--base <REF>`).
 
 ## 0.6.0 - 2026-10-14
 

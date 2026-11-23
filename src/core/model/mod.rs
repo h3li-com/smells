@@ -6,5 +6,5 @@ pub(crate) use migration::{
     MigrationArtifact, MigrationArtifactCandidate, MigrationIntegrity, ResolvedSourceRole,
     RoleContext, SourceRoleCandidate, SourceSpan,
 };
-pub(crate) use scan::{CapturedRepository, ScanRequest, ScanTarget};
+pub(crate) use scan::{CapturedRepository, ReferenceSnapshot, ScanRequest, ScanTarget};
 pub(crate) use snapshot::{CapturedInput, History, HistoryCommit, Implementation, Input};

@@ -494,6 +494,14 @@ fn reports_inside_work_tree(success: bool, stdout: &[u8]) -> bool {
 }
 
 fn captured_history(root: &Path, files: &BTreeMap<String, String>) -> History {
+    captured_history_at(root, None, files)
+}
+
+fn captured_history_at(
+    root: &Path,
+    revision: Option<&str>,
+    files: &BTreeMap<String, String>,
+) -> History {
     let inside = Command::new("git")
         .arg("--no-replace-objects")
         .args(["rev-parse", "--is-inside-work-tree"])
@@ -503,14 +511,15 @@ fn captured_history(root: &Path, files: &BTreeMap<String, String>) -> History {
     {
         return History::default();
     }
+    let target = revision.unwrap_or("HEAD");
     let head = Command::new("git")
         .arg("--no-replace-objects")
-        .args(["rev-parse", "--verify", "HEAD"])
+        .args(["rev-parse", "--verify", target])
         .current_dir(root)
         .output();
     if head.is_ok_and(|output| !output.status.success()) {
         return History {
-            available: true,
+            available: revision.is_none(),
             shallow: false,
             commits: Vec::new(),
         };
@@ -518,21 +527,25 @@ fn captured_history(root: &Path, files: &BTreeMap<String, String>) -> History {
     let Some(shallow) = shallow_repository(root) else {
         return History::default();
     };
+    let limit = HISTORY_WINDOW.to_string();
+    let mut args = vec![
+        "-c",
+        "core.quotepath=false",
+        "log",
+        "--format=%x1e%H",
+        "--name-only",
+        "--no-renames",
+        "--relative",
+        "-n",
+        &limit,
+    ];
+    if let Some(commit) = revision {
+        args.push(commit);
+    }
+    args.extend(["--", "."]);
     let output = Command::new("git")
         .arg("--no-replace-objects")
-        .args([
-            "-c",
-            "core.quotepath=false",
-            "log",
-            "--format=%x1e%H",
-            "--name-only",
-            "--no-renames",
-            "--relative",
-            "-n",
-            &HISTORY_WINDOW.to_string(),
-            "--",
-            ".",
-        ])
+        .args(&args)
         .current_dir(root)
         .output();
     let Ok(output) = output else {
@@ -986,6 +999,7 @@ fn captured_input(
     )?;
     Ok(CapturedInput {
         input: Input {
+            policy_sha256: digest(&[policy_text.as_bytes()]),
             digest: snapshot_digest(
                 &files,
                 &manifests,
@@ -1099,6 +1113,178 @@ pub fn staged(
         "staged corpus",
     )?;
     Ok((input, evidence))
+}
+
+fn parse_tree(raw: &[u8]) -> Result<IndexEntries, String> {
+    let mut entries = BTreeMap::new();
+    for entry in raw.split(|byte| *byte == 0).filter(|item| !item.is_empty()) {
+        let entry = std::str::from_utf8(entry).map_err(|_| "tree contains non-UTF-8 paths")?;
+        let (header, path) = entry.split_once('\t').ok_or("malformed tree entry")?;
+        let fields: Vec<_> = header.split_whitespace().collect();
+        if fields.len() != 3 {
+            return Err("malformed tree entry".into());
+        }
+        if fields[1] != "blob" {
+            continue;
+        }
+        if entries
+            .insert(
+                path.to_string(),
+                (fields[0].to_string(), fields[2].to_string()),
+            )
+            .is_some()
+        {
+            return Err("duplicate tree path".into());
+        }
+    }
+    Ok(entries)
+}
+
+fn resolve_git_commit(root: &Path, reference_ref: &str) -> Result<String, String> {
+    let spec = format!("{reference_ref}^{{commit}}");
+    let raw = git(root, &["rev-parse", "--verify", &spec])
+        .map_err(|error| format!("cannot resolve base reference {reference_ref:?}: {error}"))?;
+    let text = text(raw, "base reference")?;
+    Ok(text.trim().to_string())
+}
+
+fn reference_policy_at_commit(
+    root: &Path,
+    entries: &IndexEntries,
+    policy_rel_path: Option<&str>,
+    selection: &SelectionOptions,
+) -> (Option<Policy>, Option<String>) {
+    let Some(name) = policy_rel_path else {
+        return (None, None);
+    };
+    let Some((mode, oid)) = entries.get(name) else {
+        return (None, None);
+    };
+    if !matches!(mode.as_str(), "100644" | "100755") {
+        return (None, None);
+    }
+    let Ok(bytes) = git(root, &["cat-file", "blob", oid]) else {
+        return (None, None);
+    };
+    let Ok(policy_text) = text(bytes, name) else {
+        return (None, None);
+    };
+    let sha = digest(&[policy_text.as_bytes()]);
+    let parsed = crate::policy::registry_for_policy(&policy_text)
+        .and_then(|reg| crate::policy::parse_with_selection(&policy_text, &reg, selection))
+        .ok();
+    (parsed, Some(sha))
+}
+
+fn capture_git_ref(
+    root: &Path,
+    reference_ref: &str,
+    policy_rel_path: Option<&str>,
+    candidate_policy_text: &str,
+    selection: &SelectionOptions,
+) -> Result<crate::core::model::ReferenceSnapshot, String> {
+    let reference_commit = resolve_git_commit(root, reference_ref)?;
+    let raw_tree = git(root, &["ls-tree", "-r", "-z", &reference_commit])?;
+    let entries = parse_tree(&raw_tree)?;
+    let (reference_policy, reference_policy_sha256) =
+        reference_policy_at_commit(root, &entries, policy_rel_path, selection);
+    let captured = capture_reference_input(
+        root,
+        &reference_commit,
+        &entries,
+        candidate_policy_text,
+        selection,
+    )?;
+    Ok(crate::core::model::ReferenceSnapshot {
+        reference_ref: reference_ref.to_string(),
+        reference_commit,
+        captured,
+        reference_policy,
+        reference_policy_sha256,
+    })
+}
+
+fn capture_reference_input(
+    root: &Path,
+    reference_commit: &str,
+    entries: &IndexEntries,
+    candidate_policy_text: &str,
+    selection: &SelectionOptions,
+) -> Result<Option<CapturedInput>, String> {
+    let registry = crate::policy::registry_for_policy(candidate_policy_text)?;
+    let policy = crate::policy::parse_with_selection(candidate_policy_text, &registry, selection)?;
+    let (files, manifests) = staged_corpus(root, entries, &registry, &policy)?;
+    if files.is_empty() {
+        return Ok(None);
+    }
+    let implementations = implementations(&files, &manifests);
+    let (artifacts, artifact_candidates) = staged_migration_artifacts(
+        root,
+        entries,
+        &registry,
+        &policy,
+        &files,
+        &manifests,
+        &implementations,
+    )?;
+    let history = captured_history_at(root, Some(reference_commit), &files);
+    let snapshot = CapturedSnapshot {
+        files,
+        manifests,
+        implementations,
+        artifacts,
+        artifact_candidates,
+        history,
+    };
+    captured_input(
+        snapshot,
+        candidate_policy_text,
+        policy,
+        registry,
+        "git_reference",
+        "reference corpus",
+    )
+    .map(Some)
+}
+
+pub fn git_ref_for_staged(
+    reference_ref: &str,
+    policy_path: &Path,
+    selection: &SelectionOptions,
+) -> Result<crate::core::model::ReferenceSnapshot, String> {
+    let capture = staged_capture(policy_path, selection)?;
+    let rel = validate_staged_policy_path(policy_path)?;
+    capture_git_ref(
+        &capture.root,
+        reference_ref,
+        Some(rel),
+        &capture.policy_text,
+        selection,
+    )
+}
+
+pub fn git_ref_for_working_tree(
+    source: &Path,
+    reference_ref: &str,
+    policy_path: &Path,
+    selection: &SelectionOptions,
+) -> Result<crate::core::model::ReferenceSnapshot, String> {
+    let root = working_root(source)?;
+    let policy_text = text(
+        fs::read(policy_path).map_err(|e| format!("cannot read policy: {e}"))?,
+        "policy",
+    )?;
+    let rel = fs::canonicalize(policy_path)
+        .ok()
+        .and_then(|canonical| canonical.strip_prefix(&root).ok().map(Path::to_path_buf))
+        .and_then(|relative| relative.to_str().map(str::to_string));
+    capture_git_ref(
+        &root,
+        reference_ref,
+        rel.as_deref(),
+        &policy_text,
+        selection,
+    )
 }
 
 #[cfg(test)]
@@ -1268,6 +1454,27 @@ mod tests {
                 "non-portable or escaping staged source path"
             );
         }
+    }
+
+    #[test]
+    fn parse_tree_keeps_blobs_skips_submodules_and_rejects_malformed_or_duplicate_entries() {
+        let parsed =
+            parse_tree(b"100644 blob abc123\tsrc/lib.rs\x00160000 commit def456\tsubmod\0")
+                .unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(
+            parsed.get("src/lib.rs"),
+            Some(&("100644".into(), "abc123".into()))
+        );
+        assert_eq!(
+            parse_tree(b"100644 blob\tsrc/lib.rs\0").unwrap_err(),
+            "malformed tree entry"
+        );
+        assert_eq!(
+            parse_tree(b"100644 blob abc\tsrc/lib.rs\x00100644 blob def\tsrc/lib.rs\0")
+                .unwrap_err(),
+            "duplicate tree path"
+        );
     }
 
     #[test]

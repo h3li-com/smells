@@ -13,6 +13,7 @@ pub struct Input {
     pub source_roles: Vec<ResolvedSourceRole>,
     pub history: History,
     pub policy: Policy,
+    pub policy_sha256: String,
     pub digest: String,
     pub mode: &'static str,
 }

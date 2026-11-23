@@ -2829,3 +2829,353 @@ fn opt_in_scan_metrics_explain_the_exact_join_without_changing_the_report() {
     assert!(metrics["exact_comparisons_charged"].as_u64().unwrap() > 0);
     assert!(metrics["peak_resident_bytes"].as_u64().unwrap() > 1);
 }
+
+fn init_git_repo(root: &std::path::Path) {
+    for args in [
+        &["init", "-q"][..],
+        &["config", "user.email", "test@example.com"][..],
+        &["config", "user.name", "Test User"][..],
+    ] {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{args:?} failed");
+    }
+}
+
+fn git_stage_and_commit(root: &std::path::Path, message: &str) {
+    let add = Command::new("git")
+        .args(["add", "-A"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(add.status.success());
+    let commit = Command::new("git")
+        .args(["commit", "-q", "-m", message])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(commit.status.success());
+}
+
+#[test]
+fn git_reference_ratchet_passes_legacy_blocks_regression_and_records_burndown() {
+    let workspace = Workspace::new(
+        "fn legacy(a: i32, b: i32, c: i32, d: i32, e: i32, f: i32, g: i32, h: i32) -> i32 { a + b + c + d + e + f + g + h }\n",
+    );
+    init_git_repo(&workspace.path);
+    git_stage_and_commit(&workspace.path, "initial legacy debt");
+
+    // 1. Touch unrelated clean function: legacy debt fits inside HEAD's Debt Envelope -> exit 0
+    fs::write(
+        workspace.path.join("src/lib.rs"),
+        "fn legacy(a: i32, b: i32, c: i32, d: i32, e: i32, f: i32, g: i32, h: i32) -> i32 { a + b + c + d + e + f + g + h }\nfn helper(x: i32) -> i32 { x + 1 }\n",
+    )
+    .unwrap();
+    assert!(
+        Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(&workspace.path)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let log_path = workspace.path.join("findings.log");
+    let pass_out = Command::new(env!("CARGO_BIN_EXE_smells"))
+        .args([
+            "check",
+            "--staged",
+            "--base",
+            "HEAD",
+            "--policy",
+            "quality-policy.json",
+            "--format",
+            "json",
+            "--log",
+            log_path.to_str().unwrap(),
+        ])
+        .current_dir(&workspace.path)
+        .output()
+        .unwrap();
+    assert_eq!(pass_out.status.code(), Some(0));
+    let pass_data = report(&pass_out);
+    assert_eq!(pass_data["ratchet"]["reference_ref"], "HEAD");
+    assert_eq!(pass_data["ratchet"]["reference_blockers"], 1);
+    assert_eq!(pass_data["ratchet"]["candidate_blockers"], 1);
+    assert_eq!(pass_data["ratchet"]["regressed_blockers"], 0);
+    assert_eq!(pass_data["ratchet"]["legacy_within_envelope"], 1);
+    assert_eq!(pass_data["ratchet"]["burndown_delta"], 0);
+    assert_eq!(pass_data["attestation"]["complete"], true);
+    assert_eq!(pass_data["attestation"]["exit_code"], 0);
+    assert_eq!(pass_data["attestation"]["ratchet_active"], true);
+    let log_text = fs::read_to_string(&log_path).unwrap();
+    assert!(log_text.contains("base: HEAD | legacy: 1 | delta: +0 | new_ignores: 0"));
+
+    // 2. Worsen legacy function from 8 -> 9 parameters -> exceeds Debt Envelope -> exit 1
+    fs::write(
+        workspace.path.join("src/lib.rs"),
+        "fn legacy(a: i32, b: i32, c: i32, d: i32, e: i32, f: i32, g: i32, h: i32, i: i32) -> i32 { a + b + c + d + e + f + g + h + i }\n",
+    )
+    .unwrap();
+    assert!(
+        Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(&workspace.path)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let fail_out = Command::new(env!("CARGO_BIN_EXE_smells"))
+        .args([
+            "check",
+            "--staged",
+            "--base",
+            "HEAD",
+            "--policy",
+            "quality-policy.json",
+            "--format",
+            "json",
+        ])
+        .current_dir(&workspace.path)
+        .output()
+        .unwrap();
+    assert_eq!(fail_out.status.code(), Some(1));
+    let fail_data = report(&fail_out);
+    assert_eq!(fail_data["ratchet"]["regressed_blockers"], 1);
+    assert_eq!(fail_data["attestation"]["exit_code"], 1);
+
+    // 3. Fix legacy function -> burndown_delta == -1, exit 0
+    fs::write(
+        workspace.path.join("src/lib.rs"),
+        "fn legacy(a: i32) -> i32 { a }\n",
+    )
+    .unwrap();
+    assert!(
+        Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(&workspace.path)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let burn_out = Command::new(env!("CARGO_BIN_EXE_smells"))
+        .args([
+            "check",
+            "--staged",
+            "--base",
+            "HEAD",
+            "--policy",
+            "quality-policy.json",
+            "--format",
+            "json",
+        ])
+        .current_dir(&workspace.path)
+        .output()
+        .unwrap();
+    assert_eq!(burn_out.status.code(), Some(0));
+    let burn_data = report(&burn_out);
+    assert_eq!(burn_data["ratchet"]["reference_blockers"], 1);
+    assert_eq!(burn_data["ratchet"]["candidate_blockers"], 0);
+    assert_eq!(burn_data["ratchet"]["burndown_delta"], -1);
+}
+
+#[test]
+fn git_reference_ratchet_blocks_cross_implementation_debt_transfer() {
+    let workspace = Workspace::new("pub fn root_ok() -> i32 { 1 }\n");
+    fs::create_dir_all(workspace.path.join("pkg-a/src")).unwrap();
+    fs::create_dir_all(workspace.path.join("pkg-b/src")).unwrap();
+    fs::write(
+        workspace.path.join("pkg-a/Cargo.toml"),
+        "[package]\nname = \"pkg-a\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    fs::write(
+        workspace.path.join("pkg-b/Cargo.toml"),
+        "[package]\nname = \"pkg-b\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    fs::write(
+        workspace.path.join("pkg-a/src/lib.rs"),
+        "pub fn clean(a: i32) -> i32 { a }\n",
+    )
+    .unwrap();
+    fs::write(
+        workspace.path.join("pkg-b/src/lib.rs"),
+        "pub fn legacy(a: i32, b: i32, c: i32, d: i32, e: i32, f: i32, g: i32, h: i32) -> i32 { a + b + c + d + e + f + g + h }\n",
+    )
+    .unwrap();
+    init_git_repo(&workspace.path);
+    git_stage_and_commit(&workspace.path, "initial monorepo");
+
+    // Fix legacy smell in pkg-b, but introduce an identical smell in pkg-a -> MUST block (exit 1)
+    fs::write(
+        workspace.path.join("pkg-b/src/lib.rs"),
+        "pub fn legacy(a: i32) -> i32 { a }\n",
+    )
+    .unwrap();
+    fs::write(
+        workspace.path.join("pkg-a/src/lib.rs"),
+        "pub fn moved(a: i32, b: i32, c: i32, d: i32, e: i32, f: i32, g: i32, h: i32) -> i32 { a + b + c + d + e + f + g + h }\n",
+    )
+    .unwrap();
+    assert!(
+        Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(&workspace.path)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_smells"))
+        .args([
+            "check",
+            "--staged",
+            "--base",
+            "HEAD",
+            "--policy",
+            "quality-policy.json",
+            "--format",
+            "json",
+        ])
+        .current_dir(&workspace.path)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let data = report(&output);
+    assert_eq!(data["ratchet"]["regressed_blockers"], 1);
+    assert_eq!(data["ratchet"]["legacy_within_envelope"], 0);
+}
+
+#[test]
+fn git_reference_ratchet_blocks_new_suppressions_and_policy_weakening() {
+    let workspace = Workspace::new("fn clean(a: i32) -> i32 { a }\n");
+    init_git_repo(&workspace.path);
+    git_stage_and_commit(&workspace.path, "clean baseline");
+
+    // 1. Agent adds a new smell AND tries to hide it with an ignore directive -> blocked by suppression guardrail
+    fs::write(
+        workspace.path.join("src/lib.rs"),
+        "// smells: ignore[rust.function_arguments] -- trying to bypass hook\nfn sneaked(a: i32, b: i32, c: i32, d: i32, e: i32, f: i32, g: i32, h: i32) -> i32 { a + b + c + d + e + f + g + h }\n",
+    )
+    .unwrap();
+    assert!(
+        Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(&workspace.path)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let sup_out = Command::new(env!("CARGO_BIN_EXE_smells"))
+        .args([
+            "check",
+            "--staged",
+            "--base",
+            "HEAD",
+            "--policy",
+            "quality-policy.json",
+            "--format",
+            "json",
+        ])
+        .current_dir(&workspace.path)
+        .output()
+        .unwrap();
+    assert_eq!(sup_out.status.code(), Some(1));
+    let sup_data = report(&sup_out);
+    assert_eq!(
+        sup_data["summary"]["verdict"],
+        "blocked_by_suppression_growth"
+    );
+    assert_eq!(sup_data["ratchet"]["new_suppressions"], 1);
+    assert_eq!(sup_data["ratchet"]["suppression_guardrail_triggered"], true);
+
+    // 2. Agent restores clean code but relaxes a required rule threshold in policy -> blocked by policy weakening
+    fs::write(
+        workspace.path.join("src/lib.rs"),
+        "fn clean(a: i32) -> i32 { a }\n",
+    )
+    .unwrap();
+    workspace.modify(
+        "/rules/rust.function_arguments/parameters/maximum",
+        json!(12),
+    );
+    assert!(
+        Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(&workspace.path)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let pol_out = Command::new(env!("CARGO_BIN_EXE_smells"))
+        .args([
+            "check",
+            "--staged",
+            "--base",
+            "HEAD",
+            "--policy",
+            "quality-policy.json",
+            "--format",
+            "json",
+        ])
+        .current_dir(&workspace.path)
+        .output()
+        .unwrap();
+    assert_eq!(pol_out.status.code(), Some(1));
+    let pol_data = report(&pol_out);
+    assert_eq!(
+        pol_data["summary"]["verdict"],
+        "blocked_by_policy_weakening"
+    );
+    assert_eq!(pol_data["ratchet"]["policy_changed"], true);
+    assert_eq!(
+        pol_data["ratchet"]["policy_weakened_rules"],
+        json!(["rust.function_arguments"])
+    );
+}
+
+#[test]
+fn git_reference_ratchet_rejects_unknown_base_ref_and_supports_working_tree() {
+    let workspace = Workspace::new("fn clean(a: i32) -> i32 { a }\n");
+    init_git_repo(&workspace.path);
+    git_stage_and_commit(&workspace.path, "clean baseline");
+
+    let bad_ref = Command::new(env!("CARGO_BIN_EXE_smells"))
+        .args([
+            "check",
+            "--path",
+            ".",
+            "--base",
+            "refs/heads/does-not-exist",
+            "--policy",
+            "quality-policy.json",
+            "--format",
+            "json",
+        ])
+        .current_dir(&workspace.path)
+        .output()
+        .unwrap();
+    assert_eq!(bad_ref.status.code(), Some(2));
+
+    let wt_ok = Command::new(env!("CARGO_BIN_EXE_smells"))
+        .args([
+            "check",
+            "--path",
+            ".",
+            "--base",
+            "HEAD",
+            "--policy",
+            "quality-policy.json",
+            "--format",
+            "json",
+        ])
+        .current_dir(&workspace.path)
+        .output()
+        .unwrap();
+    assert_eq!(wt_ok.status.code(), Some(0));
+    let data = report(&wt_ok);
+    assert_eq!(data["ratchet"]["reference_ref"], "HEAD");
+    assert_eq!(data["attestation"]["ratchet_active"], true);
+}
