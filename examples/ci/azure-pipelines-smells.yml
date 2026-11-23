@@ -28,7 +28,7 @@ jobs:
       - task: UsePythonVersion@0
         inputs:
           versionSpec: "3.13"
-      - script: python -m pip install smells==0.6.0
+      - script: python -m pip install smells==0.7.0
         displayName: Install pinned Smells
       - script: |
           set -eu

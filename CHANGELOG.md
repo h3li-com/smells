@@ -2,7 +2,7 @@
 
 All notable changes to Smells are recorded here. Release tags use `vMAJOR.MINOR.PATCH`.
 
-## Unreleased
+## 0.7.0 - 2026-11-23
 
 - Update `rustix` from 1.1.5 to 1.1.6 to resolve RUSTSEC-2026-0486.
 - Fail closed when a shallow Git clone truncates the 200-commit history window:

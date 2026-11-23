@@ -29,7 +29,7 @@ jobs:
         with:
           python-version: "3.13"
       - name: Install pinned Smells
-        run: python -m pip install smells==0.6.0
+        run: python -m pip install smells==0.7.0
       - name: Resolve the ratchet base
         env:
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
