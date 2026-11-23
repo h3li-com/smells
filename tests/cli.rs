@@ -715,7 +715,7 @@ fn uv_style_group_selection_is_deterministic_and_exclusions_win() {
 
 #[test]
 fn checked_in_default_groups_are_used_until_cli_replaces_them() {
-    let workspace = Workspace::new("fn concise() {}");
+    let workspace = Workspace::new("pub fn concise() {}");
     workspace.git(&["init", "-q"]);
     workspace.modify("/default_groups", json!(["source"]));
     let configured = workspace.command(&[
@@ -772,7 +772,7 @@ fn checked_in_default_groups_are_used_until_cli_replaces_them() {
 
 #[test]
 fn all_active_default_uses_built_in_collectors_without_provider_evidence() {
-    let workspace = Workspace::new("fn concise() {}");
+    let workspace = Workspace::new("pub fn concise() {}");
     workspace.git(&["init", "-q"]);
     let output = workspace.command(&[
         "check",
@@ -815,7 +815,7 @@ fn default_rust_scan_detects_compiler_and_type_shape_signals_without_evidence() 
         "--format",
         "json",
     ]);
-    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(output.status.code(), Some(1));
     let data = report(&output);
     for rule in [
         "rust.function_crap",
@@ -864,7 +864,7 @@ fn built_in_rust_model_uses_authored_tokens_not_literal_or_comment_text() {
         "--format",
         "json",
     ]);
-    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
     let data = report(&output);
     let crap = finding(&data, "rust.function_crap", "src/lib.rs::_unused");
     assert_eq!(
@@ -879,11 +879,11 @@ fn built_in_rust_model_uses_authored_tokens_not_literal_or_comment_text() {
 #[test]
 fn default_rust_scan_uses_rust_match_privacy_and_extension_signals() {
     let workspace = Workspace::new(
-        "struct Secret { token: String }\n\
-         fn leak(secret: Secret) -> String { secret.token }\n\
-         trait PathExt { fn normalized(&self) -> bool; }\n\
+        "pub struct Secret { token: String }\n\
+         pub fn leak(secret: Secret) -> String { secret.token }\n\
+         pub trait PathExt { fn normalized(&self) -> bool; }\n\
          impl PathExt for std::path::Path { fn normalized(&self) -> bool { true } }\n\
-         fn dispatch(value: u8) -> u8 { match value { 0 => 0, 1 => 1, 2 => 2, _ => 3 } }\n",
+         pub fn dispatch(value: u8) -> u8 { match value { 0 => 0, 1 => 1, 2 => 2, _ => 3 } }\n",
     );
     workspace.git(&["init", "-q"]);
     let output = workspace.command(&[
@@ -1163,7 +1163,7 @@ fn shared_modules_do_not_invent_distinct_clumps_or_duplicate_bodies() {
     workspace.source("src/main.rs", "mod shared;");
     workspace.source("src/shared.rs", "fn a(x:i32,y:i32,z:i32)->i32{let p=x+1;let q=y+p;let r=z*q;r}\nfn b(x:i32,y:i32,z:i32)->i32{let p=x+2;let q=y+p;let r=z*q;r}");
     let output = workspace.check();
-    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(output.status.code(), Some(1));
     let data = report(&output);
     assert!(!matched(&data, "rust.data_clumps"));
     let pairs: Vec<_> = data["findings"]
@@ -1192,6 +1192,8 @@ fn qualified_module_reexports_and_glob_reexports_preserve_one_owner_budget() {
 #[test]
 fn report_required_and_off_modes_have_distinct_verdicts_and_coverage() {
     let workspace = Workspace::new(include_str!("fixtures/catalog/lib.rs"));
+    workspace.modify("/rules/rust.duplicate_functions/mode", json!("report"));
+    workspace.modify("/rules/rust.unused_code/mode", json!("report"));
     assert_eq!(workspace.check().status.code(), Some(0));
     workspace.modify("/rules/rust.data_class/mode", json!("required"));
     let output = workspace.check();
@@ -1245,7 +1247,7 @@ fn path_attributes_follow_containing_file_and_inline_module_directories() {
 fn catalog_fixture_exercises_every_authored_source_rule() {
     let workspace = Workspace::new(include_str!("fixtures/catalog/lib.rs"));
     let output = workspace.check();
-    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(output.status.code(), Some(1));
     let data = report(&output);
     for id in [
         "rust.function_lines",
@@ -1659,7 +1661,7 @@ fn finding_log_uses_the_rust_parser_failure_span() {
 #[test]
 fn next_declaration_suppression_covers_a_finding_inside_its_body() {
     let workspace = Workspace::new(
-        "struct Root;\n// smells: ignore[rust.navigation_chains] -- fluent traversal is the public API\nfn read(root: Root) { let _ = root.first.second.third; }\n",
+        "pub struct Root;\n// smells: ignore[rust.navigation_chains] -- fluent traversal is the public API\npub fn read(root: Root) { let _ = root.first.second.third; }\n",
     );
     workspace.git(&["init", "-q"]);
     let output = workspace.command(&[
@@ -2418,7 +2420,7 @@ fn rust_duplicate_budget_counts_only_exactly_pruned_candidates() {
     let output = workspace.check();
     assert_eq!(
         output.status.code(),
-        Some(0),
+        Some(1),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
@@ -2638,19 +2640,19 @@ fn nested_named_functions_are_measured_once_at_every_depth() {
 #[test]
 fn built_in_rust_callable_population_matches_body_metrics_and_excludes_required_methods() {
     let workspace = Workspace::new(
-        "trait Port {\n\
+        "pub trait Port {\n\
              fn required<T>(&self);\n\
              fn defaulted(&self) { fn nested_trait() { if true {} } nested_trait(); }\n\
          }\n\
-         struct Owner;\n\
+         pub struct Owner;\n\
          impl Owner {\n\
-             fn method(&self) { fn nested_method() { if true {} } nested_method(); }\n\
+             pub fn method(&self) { fn nested_method() { if true {} } nested_method(); }\n\
          }\n\
-         struct Foo;\n\
-         fn value(_items: Vec<Foo>) {}\n\
+         pub struct Foo;\n\
+         pub fn value(_items: Vec<Foo>) {}\n\
          mod first { pub fn duplicate() { if true {} } }\n\
          mod second { pub fn duplicate() { if true {} } }\n\
-         fn outer() { fn nested_free() { if true {} } nested_free(); }\n",
+         pub fn outer() { fn nested_free() { if true {} } nested_free(); }\n",
     );
     workspace.git(&["init", "-q"]);
     let output = workspace.command(&[
@@ -2863,7 +2865,7 @@ fn git_stage_and_commit(root: &std::path::Path, message: &str) {
 #[test]
 fn git_reference_ratchet_passes_legacy_blocks_regression_and_records_burndown() {
     let workspace = Workspace::new(
-        "fn legacy(a: i32, b: i32, c: i32, d: i32, e: i32, f: i32, g: i32, h: i32) -> i32 { a + b + c + d + e + f + g + h }\n",
+        "pub fn legacy(a: i32, b: i32, c: i32, d: i32, e: i32, f: i32, g: i32, h: i32) -> i32 { a + b + c + d + e + f + g + h }\n",
     );
     init_git_repo(&workspace.path);
     git_stage_and_commit(&workspace.path, "initial legacy debt");
@@ -2871,7 +2873,7 @@ fn git_reference_ratchet_passes_legacy_blocks_regression_and_records_burndown() 
     // 1. Touch unrelated clean function: legacy debt fits inside HEAD's Debt Envelope -> exit 0
     fs::write(
         workspace.path.join("src/lib.rs"),
-        "fn legacy(a: i32, b: i32, c: i32, d: i32, e: i32, f: i32, g: i32, h: i32) -> i32 { a + b + c + d + e + f + g + h }\nfn helper(x: i32) -> i32 { x + 1 }\n",
+        "pub fn legacy(a: i32, b: i32, c: i32, d: i32, e: i32, f: i32, g: i32, h: i32) -> i32 { a + b + c + d + e + f + g + h }\npub fn helper(x: i32) -> i32 { x + 1 }\n",
     )
     .unwrap();
     assert!(
@@ -2928,7 +2930,7 @@ fn git_reference_ratchet_passes_legacy_blocks_regression_and_records_burndown() 
     // 2. Worsen legacy function from 8 -> 9 parameters -> exceeds Debt Envelope -> exit 1
     fs::write(
         workspace.path.join("src/lib.rs"),
-        "fn legacy(a: i32, b: i32, c: i32, d: i32, e: i32, f: i32, g: i32, h: i32, i: i32) -> i32 { a + b + c + d + e + f + g + h + i }\n",
+        "pub fn legacy(a: i32, b: i32, c: i32, d: i32, e: i32, f: i32, g: i32, h: i32, i: i32) -> i32 { a + b + c + d + e + f + g + h + i }\n",
     )
     .unwrap();
     assert!(
@@ -2961,7 +2963,7 @@ fn git_reference_ratchet_passes_legacy_blocks_regression_and_records_burndown() 
     // 3. Fix legacy function -> burndown_delta == -1, exit 0
     fs::write(
         workspace.path.join("src/lib.rs"),
-        "fn legacy(a: i32) -> i32 { a }\n",
+        "pub fn legacy(a: i32) -> i32 { a }\n",
     )
     .unwrap();
     assert!(
@@ -2991,6 +2993,51 @@ fn git_reference_ratchet_passes_legacy_blocks_regression_and_records_burndown() 
     assert_eq!(burn_data["ratchet"]["reference_blockers"], 1);
     assert_eq!(burn_data["ratchet"]["candidate_blockers"], 0);
     assert_eq!(burn_data["ratchet"]["burndown_delta"], -1);
+
+    // 4. Verify burndown summary appears on stdout in both table and compact --log modes
+    let table_out = Command::new(env!("CARGO_BIN_EXE_smells"))
+        .args([
+            "check",
+            "--staged",
+            "--base",
+            "HEAD",
+            "--policy",
+            "quality-policy.json",
+            "--format",
+            "table",
+        ])
+        .current_dir(&workspace.path)
+        .output()
+        .unwrap();
+    assert_eq!(table_out.status.code(), Some(0));
+    let table_stdout = String::from_utf8(table_out.stdout).unwrap();
+    assert!(
+        table_stdout.contains("base: HEAD | legacy: 0 | delta: -1 | new_ignores: 0"),
+        "{table_stdout}"
+    );
+
+    let hook_out = Command::new(env!("CARGO_BIN_EXE_smells"))
+        .args([
+            "check",
+            "--staged",
+            "--base",
+            "HEAD",
+            "--policy",
+            "quality-policy.json",
+            "--format",
+            "table",
+            "--log",
+            log_path.to_str().unwrap(),
+        ])
+        .current_dir(&workspace.path)
+        .output()
+        .unwrap();
+    assert_eq!(hook_out.status.code(), Some(0));
+    let hook_stdout = String::from_utf8(hook_out.stdout).unwrap();
+    assert!(
+        hook_stdout.contains("base: HEAD | legacy: 0 | delta: -1 | new_ignores: 0"),
+        "{hook_stdout}"
+    );
 }
 
 fn staged_ratchet_against_head(root: &std::path::Path, source: &str) -> Value {

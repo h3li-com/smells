@@ -2668,7 +2668,7 @@ fn every_starter_runs_all_rules_without_external_evidence() {
     for (file, source, policy) in [
         (
             "lib.rs",
-            "fn healthy() {}\n",
+            "pub fn healthy() {}\n",
             serde_json::from_str(include_str!("../examples/quality-policy.json")).unwrap(),
         ),
         (
@@ -2886,7 +2886,7 @@ fn default_python_scan_runs_structural_class_collectors() {
     );
     workspace.initialize_git();
     let output = workspace.check_path();
-    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(output.status.code(), Some(1));
     let data = report(&output);
     for rule in [
         "python.alternative_interfaces",
@@ -2915,7 +2915,7 @@ fn default_python_scan_runs_static_semantic_collectors() {
     );
     workspace.initialize_git();
     let output = workspace.check_path();
-    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(output.status.code(), Some(1));
     let data = report(&output);
     for rule in [
         "python.function_crap",
@@ -3139,7 +3139,7 @@ fn default_typescript_scan_runs_every_built_in_source_collector() {
     let output = workspace.check_path();
     assert_eq!(
         output.status.code(),
-        Some(0),
+        Some(1),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
@@ -3197,7 +3197,7 @@ fn typescript_structural_collectors_ignore_non_code_text_and_bodyless_signatures
     );
     workspace.initialize_git();
     let output = workspace.check_path();
-    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
     let data = report(&output);
     for rule in [
         "typescript.temporary_fields",
@@ -3276,7 +3276,7 @@ fn python_structural_collectors_ignore_literal_and_comment_text() {
     );
     workspace.initialize_git();
     let output = workspace.check_path();
-    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
     let data = report(&output);
     let crap = measurements(&data)
         .find(|finding| {

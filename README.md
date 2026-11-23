@@ -114,9 +114,9 @@ You do not have to clean up years of legacy debt on day one. Pass `--base <REF>`
 
 - **Legacy debt does not block you:** Existing violations stay visible in the report without failing unrelated PRs.
 - **New or worse smells block (exit `1`):** Adding a new violation or making an existing one worse fails the check.
-- **Burndown locks in automatically:** When a PR pays down debt, the envelope shrinks immediately—no baseline JSON file to regenerate or merge-conflict.
+- **Burndown locks in automatically and shows on stdout:** Every `--base` scan prints `base`, `legacy`, `delta` (e.g. `-3` when you pay down debt), `new_ignores`, and any `weakened_rules` right on terminal/CI stdout, in `smells-findings.log`, and in `smells-report.json`—no baseline JSON file to regenerate or merge-conflict.
 - **Anti-gaming guardrails are on by default:** Adding new `smells: ignore` suppressions (`blocked_by_suppression_growth`) or weakening `required` rules (`blocked_by_policy_weakening`) fails closed unless reviewed intentionally.
-- **Works beyond bloaters:** Deterministic, line-number-independent burdens let you safely enable `duplicate_functions` (Duplicate Code) and `unused_code` (Dead Code) in `required` mode under `--base`.
+- **Blocks bloaters, Duplicate Code, and Dead Code out of the box:** Starter policies set bloaters plus `duplicate_functions` (Duplicate Code) and `unused_code` (Dead Code) to `required`, while all remaining smells run and appear as `review` signals (and any rule can be switched to `required` in `quality-policy.json`).
 
 Every report also includes a default-on `attestation` block recording exact rule counts, policy digest, history completeness, and exit code.
 

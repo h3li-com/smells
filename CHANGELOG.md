@@ -12,7 +12,10 @@ All notable changes to Smells are recorded here. Release tags use `vMAJOR.MINOR.
   the cause instead of reporting truncated history as clean.
 - Add native in-memory Git-reference Debt Envelope ratcheting (`--base <REF>`)
   for both `--staged` and `--path` scans, enforcing implementation-scoped
-  non-regression without committed baseline files.
+  non-regression without committed baseline files, and print the ratchet
+  burndown summary (`base`, `legacy`, `delta`, `new_ignores`, and
+  `weakened_rules`) in table stdout, compact `--log` stdout, the Finding Log,
+  and JSON reports.
 - Add default-on anti-gaming guardrails and run-completeness attestation
   (`attestation` on every report; burndown lock, suppression-growth blocking,
   and required-rule policy-weakening detection under `--base <REF>`).
@@ -22,9 +25,10 @@ All notable changes to Smells are recorded here. Release tags use `vMAJOR.MINOR.
   signals while test helpers and other rules retain normal enforcement.
 - Fix `--base` so diverging one copy of a Duplicate Code pair no longer counts
   as a regression. A duplicate pair's burden is now its shared token count
-  (`intersection`) instead of `intersection + union`. This lets
-  `duplicate_functions` and `unused_code` run as `required` under `--base`, and
-  their burden semantics are documented in `docs/report-interface.md`.
+  (`intersection`) instead of `intersection + union`. Enable
+  `duplicate_functions` and `unused_code` as `required` by default in the Rust,
+  Python, and TypeScript starter policies, and document their burden semantics
+  in `docs/report-interface.md`.
 - Add fail-closed CI gate templates in `examples/ci/` (GitHub Actions and Azure
   Pipelines with full history, a pinned release, `--base`, and always-uploaded
   artifacts), a governance CODEOWNERS snippet, and a branch-protection

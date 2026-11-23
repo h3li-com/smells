@@ -1249,6 +1249,10 @@ pub fn write_finding_log(report: &Report, output: impl std::io::Write) -> std::i
     table::write_finding_log(report, output)
 }
 
+pub(crate) fn ratchet_summary_note(report: &Report) -> String {
+    table::ratchet_summary_note(report.ratchet.as_ref())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
