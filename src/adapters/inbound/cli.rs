@@ -1,6 +1,6 @@
 use std::{
     fs,
-    io::{self, Write},
+    io::{self, IsTerminal, Write},
     path::PathBuf,
 };
 
@@ -359,6 +359,24 @@ fn doctor_command(args: &[String]) -> Result<Command, String> {
     }))
 }
 
+fn stdout_uses_color() -> bool {
+    color_enabled(
+        io::stdout().is_terminal(),
+        std::env::var_os("NO_COLOR").is_some(),
+        std::env::var("CLICOLOR_FORCE").ok().as_deref(),
+    )
+}
+
+fn color_enabled(is_tty: bool, no_color: bool, force: Option<&str>) -> bool {
+    if no_color {
+        return false;
+    }
+    if force.is_some_and(|value| !value.is_empty() && value != "0") {
+        return true;
+    }
+    is_tty
+}
+
 fn run_doctor(options: &DoctorOptions) -> Result<u8, String> {
     let report = doctor::diagnose(
         &options.source,
@@ -370,7 +388,7 @@ fn run_doctor(options: &DoctorOptions) -> Result<u8, String> {
             .map_err(|error| error.to_string())?;
         println!("{json}");
     } else {
-        print!("{}", doctor::to_table(&report));
+        print!("{}", doctor::to_table(&report, stdout_uses_color()));
     }
     Ok(doctor::exit_code(&report.checks))
 }
@@ -675,6 +693,16 @@ mod tests {
         fn flush(&mut self) -> io::Result<()> {
             Err(io::Error::other("flush failed"))
         }
+    }
+
+    #[test]
+    fn color_policy_respects_no_color_force_and_tty() {
+        assert!(!color_enabled(true, true, Some("1")));
+        assert!(color_enabled(false, false, Some("1")));
+        assert!(!color_enabled(false, false, Some("0")));
+        assert!(!color_enabled(false, false, Some("")));
+        assert!(color_enabled(true, false, None));
+        assert!(!color_enabled(false, false, None));
     }
 
     #[test]

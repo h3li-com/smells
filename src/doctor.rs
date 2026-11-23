@@ -59,6 +59,9 @@ pub(crate) struct DoctorReport {
 pub(crate) struct Burndown {
     pub base_ref: String,
     pub base_commit: String,
+    pub base_score: u8,
+    pub current_score: u8,
+    pub score_delta: isize,
     pub base_blocking: usize,
     pub current_blocking: usize,
     pub blocking_delta: isize,
@@ -84,6 +87,8 @@ pub(crate) struct SmellDelta {
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct Diagnostics {
+    pub score: u8,
+    pub grade: &'static str,
     pub scanned_files: usize,
     pub blocking_findings: usize,
     pub ignored_findings: usize,
@@ -92,6 +97,26 @@ pub(crate) struct Diagnostics {
     pub total_smells: usize,
     pub smells: Vec<SmellDiagnostic>,
     pub hotspots: Vec<HotspotFile>,
+}
+
+pub(crate) fn health_score(
+    scanned_files: usize,
+    blocking_findings: usize,
+    review_signals: usize,
+) -> u8 {
+    let blocking_penalty = blocking_findings.saturating_mul(10).min(75);
+    let review_penalty = (review_signals / scanned_files.max(1)).min(25);
+    100u8.saturating_sub((blocking_penalty + review_penalty) as u8)
+}
+
+pub(crate) fn health_grade(score: u8) -> &'static str {
+    if score >= 75 {
+        "Great"
+    } else if score >= 50 {
+        "Needs work"
+    } else {
+        "Critical"
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -228,6 +253,7 @@ pub(crate) fn burndown_between(
     base: Option<&Diagnostics>,
     current: &Diagnostics,
 ) -> Burndown {
+    let base_score = base.map_or(100, |diag| diag.score);
     let base_blocking = base.map_or(0, |diag| diag.blocking_findings);
     let base_review = base.map_or(0, |diag| diag.review_signals);
     let base_ignored = base.map_or(0, |diag| diag.ignored_findings);
@@ -238,6 +264,9 @@ pub(crate) fn burndown_between(
     Burndown {
         base_ref: base_ref.into(),
         base_commit: base_commit.into(),
+        base_score,
+        current_score: current.score,
+        score_delta: current.score as isize - base_score as isize,
         base_blocking,
         current_blocking: current.blocking_findings,
         blocking_delta: current.blocking_findings as isize - base_blocking as isize,
@@ -324,8 +353,16 @@ pub(crate) fn diagnostics_from_report(report: &Report) -> Diagnostics {
         .collect();
     let smells = summarize_smells(&signals);
     let hotspots = summarize_hotspots(&signals);
+    let scanned_files = report.scanned_files.len();
+    let score = health_score(
+        scanned_files,
+        report.summary.blocking_findings,
+        report.summary.review_signals,
+    );
     Diagnostics {
-        scanned_files: report.scanned_files.len(),
+        score,
+        grade: health_grade(score),
+        scanned_files,
         blocking_findings: report.summary.blocking_findings,
         ignored_findings: report.summary.ignored_findings,
         review_signals: report.summary.review_signals,
@@ -601,6 +638,8 @@ pub(crate) fn exit_code(checks: &[Check]) -> u8 {
 pub(crate) fn to_json(report: &DoctorReport) -> Value {
     let diagnostics = report.diagnostics.as_ref().map(|diagnostics| {
         json!({
+            "score": diagnostics.score,
+            "grade": diagnostics.grade,
             "scanned_files": diagnostics.scanned_files,
             "blocking_findings": diagnostics.blocking_findings,
             "ignored_findings": diagnostics.ignored_findings,
@@ -633,6 +672,9 @@ pub(crate) fn to_json(report: &DoctorReport) -> Value {
         json!({
             "base_ref": burndown.base_ref,
             "base_commit": burndown.base_commit,
+            "base_score": burndown.base_score,
+            "current_score": burndown.current_score,
+            "score_delta": burndown.score_delta,
             "base_blocking": burndown.base_blocking,
             "current_blocking": burndown.current_blocking,
             "blocking_delta": burndown.blocking_delta,
@@ -670,84 +712,250 @@ pub(crate) fn to_json(report: &DoctorReport) -> Value {
     })
 }
 
-pub(crate) fn to_table(report: &DoctorReport) -> String {
-    let mut table = String::from("Check | Status | Detail\n");
+#[derive(Clone, Copy)]
+struct Palette {
+    color: bool,
+}
+
+impl Palette {
+    fn paint(self, code: &str, text: &str) -> String {
+        if self.color {
+            format!("\x1b[{code}m{text}\x1b[0m")
+        } else {
+            text.to_string()
+        }
+    }
+
+    fn count(self, value: usize, width: usize, active_code: &str) -> String {
+        let formatted = format!("{value:>width$}");
+        let code = if value == 0 { "2" } else { active_code };
+        self.paint(code, &formatted)
+    }
+
+    fn delta(self, value: isize, width: usize, higher_is_better: bool) -> String {
+        let formatted = format!("{value:>+width$}");
+        let code = delta_color(value, higher_is_better);
+        self.paint(code, &formatted)
+    }
+}
+
+fn delta_color(value: isize, higher_is_better: bool) -> &'static str {
+    if value == 0 {
+        "2"
+    } else if (value > 0) == higher_is_better {
+        "32"
+    } else {
+        "31"
+    }
+}
+
+fn score_color(score: u8) -> &'static str {
+    if score >= 75 {
+        "32"
+    } else if score >= 50 {
+        "33"
+    } else {
+        "31"
+    }
+}
+
+fn status_badge(status: Status, palette: Palette) -> String {
+    match status {
+        Status::Ok => palette.paint("32", "✓"),
+        Status::Warn => palette.paint("33", "!"),
+        Status::Error => palette.paint("31", "✗"),
+    }
+}
+
+fn health_bar(score: u8, palette: Palette) -> String {
+    let filled = usize::from(score) / 5;
+    let empty = 20 - filled;
+    format!(
+        "{}{}",
+        palette.paint(score_color(score), &"█".repeat(filled)),
+        palette.paint("2", &"░".repeat(empty))
+    )
+}
+
+pub(crate) fn to_table(report: &DoctorReport, color: bool) -> String {
+    let palette = Palette { color };
+    let mut output = format!(
+        "{}\n\n{}\n",
+        palette.paint(
+            "1;36",
+            &format!("smells doctor v{}", env!("CARGO_PKG_VERSION"))
+        ),
+        palette.paint("1", "Setup & Governance"),
+    );
+    let id_width = report
+        .checks
+        .iter()
+        .map(|check| check.id.len())
+        .max()
+        .unwrap_or(0);
     for check in &report.checks {
-        table.push_str(&format!(
-            "{} | {} | {}\n",
+        output.push_str(&format!(
+            "  {} {:<id_width$}  {}\n",
+            status_badge(check.status, palette),
             check.id,
-            check.status.label(),
-            check.detail
+            check.detail,
         ));
     }
     if let Some(diagnostics) = &report.diagnostics {
-        append_diagnostics_table(&mut table, diagnostics);
+        append_diagnostics_table(&mut output, diagnostics, palette);
     }
     if let Some(burndown) = &report.burndown {
-        append_burndown_table(&mut table, burndown);
+        append_burndown_table(&mut output, burndown, palette);
     }
-    table
+    output
 }
 
-fn append_burndown_table(table: &mut String, burndown: &Burndown) {
-    let short_commit: String = burndown.base_commit.chars().take(7).collect();
-    table.push_str(&format!(
-        "\nBurndown since {} ({})\nBlockers: {} -> {} ({:+}) | Review warnings: {} -> {} ({:+}) | Ignored: {} -> {} ({:+})\n",
-        burndown.base_ref,
-        short_commit,
-        burndown.base_blocking,
-        burndown.current_blocking,
-        burndown.blocking_delta,
-        burndown.base_review,
-        burndown.current_review,
-        burndown.review_delta,
-        burndown.base_ignored,
-        burndown.current_ignored,
-        burndown.ignored_delta,
-    ));
-    if !burndown.smell_deltas.is_empty() {
-        table
-            .push_str("Smell | Base blocking | Current blocking | Blocking delta | Review delta\n");
-        for row in &burndown.smell_deltas {
-            table.push_str(&format!(
-                "{} | {} | {} | {:+} | {:+}\n",
-                row.smell,
-                row.base_blocking,
-                row.current_blocking,
-                row.blocking_delta,
-                row.review_delta
-            ));
-        }
-    }
-}
-
-fn append_diagnostics_table(table: &mut String, diagnostics: &Diagnostics) {
-    table.push_str(&format!(
-        "\nSmell diagnostics | files: {} | blocking: {} | ignored: {} | review: {} | matched smells: {}/{}\n",
+fn append_diagnostics_table(output: &mut String, diagnostics: &Diagnostics, palette: Palette) {
+    let color = score_color(diagnostics.score);
+    let score_label = format!("{}/100", diagnostics.score);
+    output.push_str(&format!(
+        "\n{}\n  {}  {}  {}\n  {} files · {} blocking · {} ignored · {} review warnings · {}/{} smells matched\n",
+        palette.paint("1", "Codebase Health"),
+        health_bar(diagnostics.score, palette),
+        palette.paint(&format!("1;{color}"), &score_label),
+        palette.paint(color, diagnostics.grade),
         diagnostics.scanned_files,
-        diagnostics.blocking_findings,
+        palette.paint(
+            if diagnostics.blocking_findings > 0 { "1;31" } else { "32" },
+            &diagnostics.blocking_findings.to_string(),
+        ),
         diagnostics.ignored_findings,
-        diagnostics.review_signals,
+        palette.paint(
+            if diagnostics.review_signals > 0 { "33" } else { "2" },
+            &diagnostics.review_signals.to_string(),
+        ),
         diagnostics.matched_smells,
         diagnostics.total_smells,
     ));
-    if !diagnostics.smells.is_empty() {
-        table.push_str("Smell | Category | Blocking | Ignored | Review\n");
-        for row in &diagnostics.smells {
-            table.push_str(&format!(
-                "{} | {} | {} | {} | {}\n",
-                row.smell, row.category, row.blocking, row.ignored, row.review
-            ));
-        }
+    append_smells_section(output, &diagnostics.smells, palette);
+    append_hotspots_section(output, &diagnostics.hotspots, palette);
+}
+
+fn append_smells_section(output: &mut String, smells: &[SmellDiagnostic], palette: Palette) {
+    if smells.is_empty() {
+        return;
     }
-    if !diagnostics.hotspots.is_empty() {
-        table.push_str("\nTop hotspot files\nFile | Blocking | Review\n");
-        for row in &diagnostics.hotspots {
-            table.push_str(&format!(
-                "{} | {} | {}\n",
-                row.path, row.blocking, row.review
-            ));
-        }
+    let smell_width = smells
+        .iter()
+        .map(|row| row.smell.len())
+        .max()
+        .unwrap_or(0)
+        .max("Smell".len());
+    let category_width = smells
+        .iter()
+        .map(|row| row.category.len())
+        .max()
+        .unwrap_or(0)
+        .max("Category".len());
+    output.push_str(&format!(
+        "\n{}\n  {}\n",
+        palette.paint("1", "Smells (hard blockers first)"),
+        palette.paint(
+            "2",
+            &format!(
+                "{:<smell_width$}  {:<category_width$}  {:>8}  {:>7}  {:>6}",
+                "Smell", "Category", "Blocking", "Ignored", "Review"
+            ),
+        ),
+    ));
+    for row in smells {
+        output.push_str(&format!(
+            "  {:<smell_width$}  {:<category_width$}  {}  {}  {}\n",
+            row.smell,
+            palette.paint("2", &format!("{:<category_width$}", row.category)),
+            palette.count(row.blocking, 8, "1;31"),
+            palette.count(row.ignored, 7, "36"),
+            palette.count(row.review, 6, "33"),
+        ));
+    }
+}
+
+fn append_hotspots_section(output: &mut String, hotspots: &[HotspotFile], palette: Palette) {
+    if hotspots.is_empty() {
+        return;
+    }
+    let file_width = hotspots
+        .iter()
+        .map(|row| row.path.len())
+        .max()
+        .unwrap_or(0)
+        .max("File".len());
+    output.push_str(&format!(
+        "\n{}\n  {}\n",
+        palette.paint("1", "Top Hotspot Files"),
+        palette.paint(
+            "2",
+            &format!(
+                "{:<file_width$}  {:>8}  {:>6}",
+                "File", "Blocking", "Review"
+            ),
+        ),
+    ));
+    for row in hotspots {
+        output.push_str(&format!(
+            "  {:<file_width$}  {}  {}\n",
+            row.path,
+            palette.count(row.blocking, 8, "1;31"),
+            palette.count(row.review, 6, "33"),
+        ));
+    }
+}
+
+fn append_burndown_table(output: &mut String, burndown: &Burndown, palette: Palette) {
+    let short_commit: String = burndown.base_commit.chars().take(7).collect();
+    output.push_str(&format!(
+        "\n{}\n  Score: {} -> {} ({}) · Blockers: {} -> {} ({}) · Review: {} -> {} ({}) · Ignored: {} -> {} ({})\n",
+        palette.paint(
+            "1",
+            &format!("Burndown since {} ({short_commit})", burndown.base_ref),
+        ),
+        burndown.base_score,
+        burndown.current_score,
+        palette.delta(burndown.score_delta, 0, true),
+        burndown.base_blocking,
+        burndown.current_blocking,
+        palette.delta(burndown.blocking_delta, 0, false),
+        burndown.base_review,
+        burndown.current_review,
+        palette.delta(burndown.review_delta, 0, false),
+        burndown.base_ignored,
+        burndown.current_ignored,
+        palette.delta(burndown.ignored_delta, 0, false),
+    ));
+    if burndown.smell_deltas.is_empty() {
+        return;
+    }
+    let smell_width = burndown
+        .smell_deltas
+        .iter()
+        .map(|row| row.smell.len())
+        .max()
+        .unwrap_or(0)
+        .max("Smell".len());
+    output.push_str(&format!(
+        "  {}\n",
+        palette.paint(
+            "2",
+            &format!(
+                "{:<smell_width$}  {:>4}  {:>7}  {:>5}  {:>6}",
+                "Smell", "Base", "Current", "Delta", "Review"
+            ),
+        ),
+    ));
+    for row in &burndown.smell_deltas {
+        output.push_str(&format!(
+            "  {:<smell_width$}  {:>4}  {:>7}  {}  {}\n",
+            row.smell,
+            row.base_blocking,
+            row.current_blocking,
+            palette.delta(row.blocking_delta, 5, false),
+            palette.delta(row.review_delta, 6, false),
+        ));
     }
 }
 
@@ -951,9 +1159,15 @@ mod tests {
             })
         );
         assert_eq!(
-            to_table(&warned),
-            "Check | Status | Detail\na | ok | fine\nb | warn | gap\n"
+            to_table(&warned, false),
+            format!(
+                "smells doctor v{}\n\nSetup & Governance\n  ✓ a  fine\n  ! b  gap\n",
+                env!("CARGO_PKG_VERSION")
+            )
         );
+        let colored = to_table(&warned, true);
+        assert!(colored.contains("\x1b[32m✓\x1b[0m"), "{colored}");
+        assert!(colored.contains("\x1b[33m!\x1b[0m"), "{colored}");
         let failed = DoctorReport {
             checks: vec![check("c", Status::Error, "broken")],
             diagnostics: None,
@@ -962,6 +1176,31 @@ mod tests {
         assert_eq!(exit_code(&failed.checks), 2);
         assert_eq!(to_json(&failed)["status"], "unhealthy");
         assert_eq!(to_json(&failed)["checks"][0]["status"], "error");
+        assert!(to_table(&failed, true).contains("\x1b[31m✗\x1b[0m"));
+    }
+
+    #[test]
+    fn health_score_and_grade_cover_every_band_and_cap() {
+        assert_eq!(health_score(0, 0, 0), 100);
+        assert_eq!(health_grade(100), "Great");
+        assert_eq!(health_score(1, 0, 30), 75);
+        assert_eq!(health_grade(75), "Great");
+        assert_eq!(health_score(1, 2, 6), 74);
+        assert_eq!(health_grade(74), "Needs work");
+        assert_eq!(health_score(1, 5, 0), 50);
+        assert_eq!(health_grade(50), "Needs work");
+        assert_eq!(health_score(1, 5, 1), 49);
+        assert_eq!(health_grade(49), "Critical");
+        assert_eq!(health_score(1, 10, 40), 0);
+        assert_eq!(health_grade(0), "Critical");
+        assert_eq!(score_color(75), "32");
+        assert_eq!(score_color(50), "33");
+        assert_eq!(score_color(49), "31");
+        assert_eq!(delta_color(0, true), "2");
+        assert_eq!(delta_color(2, true), "32");
+        assert_eq!(delta_color(-2, true), "31");
+        assert_eq!(delta_color(-2, false), "32");
+        assert_eq!(delta_color(2, false), "31");
     }
 
     #[test]
@@ -969,6 +1208,8 @@ mod tests {
         let report = DoctorReport {
             checks: vec![check("policy", Status::Ok, "ok")],
             diagnostics: Some(Diagnostics {
+                score: 80,
+                grade: "Great",
                 scanned_files: 6,
                 blocking_findings: 2,
                 ignored_findings: 1,
@@ -999,22 +1240,31 @@ mod tests {
             }),
             burndown: None,
         };
-        let table = to_table(&report);
-        assert_eq!(
-            table,
-            "Check | Status | Detail\n\
-             policy | ok | ok\n\
-             \n\
-             Smell diagnostics | files: 6 | blocking: 2 | ignored: 1 | review: 4 | matched smells: 2/23\n\
-             Smell | Category | Blocking | Ignored | Review\n\
-             Dead Code | dispensables | 2 | 0 | 0\n\
-             Data Class | dispensables | 0 | 1 | 4\n\
-             \n\
-             Top hotspot files\n\
-             File | Blocking | Review\n\
-             src/lib.rs | 2 | 4\n"
+        let table = to_table(&report, false);
+        assert!(
+            table.contains("Codebase Health\n  ████████████████░░░░  80/100  Great\n"),
+            "{table}"
         );
+        assert!(
+            table.contains(
+                "6 files · 2 blocking · 1 ignored · 4 review warnings · 2/23 smells matched"
+            ),
+            "{table}"
+        );
+        assert!(
+            table.contains("Dead Code   dispensables         2        0       0\n"),
+            "{table}"
+        );
+        assert!(
+            table.contains("Data Class  dispensables         0        1       4\n"),
+            "{table}"
+        );
+        assert!(table.contains("Top Hotspot Files\n  File        Blocking  Review\n  src/lib.rs         2       4\n"), "{table}");
+        assert!(to_table(&report, true).contains("\x1b[1;32m80/100\x1b[0m"));
+
         let json = to_json(&report);
+        assert_eq!(json["diagnostics"]["score"], 80);
+        assert_eq!(json["diagnostics"]["grade"], "Great");
         assert_eq!(json["diagnostics"]["scanned_files"], 6);
         assert_eq!(json["diagnostics"]["blocking_findings"], 2);
         assert_eq!(json["diagnostics"]["ignored_findings"], 1);
@@ -1027,6 +1277,8 @@ mod tests {
         let clean = DoctorReport {
             checks: vec![check("policy", Status::Ok, "ok")],
             diagnostics: Some(Diagnostics {
+                score: 100,
+                grade: "Great",
                 scanned_files: 1,
                 blocking_findings: 0,
                 ignored_findings: 0,
@@ -1038,14 +1290,20 @@ mod tests {
             }),
             burndown: None,
         };
-        let clean_table = to_table(&clean);
-        assert!(!clean_table.contains("Smell | Category"));
-        assert!(!clean_table.contains("Top hotspot files"));
+        let clean_table = to_table(&clean, false);
+        assert!(
+            clean_table.contains("████████████████████  100/100  Great"),
+            "{clean_table}"
+        );
+        assert!(!clean_table.contains("Smells (hard blockers first)"));
+        assert!(!clean_table.contains("Top Hotspot Files"));
     }
 
     #[test]
     fn burndown_between_tracks_improvements_regressions_and_table_json_output() {
         let base = Diagnostics {
+            score: 54,
+            grade: "Needs work",
             scanned_files: 2,
             blocking_findings: 4,
             ignored_findings: 2,
@@ -1085,6 +1343,8 @@ mod tests {
             hotspots: Vec::new(),
         };
         let current = Diagnostics {
+            score: 87,
+            grade: "Great",
             scanned_files: 2,
             blocking_findings: 1,
             ignored_findings: 1,
@@ -1110,6 +1370,9 @@ mod tests {
             hotspots: Vec::new(),
         };
         let burndown = burndown_between("v0.6.0", "04c02b49999", Some(&base), &current);
+        assert_eq!(burndown.base_score, 54);
+        assert_eq!(burndown.current_score, 87);
+        assert_eq!(burndown.score_delta, 33);
         assert_eq!(burndown.blocking_delta, -3);
         assert_eq!(burndown.review_delta, -5);
         assert_eq!(burndown.ignored_delta, -1);
@@ -1128,18 +1391,35 @@ mod tests {
             diagnostics: Some(current),
             burndown: Some(burndown),
         };
-        let table = to_table(&report);
-        assert!(table.contains("Burndown since v0.6.0 (04c02b4)\n"));
-        assert!(table.contains(
-            "Blockers: 4 -> 1 (-3) | Review warnings: 12 -> 7 (-5) | Ignored: 2 -> 1 (-1)\n"
-        ));
-        assert!(table.contains("Long Method | 3 | 1 | -2 | -3\n"));
-        assert!(table.contains("Dead Code | 1 | 0 | -1 | +0\n"));
-        assert!(table.contains("Data Class | 0 | 0 | +0 | -2\n"));
-        assert!(!table.contains("Comments | 0 | 0"));
+        let table = to_table(&report, false);
+        assert!(
+            table.contains("Burndown since v0.6.0 (04c02b4)\n"),
+            "{table}"
+        );
+        assert!(
+            table.contains(
+                "Score: 54 -> 87 (+33) · Blockers: 4 -> 1 (-3) · Review: 12 -> 7 (-5) · Ignored: 2 -> 1 (-1)\n"
+            ),
+            "{table}"
+        );
+        assert!(
+            table.contains("Long Method     3        1     -2      -3\n"),
+            "{table}"
+        );
+        assert!(
+            table.contains("Dead Code       1        0     -1      +0\n"),
+            "{table}"
+        );
+        assert!(
+            table.contains("Data Class      0        0     +0      -2\n"),
+            "{table}"
+        );
+        assert!(!table.contains("Comments        0        0"));
+        assert!(to_table(&report, true).contains("\x1b[32m+33\x1b[0m"));
 
         let json = to_json(&report);
         assert_eq!(json["burndown"]["base_ref"], "v0.6.0");
+        assert_eq!(json["burndown"]["score_delta"], 33);
         assert_eq!(json["burndown"]["blocking_delta"], -3);
         assert_eq!(json["burndown"]["ignored_delta"], -1);
         assert_eq!(json["burndown"]["smell_deltas"][0]["smell"], "Long Method");
@@ -1151,6 +1431,8 @@ mod tests {
             None,
             report.diagnostics.as_ref().unwrap(),
         );
+        assert_eq!(from_empty.base_score, 100);
+        assert_eq!(from_empty.score_delta, -13);
         assert_eq!(from_empty.base_blocking, 0);
         assert_eq!(from_empty.blocking_delta, 1);
     }

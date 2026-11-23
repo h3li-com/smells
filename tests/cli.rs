@@ -3521,9 +3521,14 @@ fn doctor_reports_governance_gaps_as_warnings_on_a_complete_repository() {
     );
     let table = workspace.command(&["doctor", "--policy", "quality-policy.json"]);
     assert_eq!(table.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&table.stdout);
     assert!(
-        String::from_utf8_lossy(&table.stdout)
-            .starts_with("Check | Status | Detail\npolicy | ok | ")
+        stdout.contains("Setup & Governance\n  ✓ policy"),
+        "{stdout}"
+    );
+    assert!(
+        !stdout.contains("\x1b["),
+        "piped output stays plain: {stdout}"
     );
 }
 
@@ -3591,18 +3596,35 @@ fn doctor_reports_compact_smell_diagnostics_and_fails_closed_on_scan_errors() {
     let table = workspace.command(&["doctor", "--policy", "quality-policy.json"]);
     assert_eq!(table.status.code(), Some(0));
     let stdout = String::from_utf8(table.stdout).unwrap();
+    assert!(stdout.contains("Codebase Health\n"), "{stdout}");
     assert!(
-        stdout.contains("Smell diagnostics | files: 1 | blocking: 1"),
+        stdout.contains("1 files · 1 blocking · 0 ignored"),
         "{stdout}"
     );
-    assert!(
-        stdout.contains("Dead Code | dispensables | 1 | 0 | 0"),
-        "{stdout}"
-    );
-    assert!(
-        stdout.contains("Top hotspot files\nFile | Blocking | Review\nsrc/lib.rs | 1 | "),
-        "{stdout}"
-    );
+    assert!(stdout.contains("Dead Code"), "{stdout}");
+    assert!(stdout.contains("Top Hotspot Files\n"), "{stdout}");
+    assert!(stdout.contains("src/lib.rs"), "{stdout}");
+
+    // CLICOLOR_FORCE emits ANSI styling; NO_COLOR always disables it.
+    let colored = Command::new(env!("CARGO_BIN_EXE_smells"))
+        .args(["doctor", "--policy", "quality-policy.json"])
+        .current_dir(&workspace.path)
+        .env("CLICOLOR_FORCE", "1")
+        .env_remove("NO_COLOR")
+        .output()
+        .unwrap();
+    assert_eq!(colored.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&colored.stdout).contains("\x1b["));
+
+    let no_color = Command::new(env!("CARGO_BIN_EXE_smells"))
+        .args(["doctor", "--policy", "quality-policy.json"])
+        .current_dir(&workspace.path)
+        .env("CLICOLOR_FORCE", "1")
+        .env("NO_COLOR", "1")
+        .output()
+        .unwrap();
+    assert_eq!(no_color.status.code(), Some(0));
+    assert!(!String::from_utf8_lossy(&no_color.stdout).contains("\x1b["));
 
     // Paying down the dead helper shows burndown against HEAD in both JSON and table output.
     workspace.source(
@@ -3615,6 +3637,7 @@ fn doctor_reports_compact_smell_diagnostics_and_fails_closed_on_scan_errors() {
     assert_eq!(burned["burndown"]["base_blocking"], 1);
     assert_eq!(burned["burndown"]["current_blocking"], 0);
     assert_eq!(burned["burndown"]["blocking_delta"], -1);
+    assert_eq!(burned["burndown"]["score_delta"], 10);
     assert_eq!(burned["burndown"]["smell_deltas"][0]["smell"], "Dead Code");
     assert_eq!(burned["burndown"]["smell_deltas"][0]["blocking_delta"], -1);
 
@@ -3636,7 +3659,7 @@ fn doctor_reports_compact_smell_diagnostics_and_fails_closed_on_scan_errors() {
         "{burn_stdout}"
     );
     assert!(
-        burn_stdout.contains("Dead Code | 1 | 0 | -1 | +0"),
+        burn_stdout.contains("Dead Code     1        0     -1      +0"),
         "{burn_stdout}"
     );
 

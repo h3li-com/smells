@@ -118,7 +118,7 @@ Use the two commands for their distinct jobs:
 | Command | Role | Output |
 | --- | --- | --- |
 | **`smells check --base origin/main`** | **PR & pre-commit gate** | 4-line stdout summary with burndown `delta` + full Finding Log & JSON; exits `1` on new/worse `required` smells, `2` on broken setup |
-| **`smells doctor [--base REF]`** | **Setup, diagnostics & burndown** | Audits policy, Git history, suppressions, `AGENTS.md`, `CODEOWNERS`, prints a compact 23-smell breakdown (`blocking` vs. `review`) + top 5 hotspot files, and with `--base REF` shows total & per-smell burndown since that commit/tag; exits `2` only if setup/scan is broken |
+| **`smells doctor [--base REF]`** | **Setup, health score & burndown** | Colored human-readable terminal report (`NO_COLOR` respected) auditing policy, Git history, suppressions, `AGENTS.md`, `CODEOWNERS`, a **0–100 Health Score**, a compact 23-smell breakdown (`blocking` vs. `review`), top 5 hotspot files, and (with `--base REF`) total & per-smell burndown; exits `2` only if setup/scan is broken |
 
 ---
 
