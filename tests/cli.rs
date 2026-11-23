@@ -2993,6 +2993,113 @@ fn git_reference_ratchet_passes_legacy_blocks_regression_and_records_burndown() 
     assert_eq!(burn_data["ratchet"]["burndown_delta"], -1);
 }
 
+fn staged_ratchet_against_head(root: &std::path::Path, source: &str) -> Value {
+    fs::write(root.join("src/lib.rs"), source).unwrap();
+    assert!(
+        Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(root)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_smells"))
+        .args([
+            "check",
+            "--staged",
+            "--base",
+            "HEAD",
+            "--policy",
+            "quality-policy.json",
+            "--format",
+            "json",
+        ])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    let data = report(&output);
+    assert_eq!(
+        output.status.code().map(|code| code as u64),
+        data["attestation"]["exit_code"].as_u64()
+    );
+    data
+}
+
+const DUPLICATED_BODY: &str = "let mut total = 0; for value in values { if *value > 10 { total += value * 2; } else if *value < 0 { total -= value; } else { total += 1; } } total";
+
+fn duplicate_pair(alpha_prefix: &str, beta_prefix: &str) -> String {
+    format!(
+        "pub fn alpha(values: &[i32]) -> i32 {{ {alpha_prefix} {DUPLICATED_BODY} }}\npub fn beta(values: &[i32]) -> i32 {{ {beta_prefix} {DUPLICATED_BODY} }}\n"
+    )
+}
+
+#[test]
+fn git_reference_ratchet_gates_duplicate_code_by_shared_token_mass() {
+    let workspace = Workspace::new(&duplicate_pair("", ""));
+    workspace.modify("/rules/rust.duplicate_functions/mode", json!("required"));
+    init_git_repo(&workspace.path);
+    git_stage_and_commit(&workspace.path, "legacy duplicate pair");
+
+    // Diverging one copy grows the pair's union but not its shared tokens.
+    let diverged =
+        staged_ratchet_against_head(&workspace.path, &duplicate_pair("", "let scale = 3;"));
+    let duplicate = finding(&diverged, "rust.duplicate_functions", "alpha");
+    assert_eq!(
+        duplicate["evaluation"]["observed"],
+        json!({"intersection":45,"union":50})
+    );
+    assert_eq!(duplicate["status"], "legacy_within_envelope");
+    assert_eq!(diverged["ratchet"]["regressed_blockers"], 0);
+    assert_eq!(diverged["attestation"]["exit_code"], 0);
+
+    // Growing both copies in lockstep adds duplicated mass and regresses.
+    let grown = staged_ratchet_against_head(
+        &workspace.path,
+        &duplicate_pair("let scale = 3;", "let scale = 3;"),
+    );
+    assert_eq!(grown["ratchet"]["regressed_blockers"], 1);
+    assert_eq!(grown["attestation"]["exit_code"], 1);
+
+    // A newly pasted copy is a new blocker even though the legacy pair is unchanged.
+    let pasted = staged_ratchet_against_head(
+        &workspace.path,
+        &format!(
+            "{}pub fn gamma(values: &[i32]) -> i32 {{ {DUPLICATED_BODY} }}\n",
+            duplicate_pair("", "")
+        ),
+    );
+    assert_eq!(pasted["ratchet"]["reference_blockers"], 1);
+    assert_eq!(pasted["ratchet"]["candidate_blockers"], 3);
+    assert_eq!(pasted["ratchet"]["regressed_blockers"], 2);
+    assert_eq!(pasted["attestation"]["exit_code"], 1);
+}
+
+#[test]
+fn git_reference_ratchet_gates_dead_code_without_line_drift() {
+    let workspace = Workspace::new("fn orphan() -> i32 { 1 }\npub fn used() -> i32 { 2 }\n");
+    workspace.modify("/rules/rust.unused_code/mode", json!("required"));
+    init_git_repo(&workspace.path);
+    git_stage_and_commit(&workspace.path, "legacy dead code");
+
+    // Moving the legacy declaration does not turn it into new debt.
+    let moved = staged_ratchet_against_head(
+        &workspace.path,
+        "pub fn used() -> i32 { 2 }\n\n\npub fn more() -> i32 { 3 }\nfn orphan() -> i32 { 1 }\n",
+    );
+    assert_eq!(moved["ratchet"]["legacy_within_envelope"], 1);
+    assert_eq!(moved["attestation"]["exit_code"], 0);
+
+    // Another unused private declaration in the same file raises the file's count.
+    let added = staged_ratchet_against_head(
+        &workspace.path,
+        "fn orphan() -> i32 { 1 }\nfn stray() -> i32 { 3 }\npub fn used() -> i32 { 2 }\n",
+    );
+    let dead = finding(&added, "rust.unused_code", "unused-private-declarations");
+    assert_eq!(dead["evaluation"]["observed"], 2);
+    assert_eq!(added["ratchet"]["regressed_blockers"], 1);
+    assert_eq!(added["attestation"]["exit_code"], 1);
+}
+
 #[test]
 fn git_reference_ratchet_blocks_cross_implementation_debt_transfer() {
     let workspace = Workspace::new("pub fn root_ok() -> i32 { 1 }\n");
