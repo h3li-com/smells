@@ -1,6 +1,6 @@
 use regex::Regex;
 use std::{ops::Range, sync::OnceLock};
-use tree_sitter::{Parser, Tree};
+use tree_sitter::{Node, Parser, Tree};
 
 fn import_type_argument() -> &'static Regex {
     static IMPORT_TYPE_ARGUMENT: OnceLock<Regex> = OnceLock::new();
@@ -57,12 +57,32 @@ fn parsed_tree(parser: &mut Parser, source: &str, path: &str) -> Result<Tree, St
         .ok_or_else(|| format!("parser cancelled for {path}"))
 }
 
+/// The first error or missing node. Tree-sitter-typescript 0.23.2, the latest
+/// release, cannot parse a tagged template with type arguments such as
+/// ``const rows = sql<Row>`SELECT 1`;``. It recovers by inserting a zero-width
+/// `!`, a non-null assertion that adds no path and that no rule reads, so a
+/// missing `!` is not a syntax error.
+pub(crate) fn first_syntax_error(node: Node<'_>) -> Option<Node<'_>> {
+    if !node.has_error() {
+        return None;
+    }
+    if node.is_error() || (node.is_missing() && node.kind() != "!") {
+        return Some(node);
+    }
+    let mut cursor = node.walk();
+    node.children(&mut cursor).find_map(first_syntax_error)
+}
+
+pub(crate) fn has_syntax_error(tree: &Tree) -> bool {
+    first_syntax_error(tree.root_node()).is_some()
+}
+
 /// Parse TypeScript with the same byte-preserving compatibility treatment at
 /// every scanner seam. Tree-sitter currently rejects `typeof import(...)` in a
 /// generic call argument even though TypeScript accepts it.
 pub(crate) fn parse(parser: &mut Parser, source: &str, path: &str) -> Result<Tree, String> {
     let tree = parsed_tree(parser, source, path)?;
-    if !tree.root_node().has_error() {
+    if !has_syntax_error(&tree) {
         return Ok(tree);
     }
     let Some(compatible) = compatibility_source(source) else {
@@ -73,7 +93,7 @@ pub(crate) fn parse(parser: &mut Parser, source: &str, path: &str) -> Result<Tre
 
 #[cfg(test)]
 mod tests {
-    use super::{compatibility_source, import_type_argument_ranges, parse};
+    use super::{compatibility_source, has_syntax_error, import_type_argument_ranges, parse};
     use tree_sitter::Parser;
 
     #[test]
@@ -107,5 +127,25 @@ mod tests {
 
         assert!(compatibility_source("load<string>()").is_none());
         assert!(import_type_argument_ranges("type X = typeof import('module');").is_empty());
+    }
+
+    #[test]
+    fn typed_tagged_template_is_not_a_syntax_error() {
+        let mut parser = Parser::new();
+        parser
+            .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
+            .unwrap();
+        let source = "const rows = sql<{ readonly name: string }>`SELECT ${a ? 1 : 2}`;";
+        let tree = parse(&mut parser, source, "query.ts").unwrap();
+        assert!(tree.root_node().has_error());
+        assert!(!has_syntax_error(&tree));
+        assert!(tree.root_node().to_sexp().contains(
+            "(instantiation_expression (identifier) type_arguments: (type_arguments (object_type"
+        ));
+
+        for broken in ["f(a;", "function broken( {", &format!("{source}\nf(a;")] {
+            let tree = parse(&mut parser, broken, "broken.ts").unwrap();
+            assert!(has_syntax_error(&tree), "{broken}");
+        }
     }
 }

@@ -5007,6 +5007,43 @@ function broken( {
 }
 
 #[test]
+fn typescript_typed_tagged_templates_parse_without_hiding_other_errors() {
+    let valid = r#"declare const sql: any;
+export function names(limit: number) {
+  const rows = sql<{ readonly name: string }>`SELECT name LIMIT ${limit > 0 ? limit : 1}`;
+  return rows;
+}
+"#;
+    let policy: Value =
+        serde_json::from_str(include_str!("../examples/typescript-quality-policy.json")).unwrap();
+    let workspace = Workspace::new("query.ts", valid, &policy);
+    workspace.initialize_git();
+    let output = workspace.check_path();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(report(&output)["errors"].as_array().unwrap().is_empty());
+
+    fs::write(
+        workspace.path.join("broken.ts"),
+        "const rows = sql<{ name: string }>`SELECT name`;\nfunction broken( {\n",
+    )
+    .unwrap();
+    let output = workspace.check_path();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        report(&output)["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error == "parse error in broken.ts")
+    );
+}
+
+#[test]
 fn typescript_built_in_class_model_honors_direct_member_contract() {
     let mut policy = portable_policy("typescript");
     require_only(

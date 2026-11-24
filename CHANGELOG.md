@@ -119,6 +119,11 @@ All notable changes to Smells are recorded here. Release tags use `vMAJOR.MINOR.
   CODEOWNERS coverage; summarizes all 23 smells (`blocking` vs. `ignored` vs.
   `review`) plus the top 5 hotspot files. Broken prerequisites or scan errors
   exit `2`; governance gaps and diagnostic smell summaries exit `0`.
+- Parse TypeScript tagged templates with type arguments, such as
+  ``sql<Row>`SELECT 1` ``. Tree-sitter-typescript 0.23.2, the latest release,
+  recovers them with a zero-width `!`, and the scan exited `2` with a parse
+  error. That inserted `!` is no longer a syntax error; every other error or
+  missing node still exits `2`.
 
 ## 0.6.0 - 2026-10-14
 

@@ -189,8 +189,8 @@ fn parse_source(
             .parse(source, None)
             .ok_or_else(|| at_start(format!("parser cancelled for {path}")))?
     };
-    if tree.root_node().has_error() {
-        let point = first_syntax_error(tree.root_node()).map_or_else(
+    if crate::typescript_compat::has_syntax_error(&tree) {
+        let point = crate::typescript_compat::first_syntax_error(tree.root_node()).map_or_else(
             || tree.root_node().start_position(),
             |node| node.start_position(),
         );
@@ -204,14 +204,6 @@ fn parse_source(
         });
     }
     Ok(tree)
-}
-
-fn first_syntax_error(node: Node<'_>) -> Option<Node<'_>> {
-    if node.is_error() || node.is_missing() {
-        return Some(node);
-    }
-    let mut cursor = node.walk();
-    node.children(&mut cursor).find_map(first_syntax_error)
 }
 
 pub(crate) fn check(input: &Input, registry: &Registry) -> Report {

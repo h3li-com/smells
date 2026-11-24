@@ -128,7 +128,7 @@ fn parse_tree(path: &str, source: &str) -> Result<tree_sitter::Tree, String> {
             .parse(source, None)
             .ok_or_else(|| format!("collector parser cancelled for {path}"))?
     };
-    if tree.root_node().has_error() {
+    if crate::typescript_compat::has_syntax_error(&tree) {
         return Err(format!("collector parse error in {path}"));
     }
     Ok(tree)
