@@ -167,15 +167,33 @@ fn resolve_inferred_source_roles(
     implementations: &[Implementation],
     resolved: &mut BTreeMap<String, ResolvedSourceRole>,
 ) -> Result<(), String> {
+    // The Umzug alias scan parses every file of an implementation, so run it once
+    // per implementation rather than once per file.
+    let mut umzug_alias_modules = BTreeMap::new();
     for (path, source) in files {
         if resolved.contains_key(path) {
             continue;
         }
         let implementation = implementation_for_source(implementations, path)
             .ok_or_else(|| format!("source file has no Implementation owner: {path}"))?;
-        if let Some(role) =
-            inferred_source_role(language, path, source, files, manifests, implementation)
-        {
+        let umzug_alias_modules = umzug_alias_modules
+            .entry(implementation.id.as_str())
+            .or_insert_with(|| {
+                if language == "typescript" {
+                    implementation_database_umzug_alias_modules(files, implementation)
+                } else {
+                    BTreeSet::new()
+                }
+            });
+        if let Some(role) = inferred_source_role(
+            language,
+            path,
+            source,
+            files,
+            manifests,
+            implementation,
+            umzug_alias_modules,
+        ) {
             resolved.insert(path.clone(), role);
         }
     }
@@ -1496,6 +1514,7 @@ fn inferred_source_role(
     files: &BTreeMap<String, String>,
     manifests: &BTreeMap<String, String>,
     implementation: &Implementation,
+    umzug_alias_modules: &BTreeSet<String>,
 ) -> Option<ResolvedSourceRole> {
     match language {
         "python" => inferred_alembic(path, source, &implementation.id)
@@ -1504,7 +1523,7 @@ fn inferred_source_role(
             path,
             source,
             &implementation.id,
-            &implementation_database_umzug_alias_modules(files, implementation),
+            umzug_alias_modules,
             implementation_has_prisma_8_rc(manifests, implementation),
         ),
         "rust" => inferred_rust(path, source, files, implementation),
@@ -4079,6 +4098,7 @@ mod tests {
                 &files,
                 &manifests,
                 &implementation,
+                &BTreeSet::new(),
             )
             .map(|role| role.framework),
             Some("alembic".into())
@@ -4096,6 +4116,7 @@ mod tests {
                     &files,
                     &manifests,
                     &implementation,
+                    &BTreeSet::new(),
                 )
                 .is_none()
             );
@@ -4115,6 +4136,7 @@ mod tests {
                 &files,
                 &manifests,
                 &implementation,
+                &BTreeSet::new(),
             )
             .map(|role| role.framework),
             Some("django".into())
@@ -4136,6 +4158,7 @@ mod tests {
                     &files,
                     &manifests,
                     &implementation,
+                    &BTreeSet::new(),
                 )
                 .is_none()
             );
