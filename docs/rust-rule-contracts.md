@@ -26,7 +26,7 @@ This is the normative definition of the first Rust rule pack. The [registry](../
 **Implemented: rust.function_lines@2.** Maximum 100 body code lines, using the shared lexical span rule for every authored function/method with a body. Inclusive maximum; 100 passes, 101 matches. No Clippy measurement is substituted. An exact Refinery `migration() -> String` Declaration Role in a versioned, embedded migration source retains the matched Measurement and Finding but is reported as a nonblocking `reported_by_role` review signal. Other functions use normal blocking semantics. Fixtures: 99/100/101, comments, raw strings, multiline literals, Unicode, nested functions and bodyless trait members.
 
 <a id="rust-function-crap"></a>
-**Built-in with optional coverage override: rust.function_crap@1.** Maximum 5. The built-in collector counts authored lexical `if`/`else if`/`for`/`while`/`match`-arm/`catch` and boolean-short-circuit decisions and emits the conservative zero-coverage CRAP upper bound `C² + C`. Complete external coverage may replace this pessimistic observation using the exact rational measurement map. This is not a promise of compatibility with cargo-crap's counting convention.
+**Built-in with optional coverage override: rust.function_crap@2.** Maximum 5. The built-in collector counts cyclomatic complexity on the parsed syntax tree with cargo-crap's decision points: `if` (including `else if` and `if let`), `for`, `while`, `loop`, every `match` arm, `&&`, `||` and each `?`. Closures and nested items are their own scope, and text in strings, comments and macro bodies never counts. It emits the conservative zero-coverage CRAP upper bound `C² + C`, or the exact rational score from `--coverage` LCOV.
 
 ### 2. Large Class — Rust type/trait size
 

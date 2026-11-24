@@ -23,6 +23,8 @@ pub(super) struct FunctionFact {
     pub(super) end_line: usize,
     pub(super) type_parameters: Vec<String>,
     pub(super) body: Option<Arc<str>>,
+    /// Cyclomatic complexity of the body, counted on the syntax tree.
+    pub(super) complexity: Option<u64>,
     pub(super) source: Arc<str>,
     pub(super) private: bool,
     /// Called on an owned receiver (`self`, `cls`, or an instance `this`).
@@ -99,7 +101,7 @@ fn parser_language(language: &str, path: &str) -> Result<Language, String> {
     }
 }
 
-fn class_node(kind: &str, language: &str) -> bool {
+pub(super) fn class_node(kind: &str, language: &str) -> bool {
     match language {
         "python" => kind == "class_definition",
         "typescript" => matches!(
@@ -110,7 +112,7 @@ fn class_node(kind: &str, language: &str) -> bool {
     }
 }
 
-fn function_node(kind: &str, language: &str) -> bool {
+pub(super) fn function_node(kind: &str, language: &str) -> bool {
     match language {
         "python" => matches!(kind, "function_definition" | "lambda"),
         "typescript" => matches!(
@@ -451,6 +453,7 @@ fn rust_function(
             .expect("Rust token masking cannot fail")
             .into(),
         type_parameters: rust_type_parameters(&signature.generics),
+        complexity: body.map(super::complexity::rust),
         body: body_source.map(|body| {
             Arc::from(code_only(path, &body).expect("Rust function-body token masking cannot fail"))
         }),
@@ -800,7 +803,11 @@ fn rust_source_model(input: &Input) -> Result<SourceModel, String> {
     Ok(model)
 }
 
-fn parse_portable_tree(language: &str, path: &str, source: &str) -> Result<Tree, String> {
+pub(super) fn parse_portable_tree(
+    language: &str,
+    path: &str,
+    source: &str,
+) -> Result<Tree, String> {
     let grammar = parser_language(language, path)?;
     let mut parser = Parser::new();
     parser
@@ -892,9 +899,8 @@ fn portable_function(
         classes.iter().position(|class| class.range == range)
     });
     let owner = owner_index.map(|index| classes[index].name.clone());
-    let body = node
-        .child_by_field_name("body")
-        .map(|body| Arc::from(text_of(body, authored_code)));
+    let body_node = node.child_by_field_name("body");
+    let body = body_node.map(|body| Arc::from(text_of(body, authored_code)));
     let signature = header_before_body(node, source);
     let function = FunctionFact {
         symbol: owner.as_ref().map_or_else(
@@ -906,6 +912,7 @@ fn portable_function(
         type_parameters: portable_type_parameters(node, source, language),
         source: text_of(node, authored_code).into(),
         body,
+        complexity: body_node.map(|body| super::complexity::portable(node, body, language)),
         private: name.starts_with('_') || signature.contains("private "),
         receiver: owner.is_some() && portable_receiver(&signature, language),
         entry_point: false,

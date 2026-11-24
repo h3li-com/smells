@@ -135,6 +135,9 @@
         },
         "typescript.navigation_chains": {
           "$ref": "#/$defs/selection_v2"
+        },
+        "typescript.function_crap": {
+          "$ref": "#/$defs/selection_v2"
         }
       },
       "additionalProperties": {

@@ -391,6 +391,7 @@ mod tests {
             end_line: 1,
             type_parameters: Vec::new(),
             body: body.map(Arc::from),
+            complexity: body.map(|_| 1),
             source: Arc::from(body.unwrap_or_default()),
             private: false,
             receiver: false,

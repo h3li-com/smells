@@ -145,7 +145,7 @@
       }
     },
     "python.function_crap": {
-      "version": 1,
+      "version": 2,
       "mode": "report",
       "parameters": {
         "maximum": 5

@@ -211,7 +211,8 @@ fn selection(rule: &str, mode: &str, parameters: Value) -> Value {
         }
         _ if rule.ends_with(".data_clumps")
             || rule.ends_with(".foreign_accesses")
-            || rule.ends_with(".navigation_chains") =>
+            || rule.ends_with(".navigation_chains")
+            || rule.ends_with(".function_crap") =>
         {
             2
         }

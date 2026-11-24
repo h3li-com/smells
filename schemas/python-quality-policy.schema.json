@@ -132,6 +132,9 @@
         },
         "python.navigation_chains": {
           "$ref": "#/$defs/selection_v2"
+        },
+        "python.function_crap": {
+          "$ref": "#/$defs/selection_v2"
         }
       },
       "additionalProperties": {

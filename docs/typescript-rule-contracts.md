@@ -93,8 +93,8 @@ Treat optional, nullable, or `undefined` fields as lifecycle candidates and coun
 Count non-constructor methods whose complete body is one optional `return` of `this.delegate.method(...)`. Match the configured method minimum and forwarding share.
 
 <a id="typescript-function-crap"></a>
-### `typescript.function_crap@1` — built in
-Calculate authored lexical cyclomatic complexity and a conservative zero-coverage CRAP upper bound `C² + C`. Match scores greater than `maximum`. Complete external coverage may replace this pessimistic observation.
+### `typescript.function_crap@2` — built in
+Calculate cyclomatic complexity on the syntax tree and a conservative zero-coverage CRAP upper bound `C² + C`. Match scores greater than `maximum`. Complete external coverage may replace this pessimistic observation. Decisions follow ESLint's `complexity` rule: `if`, ternaries, `for`, `for…in/of`, `while`, `do`, each `case` (not `default`), `catch`, `&&`, `||`, `??`, the logical assignments `&&=`, `||=`, `??=`, each optional chain `?.`, and each default value in a parameter or destructuring pattern. Arrow functions, function expressions and nested classes are their own scope; an expression-bodied arrow counts its body. Text in strings, comments and templates never counts.
 
 <a id="typescript-unused-code"></a>
 ### `typescript.unused_code@1` — built in

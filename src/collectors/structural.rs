@@ -386,31 +386,15 @@ pub(super) fn forwarding_share(rule: &Rule, model: &SourceModel) -> Vec<Observat
         .collect()
 }
 
-fn complexity(body: &str, language: &str) -> u64 {
-    static DECISION: OnceLock<Regex> = OnceLock::new();
-    let decision = DECISION.get_or_init(|| {
-        Regex::new(r"\b(?:if|elif|for|while|case|catch)\b|&&|\|\|")
-            .expect("valid complexity expression")
-    });
-    let rust_match_arms = if language == "rust" {
-        body.match_indices("=>").count() as u64
-    } else {
-        0
-    };
-    1 + decision.find_iter(body).count() as u64 + rust_match_arms
-}
-
 pub(super) fn function_crap(
-    rule: &Rule,
     model: &SourceModel,
     coverage: Option<&LineCoverage>,
 ) -> Vec<Observation> {
-    let language = rule.id.split_once('.').map_or("", |(language, _)| language);
     model
         .functions
         .iter()
         .filter_map(|function| {
-            let complexity = complexity(function.body.as_deref()?, language);
+            let complexity = function.complexity?;
             let measured = coverage.and_then(|coverage| {
                 let (covered, instrumented) = coverage.span(
                     &function.location.path,
@@ -612,6 +596,7 @@ mod tests {
             end_line: 1,
             type_parameters: Vec::new(),
             body: body.map(Arc::from),
+            complexity: body.map(|_| 1),
             source: Arc::from(body.unwrap_or_default()),
             private: false,
             receiver: false,
@@ -694,12 +679,6 @@ mod tests {
             "return self.client.load(value); self.audit()",
             "python"
         ));
-        assert_eq!(
-            complexity("if a && b { for value in values {} }", "rust"),
-            4
-        );
-        assert_eq!(complexity("match value { A => 1, B => 2 }", "rust"), 3);
-        assert_eq!(complexity("match value { A => 1 }", "typescript"), 1);
     }
 
     #[test]
@@ -889,21 +868,13 @@ mod tests {
 
     #[test]
     fn function_crap_uses_measured_line_coverage_and_keeps_the_bound_without_records() {
-        let rule = Rule {
-            id: "rust.function_crap".into(),
-            version: 1,
-            smell: "test".into(),
-            kind: "threshold".into(),
-            implementation: "test".into(),
-            inputs: Vec::new(),
-            parameters: BTreeMap::new(),
-            contract: "test".into(),
-        };
         let mut covered = function("covered", Some("{ if ready { 1 } else { 2 } }"));
         covered.end_line = 4;
+        covered.complexity = Some(2);
         let mut unrecorded = function("unrecorded", Some("{ if ready { 1 } else { 2 } }"));
         unrecorded.location = location(10);
         unrecorded.end_line = 12;
+        unrecorded.complexity = Some(2);
         let model = SourceModel {
             functions: vec![covered, unrecorded],
             ..SourceModel::default()
@@ -916,7 +887,7 @@ mod tests {
             )]),
         };
 
-        let observations = function_crap(&rule, &model, Some(&coverage));
+        let observations = function_crap(&model, Some(&coverage));
         assert_eq!(observations[0].measurements["numerator"], 5);
         assert_eq!(observations[0].measurements["denominator"], 2);
         assert_eq!(
@@ -933,7 +904,7 @@ mod tests {
         assert_eq!(observations[1].measurements["numerator"], 6);
         assert_eq!(observations[1].measurements["denominator"], 1);
         assert_eq!(observations[1].evidence["coverage_assumption_percent"], 0);
-        let uncovered = function_crap(&rule, &model, None);
+        let uncovered = function_crap(&model, None);
         assert_eq!(uncovered[0].measurements["numerator"], 6);
     }
 

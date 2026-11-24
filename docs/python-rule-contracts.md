@@ -91,8 +91,8 @@ Treat fields annotated with `Optional`/`None` or assigned `None` as lifecycle ca
 Count non-constructor methods whose complete body is one optional `return` of `self.delegate.method(...)`. Match the configured method minimum and forwarding share.
 
 <a id="python-function-crap"></a>
-### `python.function_crap@1` — built in
-Calculate authored lexical cyclomatic complexity and a conservative zero-coverage CRAP upper bound `C² + C`. Match scores greater than `maximum`. Complete external coverage may replace this pessimistic observation.
+### `python.function_crap@2` — built in
+Calculate cyclomatic complexity on the syntax tree and a conservative zero-coverage CRAP upper bound `C² + C`. Match scores greater than `maximum`. Complete external coverage may replace this pessimistic observation. Decisions follow radon: `if`, `elif`, conditional expressions, `for`, `while`, an `else` on a loop or `try`, `except`, `assert`, comprehension `for`/`if`, `and`, `or`, and each `match` `case` except a wildcard or bare capture. A `case` guard and `finally` are not decisions. Unlike radon, decisions inside an `assert` count, and lambdas, like nested functions and classes, are their own scope. Text in strings and comments never counts.
 
 <a id="python-unused-code"></a>
 ### `python.unused_code@1` — built in

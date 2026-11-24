@@ -32,6 +32,17 @@ All notable changes to Smells are recorded here. Release tags use `vMAJOR.MINOR.
   command that produces LCOV for the project's language. Blocking findings are
   never hidden. The burndown compares both sides without non-blocking CRAP so
   that adding coverage does not read as a regression.
+- Count cyclomatic complexity on the syntax tree and move `function_crap` to
+  version `2` in every language. The old lexical count read keywords inside
+  strings and comments, missed Rust `?`, and counted closure `||` and `=>`.
+  Rust now uses cargo-crap's decision points (each `?` and match arm, `if`,
+  `for`, `while`, `loop`, `&&`, `||`) and agrees with cargo-crap on every
+  function of Smells' own source. Python follows radon (`assert`, loop and
+  `try` `else`, and every `match` `case` except a wildcard or bare capture count)
+  and agrees on 99.6% of 4,120 functions. TypeScript follows ESLint's
+  `complexity` rule (optional chaining, default values and logical assignment
+  count; `default` does not) and agrees on 16,741 of 16,744 functions. Closures,
+  lambdas and nested items are their own scope.
 - Move `rust.dependency_contract` to version `2`. A private field is visible in
   its own module and every descendant module, so only matching accesses from
   descendant module files of the owner's module count; accesses elsewhere cannot

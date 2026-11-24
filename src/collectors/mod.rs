@@ -1,4 +1,5 @@
 mod common;
+mod complexity;
 mod contracts;
 mod history;
 mod model;
@@ -126,7 +127,6 @@ impl<'a> BuiltInCollectors<'a> {
     ) -> Result<Vec<Observation>, String> {
         match kind {
             RuleKind::FunctionCrap => Ok(structural::function_crap(
-                rule,
                 self.model(rule)?,
                 self.input.coverage.as_ref(),
             )),
