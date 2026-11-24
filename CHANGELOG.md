@@ -134,7 +134,14 @@ All notable changes to Smells are recorded here. Release tags use `vMAJOR.MINOR.
   ``String.raw`C:\Users\alice\user.ts` ``. ECMAScript allows them because the
   tag receives the raw text, but tree-sitter rejects them. The reparse turns
   each into the same-length `\q`. The same escapes in an untagged template or a
-  string are real syntax errors and still exit `2`.
+  string are real syntax errors and still exit `2`. This also covers a template
+  that opens on such an escape, as in ``String.raw`\u-1` ``, where tree-sitter
+  loses the template node. A template whose `${}` substitution holds a string,
+  comment, regex or nested template is not rewritten, so it still exits `2`.
+- Parse TypeScript `in` and `out` variance annotations on type parameters, such
+  as `class Declaration<out Handler>`, which tree-sitter-typescript 0.23.2
+  rejects. The reparse blanks the modifiers in type parameter lists that failed
+  to parse; any error that remains still exits `2`.
 - Key the portable fact cache on the TypeScript compatibility parser as well.
   Before this, a change to which files parse could still serve a cached parse
   error from an earlier build for files whose content had not changed.
