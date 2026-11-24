@@ -130,6 +130,14 @@ All notable changes to Smells are recorded here. Release tags use `vMAJOR.MINOR.
   parse, Smells reparses a same-length copy with these import types blanked.
   Dynamic `import("m")` calls are left as they are, and any error that remains
   still exits `2`.
+- Parse invalid `\u` and `\x` escapes in tagged templates, such as
+  ``String.raw`C:\Users\alice\user.ts` ``. ECMAScript allows them because the
+  tag receives the raw text, but tree-sitter rejects them. The reparse turns
+  each into the same-length `\q`. The same escapes in an untagged template or a
+  string are real syntax errors and still exit `2`.
+- Key the portable fact cache on the TypeScript compatibility parser as well.
+  Before this, a change to which files parse could still serve a cached parse
+  error from an earlier build for files whose content had not changed.
 
 ## 0.6.0 - 2026-10-14
 

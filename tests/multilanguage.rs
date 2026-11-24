@@ -5084,6 +5084,40 @@ export async function lazy(): Promise<Rows> {
 }
 
 #[test]
+fn typescript_raw_tagged_template_escapes_parse_without_hiding_other_errors() {
+    let valid = r#"export const windowsPath = String.raw`C:\Users\alice\src\user.ts:261:7`;
+export const rtf = String.raw`{\rtf1 A{\deleted\uc1\u945\deleted0 old}B}`;
+"#;
+    let policy: Value =
+        serde_json::from_str(include_str!("../examples/typescript-quality-policy.json")).unwrap();
+    let workspace = Workspace::new("paths.ts", valid, &policy);
+    workspace.initialize_git();
+    let output = workspace.check_path();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(report(&output)["errors"].as_array().unwrap().is_empty());
+
+    fs::write(
+        workspace.path.join("broken.ts"),
+        "export const path = `C:\\Users\\alice\\src\\user.ts`;\n",
+    )
+    .unwrap();
+    let output = workspace.check_path();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        report(&output)["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error == "parse error in broken.ts")
+    );
+}
+
+#[test]
 fn typescript_built_in_class_model_honors_direct_member_contract() {
     let mut policy = portable_policy("typescript");
     require_only(

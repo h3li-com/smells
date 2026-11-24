@@ -64,9 +64,49 @@ fn import_type_ranges(source: &str) -> Vec<Range<usize>> {
         .collect()
 }
 
-fn compatibility_source(source: &str) -> Option<String> {
+fn template_escape() -> &'static Regex {
+    static TEMPLATE_ESCAPE: OnceLock<Regex> = OnceLock::new();
+    TEMPLATE_ESCAPE.get_or_init(|| {
+        Regex::new(r"\\(?:u(?P<u>\{[0-9A-Fa-f]+\}|[0-9A-Fa-f]{4})?|x(?P<x>[0-9A-Fa-f]{2})?)")
+            .expect("fixed TypeScript template-escape compatibility regex")
+    })
+}
+
+/// Invalid `\u` and `\x` escapes in a tagged template with a syntax error, as
+/// in ``String.raw`C:\users\xyz` ``. ECMAScript allows them there because the
+/// tag receives the raw text, but tree-sitter rejects them. Each yields the byte
+/// offset of its `u` or `x`.
+fn tagged_template_escapes(node: Node<'_>, source: &str, escapes: &mut Vec<usize>) {
+    if !node.has_error() {
+        return;
+    }
+    if node.kind() == "template_string"
+        && node
+            .parent()
+            .is_some_and(|parent| parent.kind() == "call_expression")
+    {
+        let start = node.start_byte();
+        escapes.extend(
+            template_escape()
+                .captures_iter(&source[node.byte_range()])
+                .filter(|captures| captures.name("u").is_none() && captures.name("x").is_none())
+                .filter_map(|captures| captures.get(0).map(|matched| start + matched.start() + 1)),
+        );
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        tagged_template_escapes(child, source, escapes);
+    }
+}
+
+fn compatibility_source(source: &str, template_escapes: &[usize]) -> Option<String> {
     let mut bytes = source.as_bytes().to_vec();
     let mut changed = false;
+    for &escape in template_escapes {
+        bytes[escape] = b'q';
+        changed = true;
+    }
     let argument_ranges = import_type_argument_ranges(source);
     for range in argument_ranges.iter().cloned() {
         for byte in &mut bytes[range.clone()] {
@@ -130,13 +170,16 @@ pub(crate) fn has_syntax_error(tree: &Tree) -> bool {
 
 /// Parse TypeScript with the same byte-preserving compatibility treatment at
 /// every scanner seam. Tree-sitter currently rejects `typeof import(...)` in a
-/// generic call argument even though TypeScript accepts it.
+/// generic call argument, some other import types, and invalid escapes in tagged
+/// templates, all of which TypeScript accepts.
 pub(crate) fn parse(parser: &mut Parser, source: &str, path: &str) -> Result<Tree, String> {
     let tree = parsed_tree(parser, source, path)?;
     if !has_syntax_error(&tree) {
         return Ok(tree);
     }
-    let Some(compatible) = compatibility_source(source) else {
+    let mut template_escapes = Vec::new();
+    tagged_template_escapes(tree.root_node(), source, &mut template_escapes);
+    let Some(compatible) = compatibility_source(source, &template_escapes) else {
         return Ok(tree);
     };
     parsed_tree(parser, &compatible, path)
@@ -146,7 +189,7 @@ pub(crate) fn parse(parser: &mut Parser, source: &str, path: &str) -> Result<Tre
 mod tests {
     use super::{
         compatibility_source, has_syntax_error, import_type_argument_ranges, import_type_ranges,
-        parse,
+        parse, tagged_template_escapes,
     };
     use tree_sitter::Parser;
 
@@ -172,14 +215,14 @@ mod tests {
         let ranges = import_type_argument_ranges(source);
         assert_eq!(ranges.len(), 1);
         let range = ranges[0].clone();
-        let compatible = compatibility_source(source).expect("compatibility rewrite");
+        let compatible = compatibility_source(source, &[]).expect("compatibility rewrite");
         assert_eq!(compatible.len(), source.len());
         assert_eq!(compatible.as_bytes()[range.start], b'<');
         assert_eq!(compatible.as_bytes()[range.end - 1], b'>');
         assert!(compatible[range.start + 1..range.end - 1].contains('T'));
         assert_eq!(&compatible[range.end..], "()");
 
-        assert!(compatibility_source("load<string>()").is_none());
+        assert!(compatibility_source("load<string>()", &[]).is_none());
         assert!(import_type_argument_ranges("type X = typeof import('module');").is_empty());
     }
 
@@ -220,7 +263,7 @@ mod tests {
         }
 
         let source = "f<import('m').T>(); g<typeof import('m')>(); await import('m'); import('m').then(h); x.import('m').a;";
-        let compatible = compatibility_source(source).expect("compatibility rewrite");
+        let compatible = compatibility_source(source, &[]).expect("compatibility rewrite");
         assert_eq!(compatible.len(), source.len());
         assert_eq!(
             compatible,
@@ -236,5 +279,34 @@ mod tests {
         )
         .unwrap();
         assert!(has_syntax_error(&tree));
+    }
+
+    #[test]
+    fn tagged_template_escapes_reparse_without_hiding_untagged_errors() {
+        let mut parser = Parser::new();
+        parser
+            .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
+            .unwrap();
+        let source = r"const a = String.raw`C:\users\x ${b} \u{41}\x41\u0041\u{zz}`;";
+        let tree = parser.parse(source, None).unwrap();
+        assert!(has_syntax_error(&tree));
+        let mut escapes = Vec::new();
+        tagged_template_escapes(tree.root_node(), source, &mut escapes);
+        assert_eq!(escapes, vec![24, 30, 54]);
+        let tree = parse(&mut parser, source, "raw.ts").unwrap();
+        assert!(!has_syntax_error(&tree));
+        assert_eq!(
+            compatibility_source(source, &escapes).unwrap(),
+            r"const a = String.raw`C:\qsers\q ${b} \u{41}\x41\u0041\q{zz}`;"
+        );
+
+        for source in [
+            r"const a = `C:\users\x`;",
+            r#"const a = "C:\users\x";"#,
+            "const a = String.raw`C:\\users`;\nf(a;",
+        ] {
+            let tree = parse(&mut parser, source, "broken.ts").unwrap();
+            assert!(has_syntax_error(&tree), "{source}");
+        }
     }
 }
