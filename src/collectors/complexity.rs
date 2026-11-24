@@ -250,6 +250,15 @@ mod tests {
             ),
             3
         );
+        let case = |pattern: &str| {
+            cc(&format!(
+                "    match a:\n        case {pattern}:\n            pass\n"
+            ))
+        };
+        assert_eq!(case("other"), 1);
+        assert_eq!(case("str()"), 2);
+        assert_eq!(case("[x]"), 2);
+        assert_eq!(case("Color.RED"), 2);
         assert_eq!(cc("    assert a\n    assert b, c\n"), 3);
         assert_eq!(
             cc("    for x in a:\n        pass\n    else:\n        pass\n"),
@@ -316,6 +325,7 @@ mod tests {
         assert_eq!(cc("try {} catch (e) {} finally {}"), 2);
         assert_eq!(cc("return a && b || c ?? 1;"), 4);
         assert_eq!(cc("return a & b | c + 1;"), 1);
+        assert_eq!(cc("return String(a).trim();"), 1);
         assert_eq!(cc("a ??= 1; b ||= 2; c &&= 3; a += 1;"), 4);
         assert_eq!(cc("const s = 'if (a && b)'; // while\n return a?.b?.c;"), 3);
         assert_eq!(
