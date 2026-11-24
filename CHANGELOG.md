@@ -124,6 +124,12 @@ All notable changes to Smells are recorded here. Release tags use `vMAJOR.MINOR.
   recovers them with a zero-width `!`, and the scan exited `2` with a parse
   error. That inserted `!` is no longer a syntax error; every other error or
   missing node still exits `2`.
+- Parse TypeScript import types that tree-sitter-typescript 0.23.2 rejects:
+  `import("m").T<U>`, `import("m").T[K]`, and `import("m")` or
+  `typeof import("m").f` inside call type arguments. When a file fails its first
+  parse, Smells reparses a same-length copy with these import types blanked.
+  Dynamic `import("m")` calls are left as they are, and any error that remains
+  still exits `2`.
 
 ## 0.6.0 - 2026-10-14
 

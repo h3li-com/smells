@@ -5044,6 +5044,46 @@ export function names(limit: number) {
 }
 
 #[test]
+fn typescript_import_types_parse_without_hiding_other_errors() {
+    let valid = r#"declare const vi: any;
+type Rows = import("./rows").Page<string>;
+type Row = import("./rows").Rows[number];
+export const load = vi.fn<typeof import("./rows").load>();
+export async function lazy(): Promise<Rows> {
+  const module = await import("./rows");
+  return module.load();
+}
+"#;
+    let policy: Value =
+        serde_json::from_str(include_str!("../examples/typescript-quality-policy.json")).unwrap();
+    let workspace = Workspace::new("types.ts", valid, &policy);
+    workspace.initialize_git();
+    let output = workspace.check_path();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(report(&output)["errors"].as_array().unwrap().is_empty());
+
+    fs::write(
+        workspace.path.join("broken.ts"),
+        "type Rows = import(\"./rows\").Page<string>;\nfunction broken( {\n",
+    )
+    .unwrap();
+    let output = workspace.check_path();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        report(&output)["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error == "parse error in broken.ts")
+    );
+}
+
+#[test]
 fn typescript_built_in_class_model_honors_direct_member_contract() {
     let mut policy = portable_policy("typescript");
     require_only(

@@ -29,10 +29,46 @@ pub(crate) fn import_type_argument_ranges(source: &str) -> Vec<Range<usize>> {
         .collect()
 }
 
+fn import_type() -> &'static Regex {
+    static IMPORT_TYPE: OnceLock<Regex> = OnceLock::new();
+    IMPORT_TYPE.get_or_init(|| {
+        Regex::new(
+            r#"(?x)
+            (?P<typeof>\btypeof\s+)?
+            (?P<import>\bimport\s*\(\s*
+                (?:"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*')
+            \s*\))
+            (?P<chain>(?:\s*\.\s*[A-Za-z_$][\w$]*)*)
+            (?P<next>\s*\(?)
+            "#,
+        )
+        .expect("fixed TypeScript import-type compatibility regex")
+    })
+}
+
+/// `import("m")` used as a type, as in `typeof import("m").f` or
+/// `import("m").T<U>`. Tree-sitter rejects these in type arguments and with
+/// type arguments or an index. A dynamic `import("m").then(...)` is a call and
+/// is left alone.
+fn import_type_ranges(source: &str) -> Vec<Range<usize>> {
+    import_type()
+        .captures_iter(source)
+        .filter(|captures| {
+            let start = captures.name("import").map_or(0, |matched| matched.start());
+            let member = source[..start].trim_end().ends_with('.');
+            let called = captures["next"].ends_with('(');
+            !member
+                && (captures.name("typeof").is_some() || (!captures["chain"].is_empty() && !called))
+        })
+        .filter_map(|captures| captures.name("import").map(|matched| matched.range()))
+        .collect()
+}
+
 fn compatibility_source(source: &str) -> Option<String> {
     let mut bytes = source.as_bytes().to_vec();
     let mut changed = false;
-    for range in import_type_argument_ranges(source) {
+    let argument_ranges = import_type_argument_ranges(source);
+    for range in argument_ranges.iter().cloned() {
         for byte in &mut bytes[range.clone()] {
             if !matches!(*byte, b'\n' | b'\r') {
                 *byte = b' ';
@@ -46,6 +82,21 @@ fn compatibility_source(source: &str) -> Option<String> {
         {
             *type_byte = b'T';
         }
+        changed = true;
+    }
+    for range in import_type_ranges(source) {
+        if argument_ranges
+            .iter()
+            .any(|argument| argument.contains(&range.start))
+        {
+            continue;
+        }
+        for byte in &mut bytes[range.start + "import".len()..range.end] {
+            if !matches!(*byte, b'\n' | b'\r') {
+                *byte = b' ';
+            }
+        }
+        bytes[range.start] = b'I';
         changed = true;
     }
     changed.then(|| String::from_utf8(bytes).expect("spaces preserve UTF-8"))
@@ -93,7 +144,10 @@ pub(crate) fn parse(parser: &mut Parser, source: &str, path: &str) -> Result<Tre
 
 #[cfg(test)]
 mod tests {
-    use super::{compatibility_source, has_syntax_error, import_type_argument_ranges, parse};
+    use super::{
+        compatibility_source, has_syntax_error, import_type_argument_ranges, import_type_ranges,
+        parse,
+    };
     use tree_sitter::Parser;
 
     #[test]
@@ -147,5 +201,40 @@ mod tests {
             let tree = parse(&mut parser, broken, "broken.ts").unwrap();
             assert!(has_syntax_error(&tree), "{broken}");
         }
+    }
+
+    #[test]
+    fn import_types_reparse_without_touching_dynamic_imports() {
+        let mut parser = Parser::new();
+        parser
+            .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
+            .unwrap();
+        for source in [
+            "type A = import('m').T<string>;",
+            "type A = import(\"m\").U[string];",
+            "const f = vi.fn<typeof import('m').g>();",
+            "const f = vi.fn<import('m').T>();",
+        ] {
+            let tree = parse(&mut parser, source, "types.ts").unwrap();
+            assert!(!has_syntax_error(&tree), "{source}");
+        }
+
+        let source = "f<import('m').T>(); g<typeof import('m')>(); await import('m'); import('m').then(h); x.import('m').a;";
+        let compatible = compatibility_source(source).expect("compatibility rewrite");
+        assert_eq!(compatible.len(), source.len());
+        assert_eq!(
+            compatible,
+            "f<Import     .T>(); g<T                 >(); await import('m'); import('m').then(h); x.import('m').a;"
+        );
+        assert_eq!(import_type_ranges("typeof import('m')"), vec![7..18]);
+        assert!(import_type_ranges("import('m')").is_empty());
+
+        let tree = parse(
+            &mut parser,
+            "type A = import('m').T<string>;\nf(a;",
+            "broken.ts",
+        )
+        .unwrap();
+        assert!(has_syntax_error(&tree));
     }
 }
