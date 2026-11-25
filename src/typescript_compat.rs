@@ -75,7 +75,9 @@ fn template_escape() -> &'static Regex {
 fn variance_annotation() -> &'static Regex {
     static VARIANCE_ANNOTATION: OnceLock<Regex> = OnceLock::new();
     VARIANCE_ANNOTATION.get_or_init(|| {
-        Regex::new(r"[<,]\s*(?:const\s+)?(?P<modifiers>(?:(?:in|out)\s+)+)[A-Za-z_$]")
+        Regex::new(
+            r"[<,](?:\s|/\*(?s:.)*?\*/|//[^\n]*)*(?:const\s+)?(?P<modifiers>(?:(?:in|out)\s+)+)[A-Za-z_$]",
+        )
             .expect("fixed TypeScript variance-annotation compatibility regex")
     })
 }
@@ -461,6 +463,7 @@ mod tests {
         for source in [
             "export class Declaration<out Handler> { h!: Handler; }",
             "type T<\n  in\n  H,\n  const out K extends string = 'k'> = (h: H) => K;",
+            "interface O<\n  /** @ts-ignore Cast variance */\n  out S extends B = B,\n  // why\n  out C = B,\n> {}",
         ] {
             let tree = parse(&mut parser, source, "variance.ts").unwrap();
             assert!(!has_syntax_error(&tree), "{source}");
