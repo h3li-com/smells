@@ -145,7 +145,11 @@ pub(super) fn shotgun_surgery(input: &Input) -> Vec<Observation> {
 
 #[cfg(test)]
 mod tests {
-    use super::Owners;
+    use super::{Owners, divergent_change};
+    use crate::{
+        core::model::{History, HistoryCommit, Input},
+        policy::{Limits, Policy, ResolvedSelection},
+    };
     use std::collections::BTreeMap;
 
     fn owners<'a>(roots: &[&'a str], files: &'a BTreeMap<String, String>) -> Owners<'a> {
@@ -167,6 +171,7 @@ mod tests {
         assert_eq!(plain.of("src/utils.ts"), "utils");
         assert_eq!(plain.of("lib/notify/mail.rb"), "notify");
         assert_eq!(plain.of("src/main.rs"), "main");
+        assert_eq!(plain.of("src"), "src");
 
         let rooted = owners(&["backend", "packages/web/app", "packages/web"], &none);
         assert_eq!(rooted.of("backend/src/domain/order.rs"), "domain");
@@ -186,5 +191,57 @@ mod tests {
         assert_eq!(python.of("shopkit/utils.py"), "utils");
         assert_eq!(python.of("src/layout/orders/manager.py"), "orders");
         assert_eq!(python.of("tests/test_tax.py"), "tests");
+        assert_eq!(python.of("shopkit"), "shopkit");
+    }
+
+    #[test]
+    fn divergent_change_profiles_only_the_changes_that_touch_the_file() {
+        let commit = |id: &str, root: bool, files: &[&str]| HistoryCommit {
+            id: id.into(),
+            root,
+            files: files.iter().map(|file| (*file).into()).collect(),
+        };
+        let input = Input {
+            files: BTreeMap::from([("src/a.rs".into(), String::new())]),
+            manifests: BTreeMap::new(),
+            artifacts: BTreeMap::new(),
+            artifact_candidates: BTreeMap::new(),
+            implementations: Vec::new(),
+            source_roles: Vec::new(),
+            history: History {
+                available: true,
+                shallow: false,
+                commits: vec![
+                    commit("touch", false, &["src/a.rs", "src/b/x.rs"]),
+                    commit("other", false, &["src/c/y.rs", "src/d/z.rs"]),
+                    commit("import", true, &["src/e/w.rs"]),
+                ],
+            },
+            policy_sha256: String::new(),
+            policy: Policy {
+                schema_version: 1,
+                rule_pack: "rust-v1".into(),
+                scanner_version: env!("CARGO_PKG_VERSION").into(),
+                scope: "repository".into(),
+                default_groups: vec!["all".into()],
+                exclude_directories: Vec::new(),
+                source_roles: Vec::new(),
+                limits: Limits {
+                    maximum_files: 10,
+                    maximum_pairs: 10,
+                    maximum_group_combinations: 10,
+                },
+                rules: BTreeMap::new(),
+                exceptions: Vec::new(),
+                resolved: ResolvedSelection::default(),
+            },
+            digest: "0".repeat(64),
+            mode: "test",
+            coverage: None,
+        };
+        let observations = divergent_change(&input);
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].measurements["changes"], 1);
+        assert_eq!(observations[0].measurements["responsibilities"], 1);
     }
 }

@@ -1171,9 +1171,15 @@ mod tests {
                 "typescript.temporary_fields",
                 "typescript-v1",
                 "a.ts",
-                "function open(a: number) {\n  return a;\n}\nfunction own(a: number)\n{\n  return a;\n}\nfunction one() { return 1; }\n",
+                "function open(a: number) {\n  return a;\n}\nfunction own(a: number)\n{\n  return a;\n}\nfunction one() { return 1; }\nfunction empty() {\n}\nabstract class K {\n  abstract m(): void;\n}\n",
             ),
-            owned(&[("open", 2, 3), ("own", 6, 7), ("one", 8, 8)])
+            owned(&[
+                ("open", 2, 3),
+                ("own", 6, 7),
+                ("one", 8, 8),
+                ("empty", 10, 10),
+                ("m", 12, 12)
+            ])
         );
         assert_eq!(
             lines(
