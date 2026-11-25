@@ -1,0 +1,8 @@
+# Clippy settings from BeautifulRust (https://github.com/morganlinton/BeautifulRust),
+# paired with the [lints] table in Cargo.toml. The max-fn-params-bools = 0 setting
+# is left out: private helpers here take bool flags next to their call sites.
+
+# Allow unwrap, expect, and printing in tests, where a panic is the assertion.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-print-in-tests = true
