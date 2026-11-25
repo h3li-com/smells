@@ -263,6 +263,18 @@ mod tests {
     }
 
     #[test]
+    fn records_under_the_root_outside_the_corpus_are_skipped() {
+        let lcov =
+            b"SF:/repo/src/other.rs\nDA:9,1\nend_of_record\nSF:src/lib.rs\nDA:1,1\nend_of_record\n";
+        let coverage = parse(lcov, Path::new("/repo"), &corpus()).expect("corpus record matches");
+        assert_eq!(
+            coverage.files.keys().collect::<Vec<_>>(),
+            ["src/lib.rs"],
+            "only scanned files keep coverage"
+        );
+    }
+
+    #[test]
     fn exact_last_line_is_not_stale() {
         let coverage = parse(
             b"SF:src/lib.rs\nDA:4,1\nend_of_record\n",
