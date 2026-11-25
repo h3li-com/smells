@@ -85,8 +85,8 @@ Compare distinct classes with different method-name sets using identifier-normal
 Group callables by their authored `case` label sequence. Match `minimum_sites` sharing at least `minimum_arms`; discriminated-union identity is not inferred.
 
 <a id="typescript-temporary-fields"></a>
-### `typescript.temporary_fields@1` — built in
-Treat optional, nullable, or `undefined` fields as lifecycle candidates and count direct `this.field` use across class methods. Apply the configured field, method, and maximum-use thresholds.
+### `typescript.temporary_fields@2` — built in
+Treat optional, nullable, or `undefined` fields as lifecycle candidates and count direct `this.field` use across non-constructor class methods; `constructor` initializes fields and is not lifecycle use. Apply the configured field, method, and maximum-use thresholds.
 
 <a id="typescript-forwarding-share"></a>
 ### `typescript.forwarding_share@1` — built in
@@ -117,16 +117,16 @@ For classes declaring an authored interface, compare direct method names with th
 For same-corpus inheritance, count base methods and derived overrides that explicitly reject them by throwing an error. Apply the inherited-member and unused-share thresholds.
 
 <a id="typescript-divergent-change"></a>
-### `typescript.divergent_change@1` — built in
-Inspect up to 200 commits and measure each current file's change count plus distinct top-level co-change responsibilities. Apply both configured minima. Without Git history this rule is incomplete, never clean.
+### `typescript.divergent_change@2` — built in
+Inspect up to 200 commits and measure each current file's change count plus distinct co-change responsibilities. A responsibility is the first module below the owning implementation root, after a leading `src` or `lib` and a top-level Python package (a directory with `__init__.py`); a file directly in that root is its own responsibility. The repository's initial commit is an import, not a change, and is skipped. Apply both configured minima. Without Git history this rule is incomplete, never clean.
 
 <a id="typescript-parallel-inheritance"></a>
 ### `typescript.parallel_inheritance@1` — built in
 Compare authored inheritance families and count shared child-role prefixes/suffixes across different bases. Match at least `minimum_parallel_pairs`; this detects parallel structure without claiming synchronized historical addition.
 
 <a id="typescript-shotgun-surgery"></a>
-### `typescript.shotgun_surgery@1` — built in
-Inspect up to 200 commits and count distinct top-level source responsibilities changed in each commit. Match owner count greater than `maximum_owners`. Without Git history this rule is incomplete, never clean.
+### `typescript.shotgun_surgery@2` — built in
+Inspect up to 200 commits and count distinct source responsibilities changed in each commit. A responsibility is the first module below the owning implementation root, after a leading `src` or `lib` and a top-level Python package (a directory with `__init__.py`); a file directly in that root is its own responsibility. The repository's initial commit is an import, not a change, and is skipped. Match owner count greater than `maximum_owners`. Without Git history this rule is incomplete, never clean.
 
 <a id="typescript-foreign-accesses"></a>
 ### `typescript.foreign_accesses@2` — built in
@@ -137,8 +137,8 @@ Measure each method that has an owned receiver: count its dotted member accesses
 Count foreign accesses to underscore/private-style members. Match forbidden accesses greater than `maximum_forbidden_accesses`; an explicit dependency contract may replace this visibility heuristic.
 
 <a id="typescript-library-capabilities"></a>
-### `typescript.library_capabilities@1` — built in
-Count authored prototype or foreign attribute mutation workarounds as missing-capability signals. Match failures greater than `maximum_failures`; capability tests may replace the heuristic.
+### `typescript.library_capabilities@2` — built in
+Count authored prototype or foreign attribute assignment workarounds (not `==`/`===` comparisons) as missing-capability signals. Match failures greater than `maximum_failures`; capability tests may replace the heuristic.
 
 <a id="typescript-navigation-chains"></a>
 ### `typescript.navigation_chains@2` — built in

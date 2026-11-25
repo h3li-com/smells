@@ -211,7 +211,11 @@ fn selection(rule: &str, mode: &str, parameters: Value) -> Value {
         }
         _ if rule.ends_with(".data_clumps")
             || rule.ends_with(".foreign_accesses")
-            || rule.ends_with(".navigation_chains") =>
+            || rule.ends_with(".navigation_chains")
+            || rule.ends_with(".divergent_change")
+            || rule.ends_with(".shotgun_surgery")
+            || rule.ends_with(".temporary_fields")
+            || rule.ends_with(".library_capabilities") =>
         {
             2
         }
@@ -321,7 +325,7 @@ fn portable_policy(language: &str) -> Value {
     add(
         "refused_bequest",
         "off",
-        json!({"minimum_inherited_members": 3, "minimum_unused_percent": 80}),
+        json!({"minimum_inherited_members": 3, "minimum_unused_percent": 67}),
     );
     add(
         "divergent_change",
@@ -3017,7 +3021,10 @@ fn default_python_scan_runs_inheritance_and_port_collectors() {
 fn default_python_scan_collects_git_history_without_an_evidence_bundle() {
     let policy: Value =
         serde_json::from_str(include_str!("../examples/python-quality-policy.json")).unwrap();
-    let workspace = Workspace::new("app.py", "value = 1\n", &policy);
+    let workspace = Workspace::new("app.py", "value = 0\n", &policy);
+    workspace.stage();
+    workspace.commit("initial import is not a change");
+    workspace.source("app.py", "value = 1\n");
     workspace.source("accounts/model.py", "value = 1\n");
     workspace.source("billing/model.py", "value = 1\n");
     workspace.source("shipping/model.py", "value = 1\n");
@@ -3036,6 +3043,41 @@ fn default_python_scan_collects_git_history_without_an_evidence_bundle() {
     let data = report(&output);
     matched_rule(&data, "python.divergent_change");
     matched_rule(&data, "python.shotgun_surgery");
+}
+
+#[test]
+fn history_rules_skip_the_initial_import_and_own_files_below_the_package() {
+    let policy: Value =
+        serde_json::from_str(include_str!("../examples/python-quality-policy.json")).unwrap();
+    let workspace = Workspace::new("shop/__init__.py", "", &policy);
+    for module in ["accounts", "billing", "shipping", "orders"] {
+        workspace.source(&format!("shop/{module}/model.py"), "value = 1\n");
+    }
+    workspace.stage();
+    workspace.commit("initial import");
+    workspace.source("shop/accounts/model.py", "value = 2\n");
+    workspace.source("shop/billing/model.py", "value = 2\n");
+    workspace.commit("two owners");
+
+    let output = workspace.check_path();
+    assert_eq!(output.status.code(), Some(0));
+    let data = report(&output);
+    let matched =
+        |rule: &str| {
+            data["findings"].as_array().unwrap().iter().any(|finding| {
+                finding["rule_id"] == rule && finding["evaluation"]["matched"] == true
+            })
+        };
+    assert!(!matched("python.shotgun_surgery"));
+    assert!(!matched("python.divergent_change"));
+
+    for module in ["accounts", "billing", "shipping", "orders"] {
+        workspace.source(&format!("shop/{module}/model.py"), "value = 3\n");
+    }
+    workspace.commit("four owners below one package");
+    let data = report(&workspace.check_path());
+    let surgery = matched_rule(&data, "python.shotgun_surgery");
+    assert_eq!(surgery["evaluation"]["observed"], 4, "{surgery}");
 }
 
 #[test]

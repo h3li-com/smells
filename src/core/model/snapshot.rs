@@ -33,6 +33,8 @@ pub struct History {
 #[derive(Clone, Debug)]
 pub struct HistoryCommit {
     pub id: String,
+    /// The commit has no parent: an initial import rather than a change.
+    pub root: bool,
     pub files: Vec<String>,
 }
 

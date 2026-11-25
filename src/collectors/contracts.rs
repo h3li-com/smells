@@ -153,9 +153,12 @@ pub(super) fn port_conformance(model: &SourceModel) -> Vec<Observation> {
             .iter()
             .filter_map(|base| resolve_declared_base(model, implementation, base, true))
         {
+            // A Rust trait method with a default body is provided, not required.
+            let rust = port.location.path.ends_with(".rs");
             let required = port
                 .methods
                 .iter()
+                .filter(|method| !(rust && method.body.is_some()))
                 .map(|method| method.name.as_str())
                 .collect::<BTreeSet<_>>();
             let missing = required
@@ -170,7 +173,7 @@ pub(super) fn port_conformance(model: &SourceModel) -> Vec<Observation> {
                     "collector": "authored_port_shape_v1",
                     "port": port.symbol,
                     "missing_methods": missing,
-                    "scope": "declared interface/Protocol/ABC method names",
+                    "scope": "declared interface/Protocol/ABC method names; Rust trait defaults are provided",
                 }),
             );
             candidate.related_symbols.push(port.symbol.clone());
@@ -341,7 +344,7 @@ pub(super) fn library_capabilities(
     static WORKAROUND: OnceLock<Regex> = OnceLock::new();
     let workaround = WORKAROUND.get_or_init(|| {
         Regex::new(
-            r#"(?m)(?:\b[A-Za-z_$][A-Za-z0-9_$]*\.prototype\.[A-Za-z_$][A-Za-z0-9_$]*\s*=|\bsetattr\s*\(\s*[A-Za-z_][A-Za-z0-9_.]*\s*,|\b[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*\s*=)"#,
+            r#"(?m)(?:\b[A-Za-z_$][A-Za-z0-9_$]*\.prototype\.[A-Za-z_$][A-Za-z0-9_$]*\s*=(?:[^=]|$)|\bsetattr\s*\(\s*[A-Za-z_][A-Za-z0-9_.]*\s*,|\b[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*\s*=(?:[^=]|$))"#,
         )
         .expect("valid library workaround expression")
     });
@@ -388,6 +391,7 @@ mod tests {
             name: name.into(),
             symbol: format!("domain::{name}"),
             location: location("src/domain.rs"),
+            body_line: 1,
             end_line: 1,
             type_parameters: Vec::new(),
             body: body.map(Arc::from),
@@ -614,5 +618,51 @@ mod tests {
         .unwrap();
         assert_eq!(observations.len(), 1);
         assert_eq!(observations[0].symbol, "src/ext.rs::ReadExt");
+    }
+
+    #[test]
+    fn library_workarounds_count_assignments_but_not_comparisons() {
+        let source = concat!(
+            "if (this.cart.lines.length === 0) { stop(); }\n",
+            "if (order.cart.total == 0 || a.b.c !== d || a.b.c <= d) { stop(); }\n",
+            "Array.prototype.last = function () { return this[this.length - 1]; };\n",
+            "if (Array.prototype.first === undefined) { stop(); }\n",
+            "window.app.config = {};\n",
+            "vendor.client.retry =\n  3;\n",
+        );
+        let observations = library_capabilities(
+            &rule("typescript.library_capabilities"),
+            &SourceModel::default(),
+            &input(BTreeMap::from([(
+                "src/patch.ts".to_string(),
+                source.to_string(),
+            )])),
+        )
+        .unwrap();
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].measurements["failures"], 3);
+        assert_eq!(observations[0].location.line, 3);
+    }
+
+    #[test]
+    fn rust_port_conformance_does_not_require_trait_default_methods() {
+        let mut port = class("src/port.rs", "Repository", "Repository");
+        port.interface = true;
+        port.methods = vec![
+            function("get", None),
+            function("save", None),
+            function("update", Some("{ self.save() }")),
+        ];
+        let mut table = class("src/table.rs", "Table", "Table");
+        table.bases = vec!["Repository".into()];
+        table.methods = vec![function("get", Some("{}"))];
+
+        let observations = port_conformance(&SourceModel {
+            classes: vec![port, table],
+            ..SourceModel::default()
+        });
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].measurements["failures"], 1);
+        assert_eq!(observations[0].evidence["missing_methods"], json!(["save"]));
     }
 }

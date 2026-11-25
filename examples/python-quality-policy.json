@@ -95,7 +95,7 @@
       }
     },
     "python.temporary_fields": {
-      "version": 1,
+      "version": 2,
       "mode": "report",
       "parameters": {
         "minimum_fields": 3,
@@ -185,11 +185,11 @@
       "mode": "report",
       "parameters": {
         "minimum_inherited_members": 3,
-        "minimum_unused_percent": 80
+        "minimum_unused_percent": 67
       }
     },
     "python.divergent_change": {
-      "version": 1,
+      "version": 2,
       "mode": "report",
       "parameters": {
         "minimum_changes": 3,
@@ -204,7 +204,7 @@
       }
     },
     "python.shotgun_surgery": {
-      "version": 1,
+      "version": 2,
       "mode": "report",
       "parameters": {
         "maximum_owners": 3
@@ -226,7 +226,7 @@
       }
     },
     "python.library_capabilities": {
-      "version": 1,
+      "version": 2,
       "mode": "report",
       "parameters": {
         "maximum_failures": 0

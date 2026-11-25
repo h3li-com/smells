@@ -1294,6 +1294,7 @@ mod tests {
     fn history_is_healthy_only_when_complete_and_unshallow() {
         let commit = |id: &str| HistoryCommit {
             id: id.into(),
+            root: false,
             files: vec!["src/lib.rs".into()],
         };
         let complete = History {

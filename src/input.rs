@@ -480,7 +480,11 @@ fn snapshot_digest(
     parts.push(b"git_history_available");
     parts.push(if history.available { b"true" } else { b"false" });
     for commit in &history.commits {
-        parts.push(b"git_commit");
+        parts.push(if commit.root {
+            b"git_root_commit".as_slice()
+        } else {
+            b"git_commit".as_slice()
+        });
         parts.push(commit.id.as_bytes());
         for path in &commit.files {
             parts.push(path.as_bytes());
@@ -532,7 +536,7 @@ fn captured_history_at(
         "-c",
         "core.quotepath=false",
         "log",
-        "--format=%x1e%H",
+        "--format=%x1e%H %P",
         "--name-only",
         "--no-renames",
         "--relative",
@@ -575,9 +579,14 @@ fn parse_history_log(log: &str, files: &BTreeMap<String, String>, shallow: bool)
     let mut commits = Vec::new();
     for block in blocks {
         let mut lines = block.lines().filter(|line| !line.trim().is_empty());
-        let Some(id) = lines.next() else {
+        let Some(header) = lines.next() else {
             continue;
         };
+        let mut ids = header.split_whitespace();
+        let Some(id) = ids.next() else {
+            continue;
+        };
+        let root = ids.next().is_none();
         let mut changed = lines
             .map(str::trim)
             .filter(|path| files.contains_key(*path))
@@ -587,7 +596,8 @@ fn parse_history_log(log: &str, files: &BTreeMap<String, String>, shallow: bool)
         changed.dedup();
         if !changed.is_empty() {
             commits.push(HistoryCommit {
-                id: id.trim().into(),
+                id: id.into(),
+                root,
                 files: changed,
             });
         }
@@ -1411,7 +1421,7 @@ mod tests {
                     if index == 0 {
                         format!("\u{1e}commit-{index}\nb.rs\na.rs\na.rs\nuntracked.rs\n")
                     } else {
-                        format!("\u{1e}commit-{index}\nuntracked.rs\n")
+                        format!("\u{1e}commit-{index} parent-{index}\nuntracked.rs\n")
                     }
                 })
                 .collect()
@@ -1428,11 +1438,19 @@ mod tests {
         assert_eq!(full_shallow.commits.len(), 1);
         assert_eq!(full_shallow.commits[0].id, "commit-0");
         assert_eq!(full_shallow.commits[0].files, vec!["a.rs", "b.rs"]);
+        assert!(full_shallow.commits[0].root);
 
         let non_shallow = parse_history_log(&make_log(1), &files, false);
         assert!(non_shallow.available);
         assert!(!non_shallow.shallow);
         assert_eq!(non_shallow.commits.len(), 1);
+
+        let parented =
+            parse_history_log("\u{1e}child root\na.rs\n\u{1e}root\nb.rs\n", &files, false);
+        assert_eq!(parented.commits[0].id, "child");
+        assert!(!parented.commits[0].root);
+        assert_eq!(parented.commits[1].id, "root");
+        assert!(parented.commits[1].root);
     }
 
     #[test]

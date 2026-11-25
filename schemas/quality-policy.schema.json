@@ -27,6 +27,9 @@
         "rust.lazy_class": {"$ref":"#/$defs/selection_v2"},
         "rust.unused_code": {"$ref":"#/$defs/selection_v2"},
         "rust.dependency_contract": {"$ref":"#/$defs/selection_v2"},
+        "rust.divergent_change": {"$ref":"#/$defs/selection_v2"},
+        "rust.shotgun_surgery": {"$ref":"#/$defs/selection_v2"},
+        "rust.port_conformance": {"$ref":"#/$defs/selection_v2"},
         "rust.function_crap": {"$ref":"#/$defs/selection_v3"}
       },
       "additionalProperties": {"$ref":"#/$defs/selection"}

@@ -287,7 +287,11 @@ pub(super) fn temporary_fields(rule: &Rule, model: &SourceModel) -> Vec<Observat
             let methods = class
                 .methods
                 .iter()
-                .filter(|method| method.body.is_some())
+                // A constructor initializes every field, so it never shows lifecycle use.
+                .filter(|method| {
+                    method.body.is_some()
+                        && !matches!(method.name.as_str(), "__init__" | "constructor")
+                })
                 .collect::<Vec<_>>();
             if temporary.is_empty() || methods.is_empty() {
                 return None;
@@ -398,7 +402,7 @@ pub(super) fn function_crap(
             let measured = coverage.and_then(|coverage| {
                 let (covered, instrumented) = coverage.span(
                     &function.location.path,
-                    function.location.line,
+                    function.body_line,
                     function.end_line,
                 )?;
                 Some((covered_crap(complexity, covered, instrumented)?, covered, instrumented, &coverage.sha256))
@@ -413,7 +417,7 @@ pub(super) fn function_crap(
                         "covered_lines": covered,
                         "instrumented_lines": instrumented,
                         "coverage_sha256": sha256,
-                        "interpretation": "CRAP from supplied LCOV line coverage over the declaration span",
+                        "interpretation": "CRAP from supplied LCOV line coverage over the function body",
                     }),
                 ),
                 None => (
@@ -593,6 +597,7 @@ mod tests {
             name: name.into(),
             symbol: format!("src/domain.rs::{name}"),
             location: location(1),
+            body_line: 1,
             end_line: 1,
             type_parameters: Vec::new(),
             body: body.map(Arc::from),
@@ -716,6 +721,7 @@ mod tests {
         let mut account = class(
             "Account",
             vec![
+                function("__init__", Some("self.pending = None")),
                 function("first", Some("self.pending = 1")),
                 function("second", Some("return self.other")),
                 function("abstract", None),
@@ -869,10 +875,12 @@ mod tests {
     #[test]
     fn function_crap_uses_measured_line_coverage_and_keeps_the_bound_without_records() {
         let mut covered = function("covered", Some("{ if ready { 1 } else { 2 } }"));
+        covered.body_line = 2;
         covered.end_line = 4;
         covered.complexity = Some(2);
         let mut unrecorded = function("unrecorded", Some("{ if ready { 1 } else { 2 } }"));
         unrecorded.location = location(10);
+        unrecorded.body_line = 11;
         unrecorded.end_line = 12;
         unrecorded.complexity = Some(2);
         let model = SourceModel {
@@ -898,7 +906,7 @@ mod tests {
                 "covered_lines": 1,
                 "instrumented_lines": 2,
                 "coverage_sha256": "abc",
-                "interpretation": "CRAP from supplied LCOV line coverage over the declaration span",
+                "interpretation": "CRAP from supplied LCOV line coverage over the function body",
             })
         );
         assert_eq!(observations[1].measurements["numerator"], 6);

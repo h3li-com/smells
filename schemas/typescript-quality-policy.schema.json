@@ -136,6 +136,18 @@
         "typescript.navigation_chains": {
           "$ref": "#/$defs/selection_v2"
         },
+        "typescript.divergent_change": {
+          "$ref": "#/$defs/selection_v2"
+        },
+        "typescript.shotgun_surgery": {
+          "$ref": "#/$defs/selection_v2"
+        },
+        "typescript.temporary_fields": {
+          "$ref": "#/$defs/selection_v2"
+        },
+        "typescript.library_capabilities": {
+          "$ref": "#/$defs/selection_v2"
+        },
         "typescript.function_crap": {
           "$ref": "#/$defs/selection_v3"
         }

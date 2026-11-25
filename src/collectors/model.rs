@@ -19,6 +19,9 @@ pub(super) struct FunctionFact {
     pub(super) name: String,
     pub(super) symbol: String,
     pub(super) location: Location,
+    /// First line holding only body code: line coverage starts here, so a declaration
+    /// line that runs at import or definition time never credits an uncalled body.
+    pub(super) body_line: usize,
     /// Last source line of the declaration, used to map line coverage.
     pub(super) end_line: usize,
     pub(super) type_parameters: Vec<String>,
@@ -423,6 +426,12 @@ fn rust_class_key(path: &str, module_path: &str, name: &str) -> String {
     format!("{path}::{}", rust_owner(module_path, name))
 }
 
+/// The line after a multi-line brace body's `{`, so the header row (`fn f() {`) never
+/// counts as body coverage; a one-line body keeps its only line.
+fn brace_body_line(open: usize, close: usize) -> usize {
+    if close > open { open + 1 } else { open }
+}
+
 fn rust_function(
     path: &str,
     owner: Option<&str>,
@@ -445,6 +454,13 @@ fn rust_function(
             |owner| format!("{path}::{owner}.{name}"),
         ),
         location: rust_location(path, signature.ident.span()),
+        body_line: body.map_or_else(
+            || signature.ident.span().start().line,
+            |body| {
+                let span = body.brace_token.span;
+                brace_body_line(span.open().start().line, span.close().end().line)
+            },
+        ),
         end_line: body.map_or_else(
             || signature.ident.span().end().line,
             |body| body.brace_token.span.close().end().line,
@@ -908,6 +924,15 @@ fn portable_function(
             |owner| format!("{path}::{owner}.{name}"),
         ),
         location: node_location(path, node),
+        body_line: body_node.map_or(node.start_position().row + 1, |body| {
+            let (open, close) = (body.start_position().row + 1, body.end_position().row + 1);
+            // A Python block starts at its first statement; a brace block at its `{`.
+            if source.as_bytes().get(body.start_byte()) == Some(&b'{') {
+                brace_body_line(open, close)
+            } else {
+                open
+            }
+        }),
         end_line: node.end_position().row + 1,
         type_parameters: portable_type_parameters(node, source, language),
         source: text_of(node, authored_code).into(),
@@ -1107,9 +1132,57 @@ mod tests {
             model
                 .functions
                 .iter()
-                .map(|function| (function.location.line, function.end_line))
+                .map(|function| (
+                    function.location.line,
+                    function.body_line,
+                    function.end_line
+                ))
                 .collect::<Vec<_>>(),
-            [(4, 5), (6, 7), (9, 10)]
+            [(4, 5, 5), (6, 7, 7), (9, 10, 10)]
+        );
+    }
+
+    #[test]
+    fn coverage_starts_below_the_declaration_line_in_every_language() {
+        let lines = |rule_name: &str, pack: &str, path: &str, source: &str| {
+            source_model(&rule(rule_name), &input(pack, &[(path, source)]))
+                .unwrap()
+                .functions
+                .iter()
+                .map(|function| (function.name.clone(), function.body_line, function.end_line))
+                .collect::<Vec<_>>()
+        };
+        let owned = |rows: &[(&str, usize, usize)]| {
+            rows.iter()
+                .map(|(name, body, end)| ((*name).to_string(), *body, *end))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            lines(
+                "python.temporary_fields",
+                "python-v1",
+                "a.py",
+                "def wide(\n    a,\n):\n    return a\n\ndef one(): return 1\n",
+            ),
+            owned(&[("wide", 4, 4), ("one", 6, 6)])
+        );
+        assert_eq!(
+            lines(
+                "typescript.temporary_fields",
+                "typescript-v1",
+                "a.ts",
+                "function open(a: number) {\n  return a;\n}\nfunction own(a: number)\n{\n  return a;\n}\nfunction one() { return 1; }\n",
+            ),
+            owned(&[("open", 2, 3), ("own", 6, 7), ("one", 8, 8)])
+        );
+        assert_eq!(
+            lines(
+                "rust.temporary_fields",
+                "rust-v1",
+                "src/lib.rs",
+                "fn open(a: u8) -> u8 {\n    a\n}\nfn one() -> u8 { 1 }\n",
+            ),
+            owned(&[("open", 2, 3), ("one", 4, 4)])
         );
     }
 

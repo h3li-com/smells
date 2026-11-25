@@ -3946,7 +3946,7 @@ fn coverage_replaces_estimated_crap_and_rejects_stale_artifacts() {
     let crap = finding(&measured, "rust.function_crap", "::pick");
     assert_eq!(
         crap["evaluation"]["observed"],
-        json!({"numerator": 33, "denominator": 16})
+        json!({"numerator": 58, "denominator": 27})
     );
     assert!(!matched(&measured, "rust.function_crap"));
     let (code, data) = doctor(&workspace, &[]);
