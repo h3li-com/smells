@@ -5008,12 +5008,12 @@ function broken( {
 
 #[test]
 fn typescript_typed_tagged_templates_parse_without_hiding_other_errors() {
-    let valid = r#"declare const sql: any;
+    let valid = r"declare const sql: any;
 export function names(limit: number) {
   const rows = sql<{ readonly name: string }>`SELECT name LIMIT ${limit > 0 ? limit : 1}`;
   return rows;
 }
-"#;
+";
     let policy: Value =
         serde_json::from_str(include_str!("../examples/typescript-quality-policy.json")).unwrap();
     let workspace = Workspace::new("query.ts", valid, &policy);
