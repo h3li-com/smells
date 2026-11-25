@@ -40,7 +40,7 @@
     "rust.data_class": {"version":1,"mode":"report","parameters":{"minimum_fields":2,"maximum_operations":0}},
     "rust.lazy_class": {"version":2,"mode":"report","parameters":{"maximum_fields":1,"maximum_functions":1,"maximum_lines":5}},
     "rust.forwarding_share": {"version":1,"mode":"report","parameters":{"minimum_methods":5,"minimum_share_percent":80}},
-    "rust.function_crap": {"version":2,"mode":"report","parameters":{"maximum":5}},
+    "rust.function_crap": {"version":3,"mode":"required","parameters":{"warning_maximum":5,"maximum":10}},
     "rust.unused_code": {"version":2,"mode":"required","parameters":{"maximum_findings":0}},
     "rust.unused_type_parameters": {"version":1,"mode":"report","parameters":{"maximum_findings":0}},
     "rust.nominal_slot_contract": {"version":1,"mode":"report","parameters":{"maximum_mismatches":0}},

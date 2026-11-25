@@ -32,8 +32,7 @@ All notable changes to Smells are recorded here. Release tags use `vMAJOR.MINOR.
   command that produces LCOV for the project's language. Blocking findings are
   never hidden. The burndown compares both sides without non-blocking CRAP so
   that adding coverage does not read as a regression.
-- Count cyclomatic complexity on the syntax tree and move `function_crap` to
-  version `2` in every language. The old lexical count read keywords inside
+- Count cyclomatic complexity on the syntax tree in every language. The old lexical count read keywords inside
   strings and comments, missed Rust `?`, and counted closure `||` and `=>`.
   Rust now uses cargo-crap's decision points (each `?` and match arm, `if`,
   `for`, `while`, `loop`, `&&`, `||`) and agrees with cargo-crap on every
@@ -43,6 +42,13 @@ All notable changes to Smells are recorded here. Release tags use `vMAJOR.MINOR.
   `complexity` rule (optional chaining, default values and logical assignment
   count; `default` does not) and agrees on 16,741 of 16,744 functions. Closures,
   lambdas and nested items are their own scope.
+- Score `function_crap` in bands and move it to version `3` in every language,
+  with parameters `warning_maximum` (5) and `maximum` (10). A score of 5 or less
+  is not a finding. A score above 5 is a finding, and it blocks only when the
+  rule is `required`, the score is above 10 and it was measured from supplied
+  LCOV coverage. Every other match is a non-blocking warning whose explanation
+  says why. A zero-coverage upper bound never blocks. The starter policies make
+  `function_crap` `required`, so a measured score above 10 now fails the check.
 - Move `rust.dependency_contract` to version `2`. A private field is visible in
   its own module and every descendant module, so only matching accesses from
   descendant module files of the owner's module count; accesses elsewhere cannot

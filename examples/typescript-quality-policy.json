@@ -145,10 +145,11 @@
       }
     },
     "typescript.function_crap": {
-      "version": 2,
-      "mode": "report",
+      "version": 3,
+      "mode": "required",
       "parameters": {
-        "maximum": 5
+        "warning_maximum": 5,
+        "maximum": 10
       }
     },
     "typescript.unused_code": {

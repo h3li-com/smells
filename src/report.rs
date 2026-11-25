@@ -134,6 +134,7 @@ pub(crate) struct ReportError {
 struct RoleAdjustedRelations {
     related: FindingRelations,
     role_context: Option<RoleContext>,
+    advisory: Option<&'static str>,
 }
 
 pub(crate) struct RoleAdjustedMaximum<'a> {
@@ -506,6 +507,7 @@ impl Report {
                     locations: Vec::new(),
                 },
                 role_context: None,
+                advisory: None,
             },
         );
     }
@@ -537,6 +539,37 @@ impl Report {
             RoleAdjustedRelations {
                 related,
                 role_context: None,
+                advisory: None,
+            },
+        );
+    }
+
+    /// Records an evaluated observation; a matched finding with an `advisory` reason never
+    /// blocks, and the reason is appended to its explanation.
+    pub(crate) fn evaluated_finding(
+        &mut self,
+        policy: &Policy,
+        id: &str,
+        observed: (&str, &Location),
+        evaluation: crate::evidence_evaluators::Evaluation,
+        related: FindingRelations,
+        advisory: Option<&'static str>,
+    ) {
+        let (symbol, location) = observed;
+        self.finding_with_relations_and_role(
+            policy,
+            id,
+            symbol,
+            location,
+            evaluation.metric,
+            evaluation.observed,
+            evaluation.comparison,
+            evaluation.threshold,
+            evaluation.matched,
+            RoleAdjustedRelations {
+                related,
+                role_context: None,
+                advisory,
             },
         );
     }
@@ -558,6 +591,7 @@ impl Report {
         let RoleAdjustedRelations {
             related,
             role_context,
+            advisory,
         } = adjusted;
         let FindingRelations {
             evidence,
@@ -614,17 +648,21 @@ impl Report {
         let reported_by_role = role_context
             .as_ref()
             .is_some_and(|role| role.disposition == "reported_by_role");
+        let blocking = policy.required(id) && !reported_by_role && advisory.is_none();
         let status = if reported_by_role {
             "reported_by_role"
-        } else if policy.required(id) {
+        } else if blocking {
             "violation"
         } else {
             "indicator"
         };
-        let explanation = format!(
+        let mut explanation = format!(
             "Observed {} = {}; this satisfies the configured match condition {} {}.",
             metric, evaluation.observed, comparison, evaluation.threshold
         );
+        if let Some(advisory) = advisory {
+            explanation = format!("{explanation} {advisory}");
+        }
         let headline = format!("{smell}: {id} {status}");
         self.findings.push(Finding {
             identity: model::FindingIdentity {
@@ -666,7 +704,7 @@ impl Report {
                 },
             },
             status: status.into(),
-            blocking: policy.required(id) && !reported_by_role,
+            blocking,
             role_context,
             suppression: None,
             evidence,
@@ -760,6 +798,7 @@ impl Report {
                     locations: Vec::new(),
                 },
                 role_context: observation.role_context,
+                advisory: None,
             },
         );
     }

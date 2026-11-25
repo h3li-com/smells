@@ -3819,6 +3819,76 @@ fn policy_defaults_to_quality_policy_json_in_the_scanned_directory() {
 }
 
 #[test]
+fn crap_warns_from_six_and_blocks_only_measured_scores_above_ten() {
+    let workspace = Workspace::new(
+        "pub fn pick(a: bool, b: bool) -> u8 {\n    if a {\n        1\n    } else if b {\n        2\n    } else {\n        3\n    }\n}\n",
+    );
+    init_git_repo(&workspace.path);
+    git_stage_and_commit(&workspace.path, "initial");
+    let lcov = |hits: [u8; 9]| {
+        let lines = hits
+            .iter()
+            .enumerate()
+            .map(|(index, hit)| format!("DA:{},{hit}\n", index + 1))
+            .collect::<String>();
+        workspace.source(
+            "lcov.info",
+            &format!("SF:src/lib.rs\n{lines}end_of_record\n"),
+        );
+    };
+    let check = |coverage: bool| {
+        let mut args = vec!["check", "--path", ".", "--policy", "quality-policy.json"];
+        if coverage {
+            args.extend(["--coverage", "lcov.info"]);
+        }
+        args.extend(["--format", "json"]);
+        let output = workspace.command(&args);
+        (output.status.code(), report(&output))
+    };
+    let crap = |data: &Value| {
+        let found = finding(data, "rust.function_crap", "::pick");
+        (
+            found["status"].as_str().unwrap().to_owned(),
+            found["blocking"].as_bool().unwrap(),
+            found["diagnostic"]["explanation"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+        )
+    };
+
+    let (code, data) = check(false);
+    let (status, blocking, explanation) = crap(&data);
+    assert_eq!(
+        (code, status.as_str(), blocking),
+        (Some(0), "indicator", false)
+    );
+    assert!(explanation.contains("assumes 0% coverage"), "{explanation}");
+
+    lcov([1, 1, 1, 0, 0, 0, 0, 0, 0]);
+    let (code, data) = check(true);
+    let (status, blocking, explanation) = crap(&data);
+    assert_eq!(
+        (code, status.as_str(), blocking),
+        (Some(0), "indicator", false)
+    );
+    assert!(explanation.contains("warning band"), "{explanation}");
+
+    lcov([0; 9]);
+    let (code, data) = check(true);
+    let (status, blocking, _) = crap(&data);
+    assert_eq!(
+        (code, status.as_str(), blocking),
+        (Some(1), "violation", true)
+    );
+
+    lcov([1; 9]);
+    let (code, data) = check(true);
+    assert_eq!(code, Some(0));
+    assert!(!matched(&data, "rust.function_crap"));
+}
+
+#[test]
 fn coverage_replaces_estimated_crap_and_rejects_stale_artifacts() {
     let workspace = Workspace::new(
         "pub fn pick(ready: bool) -> u8 {\n    if ready {\n        1\n    } else {\n        2\n    }\n}\n",

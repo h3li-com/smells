@@ -27,7 +27,7 @@
         "rust.lazy_class": {"$ref":"#/$defs/selection_v2"},
         "rust.unused_code": {"$ref":"#/$defs/selection_v2"},
         "rust.dependency_contract": {"$ref":"#/$defs/selection_v2"},
-        "rust.function_crap": {"$ref":"#/$defs/selection_v2"}
+        "rust.function_crap": {"$ref":"#/$defs/selection_v3"}
       },
       "additionalProperties": {"$ref":"#/$defs/selection"}
     },
@@ -74,6 +74,12 @@
       "allOf":[
         {"$ref":"#/$defs/selection_contract"},
         {"properties":{"version":{"const":2}}}
+      ]
+    },
+    "selection_v3": {
+      "allOf":[
+        {"$ref":"#/$defs/selection_contract"},
+        {"properties":{"version":{"const":3}}}
       ]
     }
   }

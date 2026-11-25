@@ -113,7 +113,7 @@ Exit `2` **never** means clean. Errors always outrank violations.
 Every scan checks **all 28 rules across all 23 smells**, separated into two levels so CI stays strict without drowning humans or coding agents in false positives:
 
 - **Hard blockers (`"mode": "required"`):** Fail `smells check` with exit `1` and always appear at the top of the Issue Index. Starter policies set **Bloaters** (Long Method, Long Parameter List, Large Class), **Duplicate Code** (`duplicate_functions`), and **Dead Code** (`unused_code`) to `required` by default—and you can flip any additional rule to `"required"` in `quality-policy.json`.
-- **Review warnings (`"mode": "report"`):** Structural and history heuristics (such as `data_class`, `lazy_class`, `function_crap`, `divergent_change`, `shotgun_surgery`, and `navigation_chains`) that still run on every scan and appear as non-blocking `review` findings in `smells-findings.log` and JSON, without bloating the 4-line stdout summary or failing CI on normal DTOs/wrappers.
+- **Review warnings (`"mode": "report"`):** Structural and history heuristics (such as `data_class`, `lazy_class`, `divergent_change`, `shotgun_surgery`, and `navigation_chains`) that still run on every scan and appear as non-blocking `review` findings in `smells-findings.log` and JSON, without bloating the 4-line stdout summary or failing CI on normal DTOs/wrappers.
 
 Use the two commands for their distinct jobs:
 
@@ -244,7 +244,7 @@ Instead of excluding test suites or migration directories and losing visibility,
 
 - **Monorepos:** Run from the repo root. Files are grouped automatically under their nearest `Cargo.toml`, `pyproject.toml`, or `package.json` (or `__unowned__`). Mixed-language repos use one policy file and one scan per language pack.
 - **Rule groups:** Starter policies run `all` 28 rules. Narrow intentionally with `--only-group`, `--group`, or `--no-group` (`source`, `evidence`, or any of the five Refactoring.Guru categories). Preview with `smells policy show`.
-- **Measured CRAP:** Pass `--coverage lcov.info` (any LCOV file from `cargo llvm-cov`, `pytest --cov`, or `vitest --coverage`) to score CRAP from real line coverage. `smells doctor` finds `lcov.info` automatically and, without it, hides non-blocking 0%-coverage estimates instead of flooding you.
+- **Measured CRAP:** Pass `--coverage lcov.info` (any LCOV file from `cargo llvm-cov`, `pytest --cov`, or `vitest --coverage`) to score CRAP from real line coverage. Starter policies score CRAP in bands: 5 or less is fine, 6 to 10 is a non-blocking warning, and above 10 blocks. Only a score measured from coverage can block; without coverage, scores assume 0% coverage and stay warnings. `smells doctor` finds `lcov.info` automatically and, without it, hides those 0%-coverage estimates instead of flooding you.
 - **Optional higher-fidelity evidence:** Built-in collectors work standalone with zero setup. If you already produce compiler, coverage, type, or architecture facts, pass `--evidence provider-evidence.json` (cannot be combined with `--base`). See [provider evidence](docs/provider-evidence.md).
 
 ---

@@ -211,11 +211,11 @@ fn selection(rule: &str, mode: &str, parameters: Value) -> Value {
         }
         _ if rule.ends_with(".data_clumps")
             || rule.ends_with(".foreign_accesses")
-            || rule.ends_with(".navigation_chains")
-            || rule.ends_with(".function_crap") =>
+            || rule.ends_with(".navigation_chains") =>
         {
             2
         }
+        _ if rule.ends_with(".function_crap") => 3,
         _ => 1,
     };
     json!({"version": version, "mode": mode, "parameters": parameters})
@@ -301,7 +301,11 @@ fn portable_policy(language: &str) -> Value {
         "off",
         json!({"minimum_methods": 5, "minimum_share_percent": 80}),
     );
-    add("function_crap", "off", json!({"maximum": 5}));
+    add(
+        "function_crap",
+        "off",
+        json!({"warning_maximum": 5, "maximum": 10}),
+    );
     add("unused_code", "off", json!({"maximum_findings": 0}));
     add(
         "unused_type_parameters",
