@@ -119,6 +119,32 @@ All notable changes to Smells are recorded here. Release tags use `vMAJOR.MINOR.
   CODEOWNERS coverage; summarizes all 23 smells (`blocking` vs. `ignored` vs.
   `review`) plus the top 5 hotspot files. Broken prerequisites or scan errors
   exit `2`; governance gaps and diagnostic smell summaries exit `0`.
+- Parse TypeScript tagged templates with type arguments, such as
+  ``sql<Row>`SELECT 1` ``. Tree-sitter-typescript 0.23.2, the latest release,
+  recovers them with a zero-width `!`, and the scan exited `2` with a parse
+  error. That inserted `!` is no longer a syntax error; every other error or
+  missing node still exits `2`.
+- Parse TypeScript import types that tree-sitter-typescript 0.23.2 rejects:
+  `import("m").T<U>`, `import("m").T[K]`, and `import("m")` or
+  `typeof import("m").f` inside call type arguments. When a file fails its first
+  parse, Smells reparses a same-length copy with these import types blanked.
+  Dynamic `import("m")` calls are left as they are, and any error that remains
+  still exits `2`.
+- Parse invalid `\u` and `\x` escapes in tagged templates, such as
+  ``String.raw`C:\Users\alice\user.ts` ``. ECMAScript allows them because the
+  tag receives the raw text, but tree-sitter rejects them. The reparse turns
+  each into the same-length `\q`. The same escapes in an untagged template or a
+  string are real syntax errors and still exit `2`. This also covers a template
+  that opens on such an escape, as in ``String.raw`\u-1` ``, where tree-sitter
+  loses the template node. A template whose `${}` substitution holds a string,
+  comment, regex or nested template is not rewritten, so it still exits `2`.
+- Parse TypeScript `in` and `out` variance annotations on type parameters, such
+  as `class Declaration<out Handler>`, which tree-sitter-typescript 0.23.2
+  rejects. The reparse blanks the modifiers in type parameter lists that failed
+  to parse; any error that remains still exits `2`.
+- Key the portable fact cache on the TypeScript compatibility parser as well.
+  Before this, a change to which files parse could still serve a cached parse
+  error from an earlier build for files whose content had not changed.
 
 ## 0.6.0 - 2026-10-14
 

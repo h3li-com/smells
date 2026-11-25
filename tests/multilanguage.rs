@@ -5007,6 +5007,150 @@ function broken( {
 }
 
 #[test]
+fn typescript_typed_tagged_templates_parse_without_hiding_other_errors() {
+    let valid = r"declare const sql: any;
+export function names(limit: number) {
+  const rows = sql<{ readonly name: string }>`SELECT name LIMIT ${limit > 0 ? limit : 1}`;
+  return rows;
+}
+";
+    let policy: Value =
+        serde_json::from_str(include_str!("../examples/typescript-quality-policy.json")).unwrap();
+    let workspace = Workspace::new("query.ts", valid, &policy);
+    workspace.initialize_git();
+    let output = workspace.check_path();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(report(&output)["errors"].as_array().unwrap().is_empty());
+
+    fs::write(
+        workspace.path.join("broken.ts"),
+        "const rows = sql<{ name: string }>`SELECT name`;\nfunction broken( {\n",
+    )
+    .unwrap();
+    let output = workspace.check_path();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        report(&output)["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error == "parse error in broken.ts")
+    );
+}
+
+#[test]
+fn typescript_import_types_parse_without_hiding_other_errors() {
+    let valid = r#"declare const vi: any;
+type Rows = import("./rows").Page<string>;
+type Row = import("./rows").Rows[number];
+export const load = vi.fn<typeof import("./rows").load>();
+export async function lazy(): Promise<Rows> {
+  const module = await import("./rows");
+  return module.load();
+}
+"#;
+    let policy: Value =
+        serde_json::from_str(include_str!("../examples/typescript-quality-policy.json")).unwrap();
+    let workspace = Workspace::new("types.ts", valid, &policy);
+    workspace.initialize_git();
+    let output = workspace.check_path();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(report(&output)["errors"].as_array().unwrap().is_empty());
+
+    fs::write(
+        workspace.path.join("broken.ts"),
+        "type Rows = import(\"./rows\").Page<string>;\nfunction broken( {\n",
+    )
+    .unwrap();
+    let output = workspace.check_path();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        report(&output)["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error == "parse error in broken.ts")
+    );
+}
+
+#[test]
+fn typescript_raw_tagged_template_escapes_parse_without_hiding_other_errors() {
+    let valid = r#"export const windowsPath = String.raw`C:\Users\alice\src\user.ts:261:7`;
+export const rtf = String.raw`{\rtf1 A{\deleted\uc1\u945\deleted0 old}B}`;
+export const surrogates = "x" + String.raw`\u-10179?\u-8576? After}`;
+"#;
+    let policy: Value =
+        serde_json::from_str(include_str!("../examples/typescript-quality-policy.json")).unwrap();
+    let workspace = Workspace::new("paths.ts", valid, &policy);
+    workspace.initialize_git();
+    let output = workspace.check_path();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(report(&output)["errors"].as_array().unwrap().is_empty());
+
+    fs::write(
+        workspace.path.join("broken.ts"),
+        "export const path = `C:\\Users\\alice\\src\\user.ts`;\n",
+    )
+    .unwrap();
+    let output = workspace.check_path();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        report(&output)["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error == "parse error in broken.ts")
+    );
+}
+
+#[test]
+fn typescript_variance_annotations_parse_without_hiding_other_errors() {
+    let valid = "export class Declaration<out Handler> {\n  constructor(readonly handler: Handler) {}\n}\nexport interface Sink<in T, const out K extends string> {\n  put(value: T): K;\n}\nexport type Read<out T> = () => T;\n";
+    let policy: Value =
+        serde_json::from_str(include_str!("../examples/typescript-quality-policy.json")).unwrap();
+    let workspace = Workspace::new("variance.ts", valid, &policy);
+    workspace.initialize_git();
+    let output = workspace.check_path();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(report(&output)["errors"].as_array().unwrap().is_empty());
+
+    fs::write(
+        workspace.path.join("broken.ts"),
+        "export class Box<out T U> {}\n",
+    )
+    .unwrap();
+    let output = workspace.check_path();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        report(&output)["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error == "parse error in broken.ts")
+    );
+}
+
+#[test]
 fn typescript_built_in_class_model_honors_direct_member_contract() {
     let mut policy = portable_policy("typescript");
     require_only(

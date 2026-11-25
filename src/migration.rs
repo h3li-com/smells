@@ -707,7 +707,7 @@ fn typescript_class_shapes(source: &str) -> Option<Vec<TypescriptClassShape>> {
         .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
         .ok()?;
     let tree = crate::typescript_compat::parse(&mut parser, source, "migration.ts").ok()?;
-    if tree.root_node().has_error() {
+    if crate::typescript_compat::has_syntax_error(&tree) {
         return None;
     }
     let mut classes = Vec::new();
