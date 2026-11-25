@@ -1,4 +1,5 @@
 mod common;
+mod complexity;
 mod contracts;
 mod history;
 mod model;
@@ -126,7 +127,6 @@ impl<'a> BuiltInCollectors<'a> {
     ) -> Result<Vec<Observation>, String> {
         match kind {
             RuleKind::FunctionCrap => Ok(structural::function_crap(
-                rule,
                 self.model(rule)?,
                 self.input.coverage.as_ref(),
             )),
@@ -169,7 +169,7 @@ impl<'a> BuiltInCollectors<'a> {
     fn collect_inheritance(&self, kind: RuleKind, rule: &Rule) -> Result<Vec<Observation>, String> {
         match kind {
             RuleKind::ParallelInheritance => Ok(contracts::parallel_inheritance(self.model(rule)?)),
-            RuleKind::PortConformance => Ok(contracts::port_conformance(self.model(rule)?)),
+            RuleKind::PortConformance => Ok(contracts::port_conformance(rule, self.model(rule)?)),
             RuleKind::RefusedBequest => Ok(contracts::refused_bequest(self.model(rule)?)),
             _ => unreachable!("collector group and inheritance dispatcher must agree"),
         }

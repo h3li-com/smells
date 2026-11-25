@@ -86,15 +86,15 @@ Group callables by their authored `case` label sequence. Match `minimum_sites` s
 
 <a id="typescript-temporary-fields"></a>
 ### `typescript.temporary_fields@1` — built in
-Treat optional, nullable, or `undefined` fields as lifecycle candidates and count direct `this.field` use across class methods. Apply the configured field, method, and maximum-use thresholds.
+Treat optional, nullable, or `undefined` fields as lifecycle candidates and count direct `this.field` use across non-constructor class methods; `constructor` initializes fields and is not lifecycle use. Apply the configured field, method, and maximum-use thresholds.
 
 <a id="typescript-forwarding-share"></a>
 ### `typescript.forwarding_share@1` — built in
 Count non-constructor methods whose complete body is one optional `return` of `this.delegate.method(...)`. Match the configured method minimum and forwarding share.
 
 <a id="typescript-function-crap"></a>
-### `typescript.function_crap@1` — built in
-Calculate authored lexical cyclomatic complexity and a conservative zero-coverage CRAP upper bound `C² + C`. Match scores greater than `maximum`. Complete external coverage may replace this pessimistic observation.
+### `typescript.function_crap@3` — built in
+Calculate cyclomatic complexity on the syntax tree and a conservative zero-coverage CRAP upper bound `C² + C`. Match scores greater than `warning_maximum` (default 5). A match blocks only when the rule is `required`, the score is greater than `maximum` (default 10), and it was measured from supplied LCOV coverage. Scores at most `maximum` and every zero-coverage upper bound are non-blocking warnings, and the explanation says which. Complete external coverage may replace this pessimistic observation. Decisions follow ESLint's `complexity` rule: `if`, ternaries, `for`, `for…in/of`, `while`, `do`, each `case` (not `default`), `catch`, `&&`, `||`, `??`, the logical assignments `&&=`, `||=`, `??=`, each optional chain `?.`, and each default value in a parameter or destructuring pattern. Arrow functions, function expressions and nested classes are their own scope; an expression-bodied arrow counts its body. Text in strings, comments and templates never counts.
 
 <a id="typescript-unused-code"></a>
 ### `typescript.unused_code@1` — built in
@@ -118,7 +118,7 @@ For same-corpus inheritance, count base methods and derived overrides that expli
 
 <a id="typescript-divergent-change"></a>
 ### `typescript.divergent_change@1` — built in
-Inspect up to 200 commits and measure each current file's change count plus distinct top-level co-change responsibilities. Apply both configured minima. Without Git history this rule is incomplete, never clean.
+Inspect up to 200 commits and measure each current file's change count plus distinct co-change responsibilities. A responsibility is the first module below the owning implementation root, after a leading `src` or `lib` and a top-level Python package (a directory with `__init__.py`); a file directly in that root is its own responsibility. The repository's initial commit is an import, not a change, and is skipped. Apply both configured minima. Without Git history this rule is incomplete, never clean.
 
 <a id="typescript-parallel-inheritance"></a>
 ### `typescript.parallel_inheritance@1` — built in
@@ -126,7 +126,7 @@ Compare authored inheritance families and count shared child-role prefixes/suffi
 
 <a id="typescript-shotgun-surgery"></a>
 ### `typescript.shotgun_surgery@1` — built in
-Inspect up to 200 commits and count distinct top-level source responsibilities changed in each commit. Match owner count greater than `maximum_owners`. Without Git history this rule is incomplete, never clean.
+Inspect up to 200 commits and count distinct source responsibilities changed in each commit. A responsibility is the first module below the owning implementation root, after a leading `src` or `lib` and a top-level Python package (a directory with `__init__.py`); a file directly in that root is its own responsibility. The repository's initial commit is an import, not a change, and is skipped. Match owner count greater than `maximum_owners`. Without Git history this rule is incomplete, never clean.
 
 <a id="typescript-foreign-accesses"></a>
 ### `typescript.foreign_accesses@2` — built in
@@ -138,7 +138,7 @@ Count foreign accesses to underscore/private-style members. Match forbidden acce
 
 <a id="typescript-library-capabilities"></a>
 ### `typescript.library_capabilities@1` — built in
-Count authored prototype or foreign attribute mutation workarounds as missing-capability signals. Match failures greater than `maximum_failures`; capability tests may replace the heuristic.
+Count authored prototype or foreign attribute assignment workarounds (not `==`/`===` comparisons) as missing-capability signals. Match failures greater than `maximum_failures`; capability tests may replace the heuristic.
 
 <a id="typescript-navigation-chains"></a>
 ### `typescript.navigation_chains@2` — built in

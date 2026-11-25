@@ -228,7 +228,7 @@
     "pattern_type": "metric",
     "reference_url": "https://refactoring.guru/smells/long-method",
     "certainty": "conservative_or_external_evidence",
-    "signal": "Authored complexity with a conservative zero-coverage assumption, or optional complete coverage evidence, produces a CRAP score above the configured maximum.",
+    "signal": "Authored complexity with a conservative zero-coverage assumption, or optional complete coverage evidence, produces a CRAP score above the configured warning maximum; only a measured score above the maximum blocks.",
     "why_it_matters": "Complex logic with weak test execution is expensive and risky to change.",
     "review": "NON-NEGOTIABLE RESEARCH: Perform an external research/tool call to {reference_url} and read the page before reviewing this finding or proposing or applying remediation. If the URL cannot be consulted, report the reference research as incomplete and stop. Inspect the exact complexity decisions, uncovered executable lines, test relevance, and whether behavior can be simplified or covered through stable interfaces.",
     "remediation": "Reduce decision complexity and add focused tests for uncovered behavior, preferring behavior-preserving extraction through stable interfaces."

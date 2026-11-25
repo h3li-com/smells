@@ -1,7 +1,7 @@
 use crate::{
     collectors,
     core::model::Input,
-    evidence_evaluators::evaluate,
+    evidence_evaluators::{advisory, evaluate},
     policy::{Registry, Rule},
     report::{FindingRelations, Location, Report},
 };
@@ -237,16 +237,17 @@ fn apply_observation(
             return;
         }
     };
-    report.finding_with_relations(
+    let advisory = advisory(
+        &rule.id,
+        &observation.measurements,
+        &observation.evidence,
+        &input.policy,
+    );
+    report.evaluated_finding(
         &input.policy,
         &rule.id,
-        &observation.symbol,
-        &observation.location,
-        evaluation.metric,
-        evaluation.observed,
-        evaluation.comparison,
-        evaluation.threshold,
-        evaluation.matched,
+        (&observation.symbol, &observation.location),
+        evaluation,
         FindingRelations {
             evidence: json!({
                 "provider": provider,
@@ -257,6 +258,7 @@ fn apply_observation(
             symbols: observation.related_symbols.clone(),
             locations: observation.related_locations.clone(),
         },
+        advisory,
     );
 }
 

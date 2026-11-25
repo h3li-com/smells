@@ -49,6 +49,30 @@ pub(crate) fn evaluate(
     evaluator(id, measurements, policy)
 }
 
+const ESTIMATED_CRAP: &str = "No coverage was supplied, so this score assumes 0% coverage and does not block; supply LCOV coverage to measure it.";
+const WARNING_CRAP: &str =
+    "The score is in the warning band, at most `maximum`, so it does not block.";
+
+/// Why a matched observation is reported without blocking, or `None` when it may block.
+/// Only CRAP has a warning band: a score blocks when it exceeds `maximum` and was
+/// measured against supplied coverage, never when it is the zero-coverage upper bound.
+pub(crate) fn advisory(
+    id: &str,
+    measurements: &BTreeMap<String, u64>,
+    evidence: &Value,
+    policy: &Policy,
+) -> Option<&'static str> {
+    if !matches!(RuleKind::from_id(id), Ok(RuleKind::FunctionCrap)) {
+        return None;
+    }
+    if evidence.get("coverage_assumption_percent") == Some(&json!(0)) {
+        return Some(ESTIMATED_CRAP);
+    }
+    let (numerator, denominator) = (measurements["numerator"], measurements["denominator"]);
+    let maximum = policy.parameter(id, "maximum");
+    (numerator as u128 <= maximum as u128 * denominator as u128).then_some(WARNING_CRAP)
+}
+
 fn values(
     id: &str,
     measurements: &BTreeMap<String, u64>,
@@ -186,13 +210,14 @@ fn function_crap(
     if denominator == 0 {
         return Err(format!("invalid CRAP evidence: {id}"));
     }
+    let warning = policy.parameter(id, "warning_maximum");
     let maximum = policy.parameter(id, "maximum");
     Ok(Evaluation {
         metric: "CRAP score",
         observed: json!({"numerator":numerator,"denominator":denominator}),
         comparison: ">",
-        threshold: json!({"maximum":maximum}),
-        matched: numerator as u128 > maximum as u128 * denominator as u128,
+        threshold: json!({"warning_maximum":warning,"maximum":maximum}),
+        matched: numerator as u128 > warning.min(maximum) as u128 * denominator as u128,
     })
 }
 
@@ -660,8 +685,16 @@ mod tests {
     }
 
     #[test]
-    fn crap_and_foreign_access_ratios_use_exact_integer_boundaries() {
+    fn crap_bands_block_only_measured_scores_above_the_maximum() {
         let policy = policy();
+        let crap = |numerator, denominator| {
+            measured(&[("denominator", denominator), ("numerator", numerator)])
+        };
+        let measured_evidence = json!({"collector": "lcov_line_coverage_crap_v1"});
+        let estimated = json!({"coverage_assumption_percent": 0});
+        let reason = |values: &BTreeMap<String, u64>, evidence: &Value| {
+            advisory("python.function_crap", values, evidence, &policy)
+        };
         assert!(!matched(
             "python.function_crap",
             &[("denominator", 2), ("numerator", 10)],
@@ -672,6 +705,45 @@ mod tests {
             &[("denominator", 2), ("numerator", 11)],
             &policy
         ));
+        assert_eq!(reason(&crap(20, 2), &measured_evidence), Some(WARNING_CRAP));
+        assert_eq!(reason(&crap(21, 2), &measured_evidence), None);
+        assert_eq!(reason(&crap(21, 2), &estimated), Some(ESTIMATED_CRAP));
+        assert_eq!(
+            reason(&crap(12, 1), &json!({"coverage_assumption_percent": 50})),
+            None
+        );
+        assert_eq!(
+            advisory("python.function_lines", &crap(21, 2), &estimated, &policy),
+            None
+        );
+
+        let mut inverted = self::policy();
+        let parameters = &mut inverted
+            .rules
+            .get_mut("python.function_crap")
+            .unwrap()
+            .parameters;
+        parameters.insert("warning_maximum".into(), 10);
+        parameters.insert("maximum".into(), 5);
+        assert!(matched(
+            "python.function_crap",
+            &[("denominator", 1), ("numerator", 6)],
+            &inverted
+        ));
+        assert_eq!(
+            advisory(
+                "python.function_crap",
+                &crap(6, 1),
+                &measured_evidence,
+                &inverted
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn crap_and_foreign_access_ratios_use_exact_integer_boundaries() {
+        let policy = policy();
 
         assert!(!matched(
             "python.foreign_accesses",

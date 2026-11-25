@@ -32,6 +32,43 @@ All notable changes to Smells are recorded here. Release tags use `vMAJOR.MINOR.
   command that produces LCOV for the project's language. Blocking findings are
   never hidden. The burndown compares both sides without non-blocking CRAP so
   that adding coverage does not read as a regression.
+- Count cyclomatic complexity on the syntax tree in every language. The old lexical count read keywords inside
+  strings and comments, missed Rust `?`, and counted closure `||` and `=>`.
+  Rust now uses cargo-crap's decision points (each `?` and match arm, `if`,
+  `for`, `while`, `loop`, `&&`, `||`) and agrees with cargo-crap on every
+  function of Smells' own source. Python follows radon (`assert`, loop and
+  `try` `else`, and every `match` `case` except a wildcard or bare capture count)
+  and agrees on 99.6% of 4,120 functions. TypeScript follows ESLint's
+  `complexity` rule (optional chaining, default values and logical assignment
+  count; `default` does not) and agrees on 16,741 of 16,744 functions. Closures,
+  lambdas and nested items are their own scope.
+- Score `function_crap` in bands and move it to version `3` in every language,
+  with parameters `warning_maximum` (5) and `maximum` (10). A score of 5 or less
+  is not a finding. A score above 5 is a finding, and it blocks only when the
+  rule is `required`, the score is above 10 and it was measured from supplied
+  LCOV coverage. Every other match is a non-blocking warning whose explanation
+  says why. A zero-coverage upper bound never blocks. The starter policies make
+  `function_crap` `required`, so a measured score above 10 now fails the check.
+- Calibrate detectors against seeded Python, TypeScript and Rust fixture
+  projects. Rule versions are unchanged, so existing policies keep working:
+  - `divergent_change` and `shotgun_surgery` (all languages) take a file's owner
+    from the first module below its implementation root, after a leading `src`
+    or `lib` and a top-level Python package. Before, every file under `src/` had
+    the same owner, so neither rule could match. Both skip the repository's
+    initial commit, which is an import rather than a change.
+  - `temporary_fields` (Python and TypeScript) does not count `__init__` or
+    `constructor` as a use, since constructors initialize every field.
+  - `library_capabilities` (Python and TypeScript) counts assignments only, so
+    a comparison such as `this.cart.lines.length === 0` is no longer a
+    workaround.
+  - `rust.port_conformance` does not require trait methods that have a default
+    body.
+- Measure CRAP coverage over the function body, not the declaration line.
+  Python and JavaScript coverage mark a `def` or `function` line as run when the
+  module loads, which gave never-called functions coverage credit.
+- Lower the refused-bequest `minimum_unused_percent` default from 80 to 67 in
+  the Python and TypeScript registries and starter policies, so a subclass that
+  refuses 3 of 4 inherited methods matches.
 - Move `rust.dependency_contract` to version `2`. A private field is visible in
   its own module and every descendant module, so only matching accesses from
   descendant module files of the owner's module count; accesses elsewhere cannot

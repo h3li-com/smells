@@ -84,15 +84,15 @@ Group callables by their authored `case` label sequence. Match `minimum_sites` s
 
 <a id="python-temporary-fields"></a>
 ### `python.temporary_fields@1` — built in
-Treat fields annotated with `Optional`/`None` or assigned `None` as lifecycle candidates and count direct `self.field` use across class methods. Apply the configured field, method, and maximum-use thresholds.
+Treat fields annotated with `Optional`/`None` or assigned `None` as lifecycle candidates and count direct `self.field` use across non-constructor class methods; `__init__` initializes fields and is not lifecycle use. Apply the configured field, method, and maximum-use thresholds.
 
 <a id="python-forwarding-share"></a>
 ### `python.forwarding_share@1` — built in
 Count non-constructor methods whose complete body is one optional `return` of `self.delegate.method(...)`. Match the configured method minimum and forwarding share.
 
 <a id="python-function-crap"></a>
-### `python.function_crap@1` — built in
-Calculate authored lexical cyclomatic complexity and a conservative zero-coverage CRAP upper bound `C² + C`. Match scores greater than `maximum`. Complete external coverage may replace this pessimistic observation.
+### `python.function_crap@3` — built in
+Calculate cyclomatic complexity on the syntax tree and a conservative zero-coverage CRAP upper bound `C² + C`. Match scores greater than `warning_maximum` (default 5). A match blocks only when the rule is `required`, the score is greater than `maximum` (default 10), and it was measured from supplied LCOV coverage. Scores at most `maximum` and every zero-coverage upper bound are non-blocking warnings, and the explanation says which. Complete external coverage may replace this pessimistic observation. Decisions follow radon: `if`, `elif`, conditional expressions, `for`, `while`, an `else` on a loop or `try`, `except`, `assert`, comprehension `for`/`if`, `and`, `or`, and each `match` `case` except a wildcard or bare capture. A `case` guard and `finally` are not decisions. Unlike radon, decisions inside an `assert` count, and lambdas, like nested functions and classes, are their own scope. Text in strings and comments never counts.
 
 <a id="python-unused-code"></a>
 ### `python.unused_code@1` — built in
@@ -116,7 +116,7 @@ For same-corpus inheritance, count base methods and derived overrides that expli
 
 <a id="python-divergent-change"></a>
 ### `python.divergent_change@1` — built in
-Inspect up to 200 commits and measure each current file's change count plus distinct top-level co-change responsibilities. Apply both configured minima. Without Git history this rule is incomplete, never clean.
+Inspect up to 200 commits and measure each current file's change count plus distinct co-change responsibilities. A responsibility is the first module below the owning implementation root, after a leading `src` or `lib` and a top-level Python package (a directory with `__init__.py`); a file directly in that root is its own responsibility. The repository's initial commit is an import, not a change, and is skipped. Apply both configured minima. Without Git history this rule is incomplete, never clean.
 
 <a id="python-parallel-inheritance"></a>
 ### `python.parallel_inheritance@1` — built in
@@ -124,7 +124,7 @@ Compare authored inheritance families and count shared child-role prefixes/suffi
 
 <a id="python-shotgun-surgery"></a>
 ### `python.shotgun_surgery@1` — built in
-Inspect up to 200 commits and count distinct top-level source responsibilities changed in each commit. Match owner count greater than `maximum_owners`. Without Git history this rule is incomplete, never clean.
+Inspect up to 200 commits and count distinct source responsibilities changed in each commit. A responsibility is the first module below the owning implementation root, after a leading `src` or `lib` and a top-level Python package (a directory with `__init__.py`); a file directly in that root is its own responsibility. The repository's initial commit is an import, not a change, and is skipped. Match owner count greater than `maximum_owners`. Without Git history this rule is incomplete, never clean.
 
 <a id="python-foreign-accesses"></a>
 ### `python.foreign_accesses@2` — built in
@@ -136,7 +136,7 @@ Count foreign accesses to underscore/private-style members. Match forbidden acce
 
 <a id="python-library-capabilities"></a>
 ### `python.library_capabilities@1` — built in
-Count authored foreign/prototype attribute mutation and `setattr` workarounds as missing-capability signals. Match failures greater than `maximum_failures`; capability tests may replace the heuristic.
+Count authored foreign/prototype attribute assignments (not `==` comparisons) and `setattr` workarounds as missing-capability signals. Match failures greater than `maximum_failures`; capability tests may replace the heuristic.
 
 <a id="python-navigation-chains"></a>
 ### `python.navigation_chains@2` — built in

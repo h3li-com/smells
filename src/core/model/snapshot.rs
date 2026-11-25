@@ -21,6 +21,27 @@ pub struct Input {
     pub coverage: Option<crate::coverage::LineCoverage>,
 }
 
+#[cfg(test)]
+impl Input {
+    /// A working-tree input with no manifests, history or coverage, for unit tests.
+    pub(crate) fn fixture(rule_pack: &str, files: BTreeMap<String, String>) -> Self {
+        Self {
+            files,
+            manifests: BTreeMap::new(),
+            artifacts: BTreeMap::new(),
+            artifact_candidates: BTreeMap::new(),
+            implementations: Vec::new(),
+            source_roles: Vec::new(),
+            history: History::default(),
+            policy_sha256: String::new(),
+            policy: Policy::fixture(rule_pack),
+            digest: "0".repeat(64),
+            mode: "test",
+            coverage: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct History {
     pub available: bool,
@@ -33,6 +54,8 @@ pub struct History {
 #[derive(Clone, Debug)]
 pub struct HistoryCommit {
     pub id: String,
+    /// The commit has no parent: an initial import rather than a change.
+    pub root: bool,
     pub files: Vec<String>,
 }
 

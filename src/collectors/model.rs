@@ -19,10 +19,15 @@ pub(super) struct FunctionFact {
     pub(super) name: String,
     pub(super) symbol: String,
     pub(super) location: Location,
+    /// First line holding only body code: line coverage starts here, so a declaration
+    /// line that runs at import or definition time never credits an uncalled body.
+    pub(super) body_line: usize,
     /// Last source line of the declaration, used to map line coverage.
     pub(super) end_line: usize,
     pub(super) type_parameters: Vec<String>,
     pub(super) body: Option<Arc<str>>,
+    /// Cyclomatic complexity of the body, counted on the syntax tree.
+    pub(super) complexity: Option<u64>,
     pub(super) source: Arc<str>,
     pub(super) private: bool,
     /// Called on an owned receiver (`self`, `cls`, or an instance `this`).
@@ -99,7 +104,7 @@ fn parser_language(language: &str, path: &str) -> Result<Language, String> {
     }
 }
 
-fn class_node(kind: &str, language: &str) -> bool {
+pub(super) fn class_node(kind: &str, language: &str) -> bool {
     match language {
         "python" => kind == "class_definition",
         "typescript" => matches!(
@@ -110,7 +115,7 @@ fn class_node(kind: &str, language: &str) -> bool {
     }
 }
 
-fn function_node(kind: &str, language: &str) -> bool {
+pub(super) fn function_node(kind: &str, language: &str) -> bool {
     match language {
         "python" => matches!(kind, "function_definition" | "lambda"),
         "typescript" => matches!(
@@ -421,6 +426,14 @@ fn rust_class_key(path: &str, module_path: &str, name: &str) -> String {
     format!("{path}::{}", rust_owner(module_path, name))
 }
 
+/// The line after a multi-line brace body's `{`, so the header row (`fn f() {`) never
+/// counts as body coverage; a one-line body keeps its only line. Code written on the
+/// `{` line itself is therefore not measured: that blind spot is cheaper than letting
+/// an executed declaration line credit an uncalled body.
+fn brace_body_line(open: usize, close: usize) -> usize {
+    if close > open { open + 1 } else { open }
+}
+
 fn rust_function(
     path: &str,
     owner: Option<&str>,
@@ -443,6 +456,13 @@ fn rust_function(
             |owner| format!("{path}::{owner}.{name}"),
         ),
         location: rust_location(path, signature.ident.span()),
+        body_line: body.map_or_else(
+            || signature.ident.span().start().line,
+            |body| {
+                let span = body.brace_token.span;
+                brace_body_line(span.open().start().line, span.close().end().line)
+            },
+        ),
         end_line: body.map_or_else(
             || signature.ident.span().end().line,
             |body| body.brace_token.span.close().end().line,
@@ -451,6 +471,7 @@ fn rust_function(
             .expect("Rust token masking cannot fail")
             .into(),
         type_parameters: rust_type_parameters(&signature.generics),
+        complexity: body.map(super::complexity::rust),
         body: body_source.map(|body| {
             Arc::from(code_only(path, &body).expect("Rust function-body token masking cannot fail"))
         }),
@@ -800,7 +821,11 @@ fn rust_source_model(input: &Input) -> Result<SourceModel, String> {
     Ok(model)
 }
 
-fn parse_portable_tree(language: &str, path: &str, source: &str) -> Result<Tree, String> {
+pub(super) fn parse_portable_tree(
+    language: &str,
+    path: &str,
+    source: &str,
+) -> Result<Tree, String> {
     let grammar = parser_language(language, path)?;
     let mut parser = Parser::new();
     parser
@@ -892,9 +917,8 @@ fn portable_function(
         classes.iter().position(|class| class.range == range)
     });
     let owner = owner_index.map(|index| classes[index].name.clone());
-    let body = node
-        .child_by_field_name("body")
-        .map(|body| Arc::from(text_of(body, authored_code)));
+    let body_node = node.child_by_field_name("body");
+    let body = body_node.map(|body| Arc::from(text_of(body, authored_code)));
     let signature = header_before_body(node, source);
     let function = FunctionFact {
         symbol: owner.as_ref().map_or_else(
@@ -902,10 +926,20 @@ fn portable_function(
             |owner| format!("{path}::{owner}.{name}"),
         ),
         location: node_location(path, node),
+        body_line: body_node.map_or(node.start_position().row + 1, |body| {
+            let (open, close) = (body.start_position().row + 1, body.end_position().row + 1);
+            // A Python block starts at its first statement; a brace block at its `{`.
+            if source.as_bytes().get(body.start_byte()) == Some(&b'{') {
+                brace_body_line(open, close)
+            } else {
+                open
+            }
+        }),
         end_line: node.end_position().row + 1,
         type_parameters: portable_type_parameters(node, source, language),
         source: text_of(node, authored_code).into(),
         body,
+        complexity: body_node.map(|body| super::complexity::portable(node, body, language)),
         private: name.starts_with('_') || signature.contains("private "),
         receiver: owner.is_some() && portable_receiver(&signature, language),
         entry_point: false,
@@ -979,10 +1013,6 @@ pub(super) fn source_model(rule: &Rule, input: &Input) -> Result<SourceModel, St
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        core::model::History,
-        policy::{Limits, Policy, ResolvedSelection},
-    };
 
     fn rule(id: &str) -> Rule {
         Rule {
@@ -998,39 +1028,11 @@ mod tests {
     }
 
     fn input(rule_pack: &str, files: &[(&str, &str)]) -> Input {
-        Input {
-            files: files
-                .iter()
-                .map(|(path, source)| ((*path).into(), (*source).into()))
-                .collect(),
-            manifests: BTreeMap::new(),
-            artifacts: BTreeMap::new(),
-            artifact_candidates: BTreeMap::new(),
-            implementations: Vec::new(),
-            source_roles: Vec::new(),
-            history: History::default(),
-            policy_sha256: String::new(),
-            policy: Policy {
-                schema_version: 1,
-                rule_pack: rule_pack.into(),
-                scanner_version: env!("CARGO_PKG_VERSION").into(),
-                scope: "repository".into(),
-                default_groups: vec!["all".into()],
-                exclude_directories: Vec::new(),
-                source_roles: Vec::new(),
-                limits: Limits {
-                    maximum_files: 10,
-                    maximum_pairs: 10,
-                    maximum_group_combinations: 10,
-                },
-                rules: BTreeMap::new(),
-                exceptions: Vec::new(),
-                resolved: ResolvedSelection::default(),
-            },
-            digest: "0".repeat(64),
-            mode: "test",
-            coverage: None,
-        }
+        let files = files
+            .iter()
+            .map(|(path, source)| ((*path).into(), (*source).into()))
+            .collect();
+        Input::fixture(rule_pack, files)
     }
 
     #[test]
@@ -1100,9 +1102,63 @@ mod tests {
             model
                 .functions
                 .iter()
-                .map(|function| (function.location.line, function.end_line))
+                .map(|function| (
+                    function.location.line,
+                    function.body_line,
+                    function.end_line
+                ))
                 .collect::<Vec<_>>(),
-            [(4, 5), (6, 7), (9, 10)]
+            [(4, 5, 5), (6, 7, 7), (9, 10, 10)]
+        );
+    }
+
+    #[test]
+    fn coverage_starts_below_the_declaration_line_in_every_language() {
+        let lines = |rule_name: &str, pack: &str, path: &str, source: &str| {
+            source_model(&rule(rule_name), &input(pack, &[(path, source)]))
+                .unwrap()
+                .functions
+                .iter()
+                .map(|function| (function.name.clone(), function.body_line, function.end_line))
+                .collect::<Vec<_>>()
+        };
+        let owned = |rows: &[(&str, usize, usize)]| {
+            rows.iter()
+                .map(|(name, body, end)| ((*name).to_string(), *body, *end))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            lines(
+                "python.temporary_fields",
+                "python-v1",
+                "a.py",
+                "def wide(\n    a,\n):\n    return a\n\ndef one(): return 1\n",
+            ),
+            owned(&[("wide", 4, 4), ("one", 6, 6)])
+        );
+        assert_eq!(
+            lines(
+                "typescript.temporary_fields",
+                "typescript-v1",
+                "a.ts",
+                "function open(a: number) {\n  return a;\n}\nfunction own(a: number)\n{\n  return a;\n}\nfunction one() { return 1; }\nfunction empty() {\n}\nabstract class K {\n  abstract m(): void;\n}\n",
+            ),
+            owned(&[
+                ("open", 2, 3),
+                ("own", 6, 7),
+                ("one", 8, 8),
+                ("empty", 10, 10),
+                ("m", 12, 12)
+            ])
+        );
+        assert_eq!(
+            lines(
+                "rust.temporary_fields",
+                "rust-v1",
+                "src/lib.rs",
+                "fn open(a: u8) -> u8 {\n    a\n}\nfn one() -> u8 { 1 }\n",
+            ),
+            owned(&[("open", 2, 3), ("one", 4, 4)])
         );
     }
 

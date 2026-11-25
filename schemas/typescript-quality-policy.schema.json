@@ -135,6 +135,9 @@
         },
         "typescript.navigation_chains": {
           "$ref": "#/$defs/selection_v2"
+        },
+        "typescript.function_crap": {
+          "$ref": "#/$defs/selection_v3"
         }
       },
       "additionalProperties": {
@@ -234,6 +237,12 @@
       "allOf": [
         {"$ref": "#/$defs/selection_contract"},
         {"properties": {"version": {"const": 2}}}
+      ]
+    },
+    "selection_v3": {
+      "allOf": [
+        {"$ref": "#/$defs/selection_contract"},
+        {"properties": {"version": {"const": 3}}}
       ]
     }
   }

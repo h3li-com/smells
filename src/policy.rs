@@ -147,6 +147,30 @@ pub struct Policy {
     pub resolved: ResolvedSelection,
 }
 
+#[cfg(test)]
+impl Policy {
+    /// A minimal repository-scoped policy for unit tests.
+    pub(crate) fn fixture(rule_pack: &str) -> Self {
+        Self {
+            schema_version: 1,
+            rule_pack: rule_pack.into(),
+            scanner_version: env!("CARGO_PKG_VERSION").into(),
+            scope: "repository".into(),
+            default_groups: all_default_groups(),
+            exclude_directories: Vec::new(),
+            source_roles: Vec::new(),
+            limits: Limits {
+                maximum_files: 100,
+                maximum_pairs: 100,
+                maximum_group_combinations: 100,
+            },
+            rules: BTreeMap::new(),
+            exceptions: Vec::new(),
+            resolved: ResolvedSelection::default(),
+        }
+    }
+}
+
 fn all_default_groups() -> Vec<String> {
     vec!["all".into()]
 }
