@@ -94,14 +94,11 @@ fn module_file(
         clean_path(&base.join(format!("{name}.rs")))?,
         clean_path(&base.join(&name).join("mod.rs"))?,
     ];
-    let found: Vec<_> = candidates
-        .into_iter()
-        .filter(|p| parsed.contains_key(p))
-        .collect();
-    if found.len() != 1 {
-        return Err(format!("missing or ambiguous module source: {name}"));
+    let mut found = candidates.into_iter().filter(|p| parsed.contains_key(p));
+    match (found.next(), found.next()) {
+        (Some(path), None) => Ok(path),
+        _ => Err(format!("missing or ambiguous module source: {name}")),
     }
-    Ok(found[0].clone())
 }
 
 fn file_base(path: &str) -> PathBuf {

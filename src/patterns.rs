@@ -144,6 +144,10 @@ fn self_field(expr: &Expr) -> Option<String> {
     let Expr::Field(field) = expr else {
         return None;
     };
+    self_field_access(field)
+}
+
+fn self_field_access(field: &ExprField) -> Option<String> {
     if identifier(&field.base).as_deref() != Some("self") {
         return None;
     }
@@ -192,7 +196,7 @@ fn accessor(function: &Function) -> bool {
     if let Expr::Assign(assign) = expr {
         return self_field(&assign.left).is_some()
             && arguments(function).is_some_and(|args| {
-                args.len() == 1 && identifier(&assign.right) == Some(args[0].clone())
+                args.len() == 1 && identifier(&assign.right).is_some_and(|name| name == args[0])
             });
     }
     false
@@ -247,7 +251,7 @@ struct FieldUses {
 }
 impl<'ast> Visit<'ast> for FieldUses {
     fn visit_expr_field(&mut self, expr: &'ast ExprField) {
-        if let Some(field) = self_field(&Expr::Field(expr.clone())) {
+        if let Some(field) = self_field_access(expr) {
             self.fields.insert(field);
         }
         visit::visit_expr_field(self, expr);

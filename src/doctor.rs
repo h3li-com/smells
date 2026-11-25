@@ -212,10 +212,10 @@ fn resolve_policy(root: &Path, explicit: Option<&Path>) -> Result<ResolvedPolicy
         .map(|name| root.join(name))
         .filter(|path| path.is_file())
         .collect();
-    match found.as_slice() {
-        [single] => Ok(ResolvedPolicy::File(single.clone())),
-        [] => infer_starter_policy(root),
-        _ => {
+    match <[PathBuf; 1]>::try_from(found) {
+        Ok([single]) => Ok(ResolvedPolicy::File(single)),
+        Err(found) if found.is_empty() => infer_starter_policy(root),
+        Err(found) => {
             let names = found
                 .iter()
                 .filter_map(|path| path.file_name().and_then(|name| name.to_str()))
