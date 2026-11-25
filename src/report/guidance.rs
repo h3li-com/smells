@@ -87,30 +87,33 @@ pub(super) fn guidance(registry: &Registry) -> BTreeMap<String, Guidance> {
         expected, actual,
         "diagnostic guidance must cover every rule"
     );
-    assert!(entries.iter().all(|entry| {
-        matches!(
-            entry.certainty.as_str(),
-            "exact_source_metric"
-                | "structural_indicator"
-                | "provider_evidence"
-                | "typed_indicator"
-                | "project_contract"
-                | "conservative_source_indicator"
-                | "conservative_or_external_evidence"
-                | "history_signal"
-        ) && entry
-            .reference_url
-            .starts_with("https://refactoring.guru/smells/")
-            && !entry.smell_id.is_empty()
-            && !entry.smell.is_empty()
-            && !entry.category.is_empty()
-            && !entry.pattern_type.is_empty()
-            && !entry.signal.is_empty()
-            && !entry.why_it_matters.is_empty()
-            && entry.review.starts_with("NON-NEGOTIABLE RESEARCH:")
-            && entry.review.contains("{reference_url}")
-            && !entry.remediation.is_empty()
-    }));
+    assert!(
+        entries.iter().all(|entry| {
+            matches!(
+                entry.certainty.as_str(),
+                "exact_source_metric"
+                    | "structural_indicator"
+                    | "provider_evidence"
+                    | "typed_indicator"
+                    | "project_contract"
+                    | "conservative_source_indicator"
+                    | "conservative_or_external_evidence"
+                    | "history_signal"
+            ) && entry
+                .reference_url
+                .starts_with("https://refactoring.guru/smells/")
+                && !entry.smell_id.is_empty()
+                && !entry.smell.is_empty()
+                && !entry.category.is_empty()
+                && !entry.pattern_type.is_empty()
+                && !entry.signal.is_empty()
+                && !entry.why_it_matters.is_empty()
+                && entry.review.starts_with("NON-NEGOTIABLE RESEARCH:")
+                && entry.review.contains("{reference_url}")
+                && !entry.remediation.is_empty()
+        }),
+        "every guidance entry must be complete and cite refactoring.guru"
+    );
     for smell in &registry.smells {
         let expected_url = format!("https://refactoring.guru/smells/{}", smell.id);
         for rule_id in &smell.rules {

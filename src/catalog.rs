@@ -2,6 +2,7 @@ use crate::policy::Registry;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 
 const SOURCE_MANIFEST_JSON: &str = include_str!("../rules/sources-v1.json");
 const CONCEPT_CATALOG_JSON: &str = include_str!("../rules/concept-catalog-v1.json");
@@ -58,7 +59,9 @@ struct Source {
     revision: String,
     reviewed_on: String,
     catalog_fingerprint: String,
+    #[expect(dead_code, reason = "deserialized so the manifest schema is checked")]
     monitoring: Monitoring,
+    #[expect(dead_code, reason = "deserialized so the manifest schema is checked")]
     reuse: Reuse,
 }
 
@@ -399,7 +402,6 @@ fn valid_source_year(source: &Source) -> bool {
 }
 
 fn valid_source(source: &Source, manifest_reviewed_on: &str) -> bool {
-    let _typed_metadata = (&source.monitoring, &source.reuse);
     valid_source_identity(source)
         && valid_publication_metadata(source)
         && valid_source_location_and_review(source, manifest_reviewed_on)
@@ -726,9 +728,10 @@ fn validate_reference_inventories(
         }
         let normalized = entries
             .iter()
-            .map(|reference| {
-                format!(
-                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            .fold(String::new(), |mut normalized, reference| {
+                let _ = writeln!(
+                    normalized,
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                     reference.ordinal,
                     reference.source_term,
                     reference.source_category.as_deref().unwrap_or_default(),
@@ -737,9 +740,9 @@ fn validate_reference_inventories(
                     reference.source_locator,
                     reference.access_scope.as_str(),
                     reference.reference_role.as_str()
-                )
-            })
-            .collect::<String>();
+                );
+                normalized
+            });
         let fingerprint = format!("sha256:{:x}", Sha256::digest(normalized.as_bytes()));
         if fingerprint != source.catalog_fingerprint {
             return Err(format!(

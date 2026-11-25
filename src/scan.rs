@@ -12,15 +12,17 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 use syn::{
+    Attribute, Block, Expr, ExprLit, Fields, FnArg, ImplItem, Item, ItemEnum, ItemFn, ItemImpl,
+    ItemMod, ItemStruct, ItemTrait, ItemType, Lit, Meta, Pat, Signature, TraitItem, Type, UseGroup,
+    UseName, UseRename, UseTree,
     visit::{self, Visit},
-    *,
 };
 
 mod extract;
 mod graph;
 
 #[derive(Clone)]
-pub struct Module {
+pub(crate) struct Module {
     pub key: String,
     pub root: String,
     pub path: String,
@@ -28,7 +30,7 @@ pub struct Module {
     pub imports: BTreeMap<String, Vec<String>>,
 }
 
-pub struct TypeFacts {
+pub(crate) struct TypeFacts {
     pub location: Location,
     pub fields: Vec<(String, Type)>,
     pub field_count: usize,
@@ -37,7 +39,7 @@ pub struct TypeFacts {
     pub functions: Vec<usize>,
 }
 
-pub struct Function {
+pub(crate) struct Function {
     pub symbol: String,
     pub module: String,
     pub location: Location,
@@ -49,14 +51,14 @@ pub struct Function {
     pub comments: usize,
 }
 
-pub struct Slots {
+pub(crate) struct Slots {
     pub symbol: String,
     pub location: Location,
     pub types: Vec<Type>,
     pub named: Vec<(String, String)>,
 }
 
-pub struct Facts {
+pub(crate) struct Facts {
     pub modules: BTreeMap<String, Module>,
     pub types: BTreeMap<String, TypeFacts>,
     pub functions: Vec<Function>,
@@ -64,7 +66,7 @@ pub struct Facts {
     pub aliases: BTreeMap<String, (String, Type)>,
 }
 
-pub fn location(path: &str, span: Span) -> Location {
+pub(crate) fn location(path: &str, span: Span) -> Location {
     Location {
         path: path.into(),
         line: span.start().line,
@@ -72,11 +74,11 @@ pub fn location(path: &str, span: Span) -> Location {
     }
 }
 
-pub fn syntax<T: ToTokens>(value: &T) -> String {
+pub(crate) fn syntax<T: ToTokens>(value: &T) -> String {
     value.to_token_stream().to_string()
 }
 
-pub fn check(input: &Input, registry: &Registry) -> Report {
+pub(crate) fn check(input: &Input, registry: &Registry) -> Report {
     let mut report = Report::new(
         registry,
         &input.policy,

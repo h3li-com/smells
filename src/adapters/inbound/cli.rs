@@ -513,46 +513,70 @@ fn print_policy_table(
     for rule in rules {
         println!(
             "{} | {} | {} | {}",
-            rule["rule_id"].as_str().unwrap(),
-            rule["mode"].as_str().unwrap(),
-            rule["selected"].as_bool().unwrap(),
+            rule["rule_id"]
+                .as_str()
+                .expect("policy rows are built by resolved_policy_rules"),
+            rule["mode"]
+                .as_str()
+                .expect("policy rows are built by resolved_policy_rules"),
+            rule["selected"]
+                .as_bool()
+                .expect("policy rows are built by resolved_policy_rules"),
             rule["groups"]
                 .as_array()
-                .unwrap()
+                .expect("policy rows are built by resolved_policy_rules")
                 .iter()
-                .map(|group| group.as_str().unwrap())
+                .map(|group| group
+                    .as_str()
+                    .expect("policy rows are built by resolved_policy_rules"))
                 .collect::<Vec<_>>()
                 .join(",")
         );
-        println!("  Guidance: {}", rule["guidance_ref"].as_str().unwrap());
+        println!(
+            "  Guidance: {}",
+            rule["guidance_ref"]
+                .as_str()
+                .expect("policy rows are built by resolved_policy_rules")
+        );
         println!(
             "  Source: {} ({}, checked {})",
-            rule["when_to_ignore"]["source_url"].as_str().unwrap(),
-            rule["when_to_ignore"]["provenance"].as_str().unwrap(),
-            rule["when_to_ignore"]["checked_on"].as_str().unwrap()
+            rule["when_to_ignore"]["source_url"]
+                .as_str()
+                .expect("policy rows are built by resolved_policy_rules"),
+            rule["when_to_ignore"]["provenance"]
+                .as_str()
+                .expect("policy rows are built by resolved_policy_rules"),
+            rule["when_to_ignore"]["checked_on"]
+                .as_str()
+                .expect("policy rows are built by resolved_policy_rules")
         );
         println!("  When to ignore:");
         for (index, item) in rule["when_to_ignore"]["items"]
             .as_array()
-            .unwrap()
+            .expect("policy rows are built by resolved_policy_rules")
             .iter()
             .enumerate()
         {
-            println!("    {}. {}", index + 1, item.as_str().unwrap());
+            println!(
+                "    {}. {}",
+                index + 1,
+                item.as_str()
+                    .expect("policy rows are built by resolved_policy_rules")
+            );
         }
     }
 }
 
-fn show_policy(options: ShowOptions) -> Result<u8, String> {
+fn show_policy(options: &ShowOptions) -> Result<u8, String> {
     let text = fs::read_to_string(&options.policy_path)
         .map_err(|error| format!("cannot read policy: {error}"))?;
     let registry = policy::registry_for_policy(&text)?;
     let policy = policy::parse_with_selection(&text, &registry, &options.selection)?;
     let rules = resolved_policy_rules(&registry, &policy);
     if options.format.as_deref() == Some("json") {
-        print_policy_json(&options, &registry, &policy, &rules)?;
+        print_policy_json(options, &registry, &policy, &rules)?;
     } else {
-        print_policy_table(&options, &registry, &policy, &rules);
+        print_policy_table(options, &registry, &policy, &rules);
     }
     Ok(0)
 }
@@ -566,21 +590,17 @@ fn emit_report(report: &report::Report, options: &CheckOptions) -> Result<usize,
     if let Some(path) = options.log_path.as_deref() {
         write_finding_log(report, path)?;
     }
-    let stdout_json_bytes =
-        if options.format.as_deref() != Some("json") && options.log_path.is_some() {
-            print_hook_summary(
-                report,
-                options.log_path.as_deref().unwrap(),
-                options.report_path.as_deref(),
-            );
+    let stdout_json_bytes = match options.log_path.as_deref() {
+        Some(log_path) if options.format.as_deref() != Some("json") => {
+            print_hook_summary(report, log_path, options.report_path.as_deref());
             0
-        } else {
-            print_report(report, options.format.as_deref())?
-        };
+        }
+        _ => print_report(report, options.format.as_deref())?,
+    };
     Ok(saved_json_bytes.unwrap_or(stdout_json_bytes))
 }
 
-fn check(options: CheckOptions, scanner: &dyn Scanner) -> Result<u8, String> {
+fn check(options: &CheckOptions, scanner: &dyn Scanner) -> Result<u8, String> {
     metrics::reset();
     let target = match options.source.as_deref() {
         Some(source) => ScanTarget::WorkingTree(source),
@@ -595,7 +615,7 @@ fn check(options: CheckOptions, scanner: &dyn Scanner) -> Result<u8, String> {
         selection: &options.selection,
     };
     let report = scanner.check(&request)?;
-    metrics::write(emit_report(&report, &options)?)?;
+    metrics::write(emit_report(&report, options)?)?;
     Ok(report.exit())
 }
 
@@ -680,8 +700,8 @@ fn write_finding_log(report: &report::Report, path: &std::path::Path) -> Result<
         .map_err(|error| format!("cannot write finding log {}: {error}", path.display()))
 }
 
-pub(crate) fn run(args: Vec<String>, scanner: &dyn Scanner) -> Result<u8, String> {
-    match command(&args)? {
+pub(crate) fn run(args: &[String], scanner: &dyn Scanner) -> Result<u8, String> {
+    match command(args)? {
         Command::Help => {
             println!("{USAGE}");
             Ok(0)
@@ -696,8 +716,8 @@ pub(crate) fn run(args: Vec<String>, scanner: &dyn Scanner) -> Result<u8, String
             Ok(0)
         }
         Command::Validate(policy_path) => validate_contracts(&policy_path),
-        Command::Show(options) => show_policy(options),
-        Command::Check(options) => check(options, scanner),
+        Command::Show(options) => show_policy(&options),
+        Command::Check(options) => check(&options, scanner),
         Command::Doctor(options) => run_doctor(&options),
     }
 }

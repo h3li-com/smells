@@ -10,7 +10,7 @@ use crate::{
 
 /// Auditable summary of a two-snapshot Git-reference Debt Envelope ratchet.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct RatchetSummary {
+pub(crate) struct RatchetSummary {
     pub reference_ref: String,
     pub reference_commit: String,
     pub reference_blockers: usize,
@@ -28,7 +28,7 @@ pub struct RatchetSummary {
 
 /// Default-on, machine-verifiable run completeness and anti-gaming attestation.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
-pub struct RunAttestation {
+pub(crate) struct RunAttestation {
     pub complete: bool,
     pub exit_code: u8,
     pub rules_selected: usize,
@@ -278,7 +278,7 @@ pub(crate) fn apply_ratchet(
         candidate_blockers,
         regressed_blockers: regressed.len(),
         legacy_within_envelope,
-        burndown_delta: candidate_blockers as isize - reference_blockers as isize,
+        burndown_delta: candidate_blockers.cast_signed() - reference_blockers.cast_signed(),
         reference_suppressions,
         candidate_suppressions,
         new_suppressions,
@@ -319,6 +319,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "burdens built from small integers are exact in f64"
+    )]
     fn value_burden_handles_scalars_objects_and_non_numeric_values() {
         assert_eq!(value_burden(&json!(113)), 113.0);
         assert_eq!(

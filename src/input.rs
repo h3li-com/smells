@@ -15,7 +15,7 @@ pub(crate) const HISTORY_WINDOW: usize = 200;
 
 type CapturedMigrationArtifacts = (BTreeMap<String, Vec<u8>>, BTreeMap<String, Vec<u8>>);
 
-pub fn digest(parts: &[&[u8]]) -> String {
+pub(crate) fn digest(parts: &[&[u8]]) -> String {
     let mut hash = Sha256::new();
     for part in parts {
         hash.update((part.len() as u64).to_le_bytes());
@@ -201,9 +201,9 @@ fn walk(
         .map_err(|e| format!("cannot enumerate source directory: {e}"))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("cannot enumerate source entry: {e}"))?;
-    entries.sort_by_key(|e| e.file_name());
+    entries.sort_by_key(std::fs::DirEntry::file_name);
     for entry in entries {
-        walk_entry(root, entry, policy, registry, files, manifests)?;
+        walk_entry(root, &entry, policy, registry, files, manifests)?;
     }
     Ok(())
 }
@@ -248,7 +248,7 @@ fn capture_working_file(
 
 fn walk_entry(
     root: &Path,
-    entry: fs::DirEntry,
+    entry: &fs::DirEntry,
     policy: &Policy,
     registry: &Registry,
     files: &mut BTreeMap<String, String>,
@@ -315,10 +315,10 @@ fn walk_migration_artifacts(
         .map_err(|e| format!("cannot enumerate migration artifact directory: {e}"))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("cannot enumerate migration artifact entry: {e}"))?;
-    entries.sort_by_key(|entry| entry.file_name());
+    entries.sort_by_key(std::fs::DirEntry::file_name);
     for entry in entries {
         walk_migration_artifact_entry(
-            root, entry, policy, registry, recognizer, artifacts, candidates,
+            root, &entry, policy, registry, recognizer, artifacts, candidates,
         )?;
     }
     Ok(())
@@ -326,7 +326,7 @@ fn walk_migration_artifacts(
 
 fn walk_migration_artifact_entry(
     root: &Path,
-    entry: fs::DirEntry,
+    entry: &fs::DirEntry,
     policy: &Policy,
     registry: &Registry,
     recognizer: &ArtifactRecognizer<'_>,
@@ -360,7 +360,10 @@ fn walk_migration_artifact_entry(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "git capture threads repository, path, and evidence context separately"
+)]
 fn capture_migration_artifact(
     path: &Path,
     relative: &Path,
@@ -398,7 +401,6 @@ fn capture_migration_artifact(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn capture_unresolved_migration_candidate(
     path: &Path,
     name: &str,
@@ -637,7 +639,7 @@ fn shallow_window_truncated(shallow: bool, logged: usize) -> bool {
     shallow && logged < HISTORY_WINDOW
 }
 
-pub fn working_tree(
+pub(crate) fn working_tree(
     root: &Path,
     policy_path: &Path,
     selection: &SelectionOptions,
@@ -899,7 +901,10 @@ fn staged_migration_artifacts(
     Ok((artifacts, candidates))
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "git capture threads repository, path, and evidence context separately"
+)]
 fn capture_staged_migration_artifact(
     root: &Path,
     name: &str,
@@ -939,7 +944,10 @@ fn capture_staged_migration_artifact(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "git capture threads repository, path, and evidence context separately"
+)]
 fn capture_staged_candidate(
     root: &Path,
     name: &str,
@@ -1109,7 +1117,7 @@ fn staged_snapshot(capture: &StagedCapture) -> Result<CapturedSnapshot, String> 
     })
 }
 
-pub fn staged(
+pub(crate) fn staged(
     policy_path: &Path,
     evidence_path: Option<&Path>,
     selection: &SelectionOptions,
@@ -1261,7 +1269,7 @@ fn capture_reference_input(
     .map(Some)
 }
 
-pub fn git_ref_for_staged(
+pub(crate) fn git_ref_for_staged(
     reference_ref: &str,
     policy_path: &Path,
     selection: &SelectionOptions,
@@ -1277,7 +1285,7 @@ pub fn git_ref_for_staged(
     )
 }
 
-pub fn git_ref_for_working_tree(
+pub(crate) fn git_ref_for_working_tree(
     source: &Path,
     reference_ref: &str,
     policy_path: &Path,

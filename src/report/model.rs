@@ -5,14 +5,14 @@ use serde_json::{Value, value::RawValue};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct Location {
+pub(crate) struct Location {
     pub path: String,
     pub line: usize,
     pub column: usize,
 }
 
 #[derive(Debug, Serialize)]
-pub struct Finding {
+pub(crate) struct Finding {
     #[serde(flatten)]
     pub identity: FindingIdentity,
     pub symbol: String,
@@ -37,7 +37,7 @@ pub struct Finding {
 }
 
 #[derive(Debug, Serialize)]
-pub struct FindingIdentity {
+pub(crate) struct FindingIdentity {
     pub finding_id: String,
     pub measurement_index: usize,
     pub rule_id: String,
@@ -66,7 +66,7 @@ impl std::ops::DerefMut for Finding {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub struct Suppression {
+pub(crate) struct Suppression {
     pub suppression_id: String,
     pub rule_id: String,
     pub reason: String,
@@ -77,7 +77,7 @@ pub struct Suppression {
 }
 
 #[derive(Debug)]
-pub struct Measurement {
+pub(crate) struct Measurement {
     pub rule_id: String,
     pub symbol: String,
     pub location: Location,
@@ -130,14 +130,14 @@ impl Serialize for Measurement {
     }
 }
 
-pub struct FindingRelations {
+pub(crate) struct FindingRelations {
     pub evidence: Value,
     pub symbols: Vec<String>,
     pub locations: Vec<Location>,
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub struct SourceExcerpt {
+pub(crate) struct SourceExcerpt {
     pub path: String,
     pub focus_line: usize,
     pub focus_column: usize,
@@ -145,7 +145,7 @@ pub struct SourceExcerpt {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub struct SourceLine {
+pub(crate) struct SourceLine {
     pub line: usize,
     pub display_start_column: usize,
     pub text: String,
@@ -206,7 +206,7 @@ pub(super) fn source_excerpt(
 }
 
 #[derive(Debug, Default, Serialize)]
-pub struct ReportSummary {
+pub(crate) struct ReportSummary {
     pub verdict: String,
     pub implementations: usize,
     pub unowned_files: usize,
@@ -228,7 +228,7 @@ pub struct ReportSummary {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub struct SmellResult {
+pub(crate) struct SmellResult {
     pub smell_id: String,
     pub smell: String,
     pub category: String,
@@ -254,7 +254,7 @@ pub struct SmellResult {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub struct RuleStatusIds {
+pub(crate) struct RuleStatusIds {
     pub pending_rule_ids: Vec<String>,
     pub disabled_rule_ids: Vec<String>,
     pub excluded_rule_ids: Vec<String>,
@@ -263,7 +263,7 @@ pub struct RuleStatusIds {
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SmellState {
+pub(crate) enum SmellState {
     BlockingMatch,
     IgnoredMatch,
     ReviewMatch,
@@ -327,7 +327,7 @@ impl std::fmt::Display for SmellState {
 
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum CoverageStatus {
+pub(crate) enum CoverageStatus {
     MeasuredWithPendingRules,
     MeasuredDefinedScope,
     Pending,
@@ -401,6 +401,10 @@ fn measured_state(
     }
 }
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each flag is an independent fact about one smell's coverage"
+)]
 pub(super) struct SmellStateInputs {
     pub(super) applicable: bool,
     pub(super) incomplete: bool,
@@ -412,7 +416,7 @@ pub(super) struct SmellStateInputs {
     pub(super) excluded: bool,
 }
 
-pub(super) fn smell_state(inputs: SmellStateInputs) -> SmellStatus {
+pub(super) fn smell_state(inputs: &SmellStateInputs) -> SmellStatus {
     if !inputs.applicable {
         return SmellStatus {
             state: SmellState::NotApplicable,
@@ -613,7 +617,7 @@ mod tests {
 }
 
 #[derive(Debug, Serialize)]
-pub struct ImplementationSummary {
+pub(crate) struct ImplementationSummary {
     pub verdict: String,
     pub total_smell_patterns: usize,
     pub matched_smell_patterns: usize,
@@ -625,7 +629,7 @@ pub struct ImplementationSummary {
 }
 
 #[derive(Debug, Serialize)]
-pub struct ImplementationResult {
+pub(crate) struct ImplementationResult {
     pub implementation_id: String,
     pub implementation_root: Option<String>,
     pub ownership: &'static str,
@@ -638,7 +642,7 @@ pub struct ImplementationResult {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub struct Evaluation {
+pub(crate) struct Evaluation {
     pub metric: String,
     pub observed: Value,
     pub match_condition: String,
@@ -647,7 +651,7 @@ pub struct Evaluation {
 }
 
 #[derive(Debug, Serialize)]
-pub struct Diagnostic {
+pub(crate) struct Diagnostic {
     pub headline: String,
     pub explanation: String,
     pub signal: String,
@@ -660,7 +664,7 @@ pub struct Diagnostic {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub struct ReferenceCheck {
+pub(crate) struct ReferenceCheck {
     pub required: bool,
     pub non_negotiable: bool,
     pub action: &'static str,
@@ -669,7 +673,7 @@ pub struct ReferenceCheck {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub struct HistoryScope {
+pub(crate) struct HistoryScope {
     pub available: bool,
     pub shallow: bool,
     pub commit_count: usize,

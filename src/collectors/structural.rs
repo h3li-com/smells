@@ -18,7 +18,7 @@ type SimilarityFeature = (String, u64);
 fn normalized_tokens(source: &str) -> BTreeMap<String, u64> {
     static TOKEN: OnceLock<Regex> = OnceLock::new();
     let token = TOKEN.get_or_init(|| {
-        Regex::new(r#"[A-Za-z_][A-Za-z0-9_]*|\d+(?:\.\d+)?|==|!=|<=|>=|=>|&&|\|\||[^\s]"#)
+        Regex::new(r"[A-Za-z_][A-Za-z0-9_]*|\d+(?:\.\d+)?|==|!=|<=|>=|=>|&&|\|\||[^\s]")
             .expect("valid normalized-token expression")
     });
     let keywords = [
@@ -121,7 +121,8 @@ fn similarity_prefixes(
                 })
                 .collect::<Vec<_>>();
             features.sort_by_key(|feature| (frequencies[feature], feature.clone()));
-            let required = (similarity as u128 * features.len() as u128).div_ceil(10_000) as usize;
+            let required =
+                (u128::from(similarity) * features.len() as u128).div_ceil(10_000) as usize;
             features.truncate((features.len() - required + 1).min(features.len()));
             features
         })
@@ -148,7 +149,7 @@ fn lengths_can_match(first: u64, second: u64, similarity: u64) -> bool {
     } else {
         (second, first)
     };
-    smaller as u128 * 10_000 >= similarity as u128 * larger as u128
+    u128::from(smaller) * 10_000 >= u128::from(similarity) * u128::from(larger)
 }
 
 fn interface_observation(
@@ -938,11 +939,11 @@ mod tests {
             second in 0_u64..10_000,
             similarity in 0_u64..=10_000,
         ) {
-            let smaller = first.min(second) as u128;
-            let larger = first.max(second) as u128;
+            let smaller = u128::from(first.min(second));
+            let larger = u128::from(first.max(second));
             prop_assert_eq!(
                 lengths_can_match(first, second, similarity),
-                smaller * 10_000 >= similarity as u128 * larger,
+                smaller * 10_000 >= u128::from(similarity) * larger,
             );
             prop_assert_eq!(
                 lengths_can_match(first, second, similarity),

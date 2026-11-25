@@ -1,4 +1,8 @@
-use super::*;
+use super::{
+    BTreeSet, Block, Expr, Facts, Fields, FnArg, Function, ImplItem, Input, Item, ItemEnum, ItemFn,
+    ItemImpl, ItemStruct, ItemTrait, ItemType, Module, Pat, Policy, Report, Result, Signature,
+    Slots, Span, TraitItem, TypeFacts, Visit, location, syntax, visit,
+};
 
 fn body_counts(source: &str, body: &Block) -> Result<(usize, usize), String> {
     let start = body.brace_token.span.open().end();
@@ -288,11 +292,15 @@ fn function_counts(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "the syn visitor hands over each piece of function context separately"
+)]
 fn function(
     facts: &mut Facts,
     module: &Module,
-    symbol: String,
+    symbol: &str,
     signature: &Signature,
     body: Option<&Block>,
     owner: Option<String>,
@@ -306,7 +314,7 @@ fn function(
     report.maximum(
         &input.policy,
         "rust.function_arguments",
-        &symbol,
+        symbol,
         &loc,
         signature.inputs.len(),
         "signature inputs including receiver",
@@ -315,7 +323,7 @@ fn function(
         report.maximum_with_role(
             &input.policy,
             "rust.function_lines",
-            &symbol,
+            symbol,
             &loc,
             crate::report::RoleAdjustedMaximum::new(
                 lines,
@@ -323,7 +331,7 @@ fn function(
                 crate::migration::function_role(
                     input,
                     &module.path,
-                    &symbol,
+                    symbol,
                     owner.as_deref(),
                     &loc,
                 ),
@@ -342,7 +350,7 @@ fn function(
         })
         .collect();
     facts.slots.push(Slots {
-        symbol: symbol.clone(),
+        symbol: symbol.to_string(),
         location: loc.clone(),
         types: parameters.iter().map(|p| (*p.ty).clone()).collect(),
         named: parameters
@@ -358,7 +366,7 @@ fn function(
     });
     let index = facts.functions.len();
     facts.functions.push(Function {
-        symbol: symbol.clone(),
+        symbol: symbol.to_string(),
         module: module.key.clone(),
         location: loc,
         signature: signature.clone(),
@@ -374,7 +382,12 @@ fn function(
         comments,
     });
     if let Some(owner) = owner {
-        facts.types.get_mut(&owner).unwrap().functions.push(index);
+        facts
+            .types
+            .get_mut(&owner)
+            .expect("method owners are registered before their functions")
+            .functions
+            .push(index);
     }
     if let Some(block) = body {
         let mut nested = Nested {
@@ -398,7 +411,7 @@ fn function(
             function(
                 facts,
                 module,
-                nested_symbol,
+                &nested_symbol,
                 &nested.sig,
                 Some(&nested.block),
                 None,
@@ -419,7 +432,7 @@ fn free_function(
     function(
         facts,
         module,
-        format!("{}::{}", module.key, item.sig.ident),
+        &format!("{}::{}", module.key, item.sig.ident),
         &item.sig,
         Some(&item.block),
         None,
@@ -440,7 +453,7 @@ fn trait_functions(
             function(
                 facts,
                 module,
-                format!("{}::{}::{}", module.key, item.ident, member.sig.ident),
+                &format!("{}::{}::{}", module.key, item.ident, member.sig.ident),
                 &member.sig,
                 member.default.as_ref(),
                 None,
@@ -478,7 +491,7 @@ fn impl_functions(
             function(
                 facts,
                 module,
-                format!("{target}{trait_name}::{}", member.sig.ident),
+                &format!("{target}{trait_name}::{}", member.sig.ident),
                 &member.sig,
                 Some(&member.block),
                 owner.clone(),

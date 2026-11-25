@@ -1,4 +1,7 @@
-use super::*;
+use super::{
+    BTreeSet, ClassFact, Facts, FunctionFact, Input, Location, Node, Registry, Report, RuleNeeds,
+    SourceStats, Tree,
+};
 
 fn location(path: &str, node: Node<'_>) -> Location {
     Location {
@@ -877,6 +880,7 @@ pub(super) fn extract_facts(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::portable::{ParserPool, parse_source};
 
     fn collect_nodes_of_kind<'tree>(node: Node<'tree>, kind: &str, matches: &mut Vec<Node<'tree>>) {
         if node.kind() == kind {

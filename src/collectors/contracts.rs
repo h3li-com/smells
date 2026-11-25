@@ -319,6 +319,7 @@ pub(super) fn library_capabilities(
     model: &SourceModel,
     input: &Input,
 ) -> Result<Vec<Observation>, String> {
+    static WORKAROUND: OnceLock<Regex> = OnceLock::new();
     if rule.id.starts_with("rust.") {
         return Ok(model
             .classes
@@ -341,10 +342,9 @@ pub(super) fn library_capabilities(
             })
             .collect());
     }
-    static WORKAROUND: OnceLock<Regex> = OnceLock::new();
     let workaround = WORKAROUND.get_or_init(|| {
         Regex::new(
-            r#"(?m)(?:\b[A-Za-z_$][A-Za-z0-9_$]*\.prototype\.[A-Za-z_$][A-Za-z0-9_$]*\s*=(?:[^=]|$)|\bsetattr\s*\(\s*[A-Za-z_][A-Za-z0-9_.]*\s*,|\b[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*\s*=(?:[^=]|$))"#,
+            r"(?m)(?:\b[A-Za-z_$][A-Za-z0-9_$]*\.prototype\.[A-Za-z_$][A-Za-z0-9_$]*\s*=(?:[^=]|$)|\bsetattr\s*\(\s*[A-Za-z_][A-Za-z0-9_.]*\s*,|\b[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*\s*=(?:[^=]|$))",
         )
         .expect("valid library workaround expression")
     });

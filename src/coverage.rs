@@ -8,7 +8,7 @@ use std::{
 
 /// Executable-line hit counts keyed by corpus-relative source path.
 #[derive(Clone, Debug, Default)]
-pub struct LineCoverage {
+pub(crate) struct LineCoverage {
     pub sha256: String,
     pub files: BTreeMap<String, BTreeMap<usize, u64>>,
 }
@@ -16,7 +16,7 @@ pub struct LineCoverage {
 impl LineCoverage {
     /// Returns `(covered, instrumented)` executable lines inside the inclusive span, or
     /// `None` when the artifact records no executable line there.
-    pub fn span(&self, path: &str, first: usize, last: usize) -> Option<(u64, u64)> {
+    pub(crate) fn span(&self, path: &str, first: usize, last: usize) -> Option<(u64, u64)> {
         let (covered, instrumented) = self
             .files
             .get(path)?
@@ -29,7 +29,7 @@ impl LineCoverage {
 }
 
 /// Reads an LCOV artifact and keeps only records for files in the scanned corpus.
-pub fn load(
+pub(crate) fn load(
     path: &Path,
     root: &Path,
     corpus: &BTreeMap<String, String>,
@@ -39,7 +39,7 @@ pub fn load(
     parse(&bytes, root, corpus)
 }
 
-pub fn parse(
+pub(crate) fn parse(
     bytes: &[u8],
     root: &Path,
     corpus: &BTreeMap<String, String>,
@@ -50,7 +50,7 @@ pub fn parse(
         corpus,
         files: BTreeMap::new(),
         records: 0,
-        current: None,
+        current: Record::Outside,
     };
     for (number, line) in text.lines().enumerate() {
         let line = line.trim_end();
@@ -66,14 +66,20 @@ pub fn parse(
     })
 }
 
-/// LCOV record state; `current` is `Some(None)` inside a record for a file outside
-/// the scanned corpus.
+/// Where the LCOV reader is relative to `SF:` ... `end_of_record` blocks.
+enum Record {
+    Outside,
+    /// Inside a record for a file outside the scanned corpus.
+    Skipped,
+    Corpus(String),
+}
+
 struct Reader<'a> {
     roots: Vec<PathBuf>,
     corpus: &'a BTreeMap<String, String>,
     files: BTreeMap<String, BTreeMap<usize, u64>>,
     records: usize,
-    current: Option<Option<String>>,
+    current: Record,
 }
 
 impl Reader<'_> {
@@ -84,26 +90,32 @@ impl Reader<'_> {
         if let Some(data) = line.strip_prefix("DA:") {
             return self.data(data);
         }
-        if line == "end_of_record" {
-            self.current.take().ok_or(())?;
+        if line == "end_of_record"
+            && let Record::Outside = std::mem::replace(&mut self.current, Record::Outside)
+        {
+            return Err(());
         }
         Ok(())
     }
 
     fn open(&mut self, source: &str) -> Result<(), ()> {
-        if self.current.is_some() {
+        if !matches!(self.current, Record::Outside) {
             return Err(());
         }
         self.records += 1;
-        let path = corpus_path(source, &self.roots).filter(|path| self.corpus.contains_key(path));
-        self.current = Some(path);
+        self.current = match corpus_path(source, &self.roots) {
+            Some(path) if self.corpus.contains_key(&path) => Record::Corpus(path),
+            _ => Record::Skipped,
+        };
         Ok(())
     }
 
     fn data(&mut self, data: &str) -> Result<(), ()> {
-        let record = self.current.as_ref().ok_or(())?;
+        if let Record::Outside = self.current {
+            return Err(());
+        }
         let (line_number, hits) = data_fields(data).ok_or(())?;
-        if let Some(path) = record {
+        if let Record::Corpus(path) = &self.current {
             let entry = self
                 .files
                 .entry(path.clone())
@@ -116,7 +128,7 @@ impl Reader<'_> {
     }
 
     fn finish(self, root: &Path) -> Result<BTreeMap<String, BTreeMap<usize, u64>>, String> {
-        if self.current.is_some() {
+        if !matches!(self.current, Record::Outside) {
             return Err("coverage file ends inside an LCOV record".into());
         }
         if self.records == 0 {
@@ -248,6 +260,18 @@ mod tests {
         assert_eq!(coverage.span("src/lib.rs", 1, 1), Some((1, 1)));
         assert_eq!(candidate_roots(&canonical), vec![canonical.clone()]);
         fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn records_under_the_root_outside_the_corpus_are_skipped() {
+        let lcov =
+            b"SF:/repo/src/other.rs\nDA:9,1\nend_of_record\nSF:src/lib.rs\nDA:1,1\nend_of_record\n";
+        let coverage = parse(lcov, Path::new("/repo"), &corpus()).expect("corpus record matches");
+        assert_eq!(
+            coverage.files.keys().collect::<Vec<_>>(),
+            ["src/lib.rs"],
+            "only scanned files keep coverage"
+        );
     }
 
     #[test]

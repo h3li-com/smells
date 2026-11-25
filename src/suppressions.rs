@@ -4,15 +4,16 @@ use crate::{
 };
 use regex::Regex;
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 use syn::{spanned::Spanned, visit::Visit};
 use tree_sitter::{Node, Parser};
 
-pub struct ParsedSuppressions {
+pub(crate) struct ParsedSuppressions {
     pub directives: Vec<ParsedSuppression>,
     pub errors: Vec<ParsedSuppressionError>,
 }
 
-pub struct ParsedSuppressionError {
+pub(crate) struct ParsedSuppressionError {
     pub message: String,
     pub location: Location,
 }
@@ -98,14 +99,14 @@ impl DeclarationSpan {
     }
 }
 
-pub struct ParsedSuppression {
+pub(crate) struct ParsedSuppression {
     pub suppression: Suppression,
     target_span: DeclarationSpan,
     nested_spans: Vec<DeclarationSpan>,
 }
 
 impl ParsedSuppression {
-    pub fn owns(&self, rule_id: &str, location: &Location) -> bool {
+    pub(crate) fn owns(&self, rule_id: &str, location: &Location) -> bool {
         self.suppression.rule_id == rule_id
             && self.suppression.target_location.path == location.path
             && self.target_span.contains(location)
@@ -151,13 +152,7 @@ fn actual_comment_lines(
         return lines;
     }
 
-    let grammar = if language == SuppressionLanguage::Python {
-        tree_sitter_python::LANGUAGE.into()
-    } else if path.ends_with(".tsx") {
-        tree_sitter_typescript::LANGUAGE_TSX.into()
-    } else {
-        tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()
-    };
+    let grammar = tree_sitter_grammar(path, language);
     let mut parser = Parser::new();
     parser
         .set_language(&grammar)
@@ -311,6 +306,20 @@ impl<'ast> Visit<'ast> for RustDeclarations {
     }
 }
 
+/// Picks the tree-sitter grammar for a non-Rust file; `.tsx` needs the JSX-aware one.
+fn tree_sitter_grammar(path: &str, language: SuppressionLanguage) -> tree_sitter::Language {
+    if language == SuppressionLanguage::Python {
+        tree_sitter_python::LANGUAGE.into()
+    } else if Path::new(path)
+        .extension()
+        .is_some_and(|extension| extension == "tsx")
+    {
+        tree_sitter_typescript::LANGUAGE_TSX.into()
+    } else {
+        tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()
+    }
+}
+
 fn source_syntax(path: &str, source: &str, language: SuppressionLanguage) -> SourceSyntax {
     if language == SuppressionLanguage::Rust {
         let Ok(file) = syn::parse_file(source) else {
@@ -321,13 +330,7 @@ fn source_syntax(path: &str, source: &str, language: SuppressionLanguage) -> Sou
         return declarations.syntax;
     }
 
-    let grammar = if language == SuppressionLanguage::Python {
-        tree_sitter_python::LANGUAGE.into()
-    } else if path.ends_with(".tsx") {
-        tree_sitter_typescript::LANGUAGE_TSX.into()
-    } else {
-        tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()
-    };
+    let grammar = tree_sitter_grammar(path, language);
     let mut parser = Parser::new();
     parser
         .set_language(&grammar)
@@ -363,7 +366,11 @@ fn suppression_error(
     }
 }
 
-pub fn parse(files: &BTreeMap<String, String>, registry: &Registry) -> ParsedSuppressions {
+#[expect(
+    clippy::too_many_lines,
+    reason = "directive parsing and validation share one pass over each file"
+)]
+pub(crate) fn parse(files: &BTreeMap<String, String>, registry: &Registry) -> ParsedSuppressions {
     let language = SuppressionLanguage::parse(&registry.language);
     let known_rules: BTreeSet<_> = registry.rules.iter().map(|rule| rule.id.as_str()).collect();
     let directive = language.directive_pattern();
@@ -478,6 +485,25 @@ pub fn parse(files: &BTreeMap<String, String>, registry: &Registry) -> ParsedSup
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_tsx_files_get_the_jsx_aware_grammar() {
+        let has_jsx = |path: &str, language| {
+            tree_sitter_grammar(path, language).id_for_node_kind("jsx_element", true) != 0
+        };
+        assert!(
+            has_jsx("src/view.tsx", SuppressionLanguage::TypeScript),
+            ".tsx must parse JSX"
+        );
+        assert!(
+            !has_jsx("src/view.ts", SuppressionLanguage::TypeScript),
+            ".ts must use the plain TypeScript grammar"
+        );
+        assert!(
+            !has_jsx("src/tsx.py", SuppressionLanguage::Python),
+            "Python files use the Python grammar"
+        );
+    }
 
     #[test]
     fn rust_suppression_parser_resolves_every_supported_declaration_kind() {

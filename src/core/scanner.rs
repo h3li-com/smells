@@ -236,9 +236,8 @@ mod tests {
         let selection = SelectionOptions::default();
 
         let scanner = ScanEngine::new(&repository);
-        let error = match scanner.check(&request(&selection)) {
-            Ok(_) => panic!("repository failure must stop the scan"),
-            Err(error) => error,
+        let Err(error) = scanner.check(&request(&selection)) else {
+            panic!("repository failure must stop the scan");
         };
 
         assert_eq!(repository.captures.get(), 1);
@@ -251,9 +250,8 @@ mod tests {
         let selection = SelectionOptions::default();
 
         let scanner = ScanEngine::new(&repository);
-        let error = match scanner.check(&request(&selection)) {
-            Ok(_) => panic!("invalid evidence must stop the scan"),
-            Err(error) => error,
+        let Err(error) = scanner.check(&request(&selection)) else {
+            panic!("invalid evidence must stop the scan");
         };
 
         assert_eq!(repository.captures.get(), 1);

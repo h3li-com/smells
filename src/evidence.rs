@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct EvidenceBundle {
+pub(crate) struct EvidenceBundle {
     schema_version: u32,
     scanner_version: String,
     rule_pack: String,
@@ -47,11 +47,11 @@ pub(crate) struct Observation {
     pub(crate) evidence: Value,
 }
 
-pub fn parse(bytes: &[u8]) -> Result<EvidenceBundle, String> {
+pub(crate) fn parse(bytes: &[u8]) -> Result<EvidenceBundle, String> {
     serde_json::from_slice(bytes).map_err(|error| format!("invalid provider evidence: {error}"))
 }
 
-pub fn digest(bytes: &[u8]) -> String {
+pub(crate) fn digest(bytes: &[u8]) -> String {
     crate::input::digest(&[b"provider-evidence-v1", bytes])
 }
 
@@ -154,7 +154,11 @@ fn validate_rule_evidence(rule: &RuleEvidence, input: &Input) -> Result<(), Stri
     Ok(())
 }
 
-pub fn validate(bundle: &EvidenceBundle, input: &Input, registry: &Registry) -> Result<(), String> {
+pub(crate) fn validate(
+    bundle: &EvidenceBundle,
+    input: &Input,
+    registry: &Registry,
+) -> Result<(), String> {
     validate_header(bundle, input, registry)?;
     let registered: BTreeMap<_, _> = registry
         .rules
@@ -172,7 +176,7 @@ pub fn validate(bundle: &EvidenceBundle, input: &Input, registry: &Registry) -> 
     Ok(())
 }
 
-pub fn apply(
+pub(crate) fn apply(
     bundle: Option<&EvidenceBundle>,
     input: &Input,
     registry: &Registry,
@@ -217,7 +221,7 @@ pub fn apply(
         if let Err(error) = built_in_collectors.collect_with(rule, |observation| {
             apply_observation(rule, &provider, true, &observation, input, report);
         }) {
-            report.rule_error(&rule.id, error);
+            report.rule_error(&rule.id, &error);
         }
     }
 }
@@ -233,7 +237,7 @@ fn apply_observation(
     let evaluation = match evaluate(&rule.id, &observation.measurements, &input.policy) {
         Ok(evaluation) => evaluation,
         Err(error) => {
-            report.rule_error(&rule.id, error);
+            report.rule_error(&rule.id, &error);
             return;
         }
     };

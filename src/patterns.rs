@@ -11,8 +11,9 @@ use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::result::Result;
 use syn::{
+    Block, Expr, ExprField, ExprMatch, FnArg, ItemFn, Lit, Member, Pat, Path, PathArguments, Stmt,
+    Type,
     visit::{self, Visit},
-    *,
 };
 
 fn parameter(policy: &Policy, id: &str, name: &str) -> u64 {
@@ -100,7 +101,7 @@ fn primitives(facts: &Facts, policy: &Policy, report: &mut Report) {
         let count = parameter(policy, id, "minimum_raw_slots");
         let percent = parameter(policy, id, "minimum_share_percent");
         let matched =
-            raw as u64 >= count && 100_u128 * raw as u128 >= percent as u128 * total as u128;
+            raw as u64 >= count && 100_u128 * raw as u128 >= u128::from(percent) * total as u128;
         report.finding(
             policy,
             id,
@@ -143,6 +144,10 @@ fn self_field(expr: &Expr) -> Option<String> {
     let Expr::Field(field) = expr else {
         return None;
     };
+    self_field_access(field)
+}
+
+fn self_field_access(field: &ExprField) -> Option<String> {
     if identifier(&field.base).as_deref() != Some("self") {
         return None;
     }
@@ -191,7 +196,7 @@ fn accessor(function: &Function) -> bool {
     if let Expr::Assign(assign) = expr {
         return self_field(&assign.left).is_some()
             && arguments(function).is_some_and(|args| {
-                args.len() == 1 && identifier(&assign.right) == Some(args[0].clone())
+                args.len() == 1 && identifier(&assign.right).is_some_and(|name| name == args[0])
             });
     }
     false
@@ -246,7 +251,7 @@ struct FieldUses {
 }
 impl<'ast> Visit<'ast> for FieldUses {
     fn visit_expr_field(&mut self, expr: &'ast ExprField) {
-        if let Some(field) = self_field(&Expr::Field(expr.clone())) {
+        if let Some(field) = self_field_access(expr) {
             self.fields.insert(field);
         }
         visit::visit_expr_field(self, expr);
@@ -370,7 +375,7 @@ fn forwarding_share(
         "methods and share >=",
         json!({"minimum_methods":minimum,"minimum_share_percent":share}),
         metrics.receivers.len() as u64 >= minimum
-            && 100_u128 * forward as u128 >= share as u128 * metrics.receivers.len() as u128,
+            && 100_u128 * forward as u128 >= u128::from(share) * metrics.receivers.len() as u128,
         json!({"resolved_type_equivalence":"not_checked"}),
     );
 }
@@ -407,7 +412,7 @@ fn temporary_fields(
             (name, count)
         })
         .filter(|(_, count)| {
-            100_u128 * (*count as u128) <= maximum as u128 * metrics.receivers.len() as u128
+            100_u128 * (*count as u128) <= u128::from(maximum) * metrics.receivers.len() as u128
         })
         .collect();
     report.finding(policy,id,symbol,&ty.location,"low-use optional syntax fields",json!({"fields":fields.len(),"methods":metrics.receivers.len()}),"field/method minima and use <=",
@@ -447,7 +452,7 @@ fn comments(facts: &Facts, policy: &Policy, report: &mut Report) {
             "code minimum and share >=",
             json!({"minimum_code_lines":code,"minimum_share_percent":share}),
             function.lines as u64 >= code
-                && 100_u128 * function.comments as u128 >= share as u128 * total as u128,
+                && 100_u128 * function.comments as u128 >= u128::from(share) * total as u128,
             json!({"denominator":total,"doc_comments":"excluded"}),
         );
     }
@@ -549,7 +554,12 @@ fn clumps(facts: &Facts, policy: &Policy, report: &mut Report) {
             populations.push((index, named));
         }
     }
-    let groups = match closed_slot_groups(&populations, size as usize, minimum, &mut remaining) {
+    let groups = match closed_slot_groups(
+        &populations,
+        usize::try_from(size).unwrap_or(usize::MAX),
+        minimum,
+        &mut remaining,
+    ) {
         Ok(groups) => groups,
         Err(error) => {
             report.error(error);
@@ -791,7 +801,7 @@ fn report_duplicate(
     let similarity = parameter(policy, id, "minimum_similarity_basis_points");
     if evidence.token_counts[0] as u64 >= minimum
         && evidence.token_counts[1] as u64 >= minimum
-        && evidence.intersection as u128 * 10_000 >= similarity as u128 * evidence.union as u128
+        && evidence.intersection as u128 * 10_000 >= u128::from(similarity) * evidence.union as u128
     {
         report.finding_with_relations(policy,id,&first.symbol,&first.location,"normalized 4-token multiset Jaccard",json!({"intersection":evidence.intersection,"union":evidence.union}),">=",
             json!({"minimum_similarity_basis_points":similarity,"minimum_tokens":minimum}),true,
@@ -852,7 +862,7 @@ fn duplicates(facts: &Facts, policy: &Policy, report: &mut Report) {
         Err(error) => {
             for rule_id in ["rust.duplicate_functions", "rust.alternative_interfaces"] {
                 if policy.enabled(rule_id) {
-                    report.rule_error(rule_id, error.clone());
+                    report.rule_error(rule_id, &error);
                 }
             }
             return;
@@ -930,7 +940,10 @@ impl<'ast> Visit<'ast> for Matches<'_> {
             if let Some(owners) = owners {
                 let owners: BTreeSet<_> = owners.into_iter().collect();
                 if owners.len() == 1 {
-                    let owner = owners.into_iter().next().unwrap();
+                    let owner = owners
+                        .into_iter()
+                        .next()
+                        .expect("the owner set has exactly one entry");
                     if self.facts.types[&owner].is_enum {
                         self.owners.insert(owner);
                     }
@@ -986,7 +999,7 @@ fn dispatch(facts: &Facts, policy: &Policy, report: &mut Report) {
     }
 }
 
-pub fn check(facts: &Facts, policy: &Policy, report: &mut Report) {
+pub(crate) fn check(facts: &Facts, policy: &Policy, report: &mut Report) {
     primitives(facts, policy, report);
     types(facts, policy, report);
     comments(facts, policy, report);
@@ -998,6 +1011,7 @@ pub fn check(facts: &Facts, policy: &Policy, report: &mut Report) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use syn::ImplItemFn;
 
     fn method(source: &str) -> Function {
         let method: ImplItemFn = syn::parse_str(source).unwrap();

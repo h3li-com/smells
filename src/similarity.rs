@@ -9,7 +9,7 @@ struct Fingerprint {
     size: usize,
 }
 
-pub struct SimilarPair {
+pub(crate) struct SimilarPair {
     pub left: usize,
     pub right: usize,
     pub intersection: usize,
@@ -64,7 +64,9 @@ fn reference_jaccard_pairs(
                 .sum::<usize>();
             let union = left_counts.values().sum::<usize>() + right_counts.values().sum::<usize>()
                 - intersection;
-            if union > 0 && intersection as u128 * 10_000 >= similarity as u128 * union as u128 {
+            if union > 0
+                && (intersection as u128) * 10_000 >= u128::from(similarity) * (union as u128)
+            {
                 matches.push(SimilarPair {
                     left,
                     right,
@@ -123,12 +125,12 @@ impl CandidateAccumulator {
     }
 
     fn insert(&mut self, candidate: usize) -> bool {
-        if self.generations[candidate] != self.generation {
+        if self.generations[candidate] == self.generation {
+            false
+        } else {
             self.generations[candidate] = self.generation;
             self.touched.push(candidate);
             true
-        } else {
-            false
         }
     }
 
@@ -219,12 +221,13 @@ fn ordered_features(
 }
 
 fn probing_prefix_length(size: usize, similarity: u64) -> usize {
-    let required = (similarity as u128 * size as u128).div_ceil(10_000) as usize;
+    let required = (u128::from(similarity) * size as u128).div_ceil(10_000) as usize;
     size - required + 1
 }
 
 fn indexed_prefix_length(size: usize, similarity: u64) -> usize {
-    (((10_000 - similarity) as u128 * size as u128) / (10_000 + similarity) as u128) as usize + 1
+    ((u128::from(10_000 - similarity) * size as u128) / u128::from(10_000 + similarity)) as usize
+        + 1
 }
 
 enum CandidateDecision {
@@ -240,12 +243,12 @@ fn candidate_decision(
     right_position: usize,
     similarity: u64,
 ) -> CandidateDecision {
-    if left_size as u128 * 10_000 < similarity as u128 * right_size as u128 {
+    if left_size as u128 * 10_000 < u128::from(similarity) * right_size as u128 {
         return CandidateDecision::RejectedByLength;
     }
     let maximum_overlap = 1 + (left_size - left_position - 1).min(right_size - right_position - 1);
-    let required_overlap = (similarity as u128 * (left_size + right_size) as u128)
-        .div_ceil(10_000 + similarity as u128);
+    let required_overlap = (u128::from(similarity) * (left_size + right_size) as u128)
+        .div_ceil(10_000 + u128::from(similarity));
     if maximum_overlap >= required_overlap as usize {
         CandidateDecision::Possible
     } else {
@@ -258,8 +261,8 @@ fn exact_similarity(
     right: &Fingerprint,
     similarity: u64,
 ) -> Option<(usize, usize)> {
-    let required = (similarity as u128 * (left.size + right.size) as u128)
-        .div_ceil(10_000 + similarity as u128) as usize;
+    let required = (u128::from(similarity) * (left.size + right.size) as u128)
+        .div_ceil(10_000 + u128::from(similarity)) as usize;
     let (mut left_index, mut right_index, mut intersection) = (0, 0, 0);
     let (mut left_remaining, mut right_remaining) = (left.size, right.size);
     while left_index < left.runs.len() && right_index < right.runs.len() {
@@ -431,7 +434,7 @@ impl JoinState {
     }
 }
 
-pub fn exact_jaccard_pairs(
+pub(crate) fn exact_jaccard_pairs(
     token_lists: &[Vec<String>],
     minimum_tokens: u64,
     similarity: u64,
@@ -641,7 +644,8 @@ mod tests {
                 }
                 let (intersection, union) =
                     reference_intersection_union(&fingerprints[left], &fingerprints[right]);
-                if union > 0 && intersection as u128 * 10_000 >= similarity as u128 * union as u128
+                if union > 0
+                    && (intersection as u128) * 10_000 >= u128::from(similarity) * (union as u128)
                 {
                     pairs.insert((left, right, intersection, union));
                 }
@@ -946,12 +950,12 @@ mod tests {
     #[test]
     fn optimized_join_matches_independent_semantic_reports_at_all_boundaries() {
         let generated = ReportWorkspace::new(
-            r#"
+            r"
 fn generated_a(value:i32)->i32 { value + value + value + value + value }
 fn generated_b(value:i32)->i32 { value + value + value + value - value }
 fn generated_c(value:i32)->i32 { value + value + value - value - value }
 fn generated_d(value:i32)->i32 { value + value - value - value * value }
-"#,
+",
         );
         assert_semantic_reports_match(&generated);
 

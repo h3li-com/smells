@@ -4,7 +4,7 @@ use crate::policy::{Policy, Registry};
 
 use super::ResolvedSourceRole;
 
-pub struct Input {
+pub(crate) struct Input {
     pub files: BTreeMap<String, String>,
     pub manifests: BTreeMap<String, String>,
     pub artifacts: BTreeMap<String, Vec<u8>>,
@@ -43,7 +43,7 @@ impl Input {
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct History {
+pub(crate) struct History {
     pub available: bool,
     /// The repository is a shallow clone whose boundary truncates the bounded
     /// history window, so `available` is false even though Git responded.
@@ -52,7 +52,7 @@ pub struct History {
 }
 
 #[derive(Clone, Debug)]
-pub struct HistoryCommit {
+pub(crate) struct HistoryCommit {
     pub id: String,
     /// The commit has no parent: an initial import rather than a change.
     pub root: bool,
@@ -60,7 +60,7 @@ pub struct HistoryCommit {
 }
 
 #[derive(Clone, Debug)]
-pub struct Implementation {
+pub(crate) struct Implementation {
     pub id: String,
     pub root: Option<String>,
     pub ownership: &'static str,
@@ -70,7 +70,7 @@ pub struct Implementation {
     pub source_files: Vec<String>,
 }
 
-pub struct CapturedInput {
+pub(crate) struct CapturedInput {
     pub input: Input,
     pub registry: Registry,
 }

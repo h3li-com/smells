@@ -63,3 +63,46 @@ unicode-ident = "=1.0.24"
 [dev-dependencies]
 jsonschema = { version = "0.58.1", default-features = false }
 proptest = "1.11.0"
+
+# Lint set adapted from BeautifulRust (https://github.com/morganlinton/BeautifulRust).
+# smells is an application, so the library-only lints (missing_docs and the
+# documentation-coverage set) are left out. `make pre-commit-push` runs clippy with
+# -D warnings, so every warn here is a gate.
+[lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+panic_in_result_fn = "warn"
+missing_assert_message = "warn"
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"
+undocumented_unsafe_blocks = "warn"
+multiple_unsafe_ops_per_block = "warn"
+fn_params_excessive_bools = "warn"
+struct_excessive_bools = "warn"
+clone_on_ref_ptr = "warn"
+redundant_clone = "warn"
+rc_buffer = "warn"
+string_add = "warn"
+wildcard_imports = "warn"
+dbg_macro = "warn"
+todo = "warn"
+cast_possible_truncation = "warn"
+cast_sign_loss = "warn"
+# Left off: as_conversions. The remaining `as` casts are usize/u64 widenings that
+# have no From impl; truncation and sign loss are still caught above.
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+module_inception = "allow"
+enum_glob_use = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+# Field names mirror the policy, manifest and report JSON schemas, so renaming them
+# to satisfy this lint would break user files.
+struct_field_names = "allow"

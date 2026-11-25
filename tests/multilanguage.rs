@@ -1,3 +1,12 @@
+#![expect(
+    clippy::unwrap_used,
+    clippy::too_many_lines,
+    clippy::cast_possible_truncation,
+    clippy::format_collect,
+    clippy::format_push_string,
+    reason = "multi-language test helpers fail loudly, and fixtures read best as one block"
+)]
+
 use serde_json::{Map, Value, json};
 use std::{
     fs,
@@ -218,7 +227,9 @@ fn selection(rule: &str, mode: &str, parameters: Value) -> Value {
         _ if rule.ends_with(".function_crap") => 3,
         _ => 1,
     };
-    json!({"version": version, "mode": mode, "parameters": parameters})
+    let mut selection = json!({"version": version, "mode": mode});
+    selection["parameters"] = parameters;
+    selection
 }
 
 fn smell_result<'a>(report: &'a Value, smell_id: &str) -> &'a Value {
@@ -362,8 +373,8 @@ fn portable_policy(language: &str) -> Value {
         "exclude_directories": [".git", "target", "node_modules", ".venv", "__pycache__"],
         "limits": {
             "maximum_files": 10000,
-            "maximum_pairs": 100000,
-            "maximum_group_combinations": 100000
+            "maximum_pairs": 100_000,
+            "maximum_group_combinations": 100_000
         },
         "rules": rules,
         "exceptions": []
@@ -3940,7 +3951,7 @@ fn nested_sqlx_configuration_does_not_create_an_implementation_boundary() {
 
 #[test]
 fn python_class_metrics_combine_declared_state_and_owned_methods() {
-    let source = r#"class Account:
+    let source = r"class Account:
     def __init__(self, a, b, c):
         self.a = a
         self.b = b
@@ -3949,7 +3960,7 @@ fn python_class_metrics_combine_declared_state_and_owned_methods() {
     def total(self):
         value = self.a + self.b
         return value
-"#;
+";
     let mut policy = portable_policy("python");
     require_maximum(&mut policy, "python.class_fields", 2);
     require_maximum(&mut policy, "python.class_methods", 1);
@@ -4001,7 +4012,7 @@ fn python_class_metrics_combine_declared_state_and_owned_methods() {
 
 #[test]
 fn typescript_class_metrics_cover_fields_methods_and_method_lines() {
-    let source = r#"class Service {
+    let source = r"class Service {
   private a: number;
   private b: number;
   private c: number;
@@ -4017,7 +4028,7 @@ fn typescript_class_metrics_cover_fields_methods_and_method_lines() {
     return value + d;
   }
 }
-"#;
+";
     let mut policy = portable_policy("typescript");
     require_maximum(&mut policy, "typescript.class_fields", 2);
     require_maximum(&mut policy, "typescript.class_methods", 1);
@@ -4064,10 +4075,10 @@ fn typescript_class_metrics_cover_fields_methods_and_method_lines() {
 
 #[test]
 fn typescript_abstract_method_signatures_count_as_class_operations() {
-    let source = r#"abstract class Service {
+    let source = r"abstract class Service {
   abstract run(value: number): number;
 }
-"#;
+";
     let mut policy = portable_policy("typescript");
     require_maximum(&mut policy, "typescript.class_methods", 0);
     require(
@@ -4098,7 +4109,7 @@ fn typescript_abstract_method_signatures_count_as_class_operations() {
 
 #[test]
 fn typescript_function_rules_include_class_methods_but_not_object_literal_methods() {
-    let source = r#"const helpers = {
+    let source = r"const helpers = {
   objectMethod(a: number, b: number, c: number) {
     const sum = a + b;
     return sum + c;
@@ -4111,7 +4122,7 @@ class Service {
     return sum + c;
   }
 }
-"#;
+";
     let mut policy = portable_policy("typescript");
     require_maximum(&mut policy, "typescript.function_arguments", 2);
     require_maximum(&mut policy, "typescript.function_lines", 1);
@@ -4165,10 +4176,10 @@ class Service {
 
 #[test]
 fn typescript_empty_method_bodies_do_not_panic() {
-    let source = r#"class Empty {
+    let source = r"class Empty {
   value(): void {}
 }
-"#;
+";
     let workspace = Workspace::new("empty.ts", source, &portable_policy("typescript"));
     let output = workspace.check_path();
     assert_eq!(
@@ -4256,14 +4267,14 @@ fn python_staged_scan_uses_staged_source_and_staged_policy() {
 
 #[test]
 fn tsx_classes_and_constructor_parameter_properties_are_scanned() {
-    let source = r#"class Widget {
+    let source = r"class Widget {
   constructor(private count: number, readonly label: string) {}
 
   render() {
     return <div>{this.label}: {this.count}</div>;
   }
 }
-"#;
+";
     let mut policy = portable_policy("typescript");
     require_maximum(&mut policy, "typescript.class_fields", 1);
     let workspace = Workspace::new("widget.tsx", source, &policy);
@@ -4290,7 +4301,7 @@ fn tsx_classes_and_constructor_parameter_properties_are_scanned() {
 
 #[test]
 fn python_portable_source_patterns_emit_deterministic_evidence() {
-    let source = r#"class Record:
+    let source = r"class Record:
     name: str
     age: int
 
@@ -4309,7 +4320,7 @@ def second(x, y, z):
 
 def third(x, y, z):
     return x + y + z
-"#;
+";
     let mut policy = portable_policy("python");
     require(
         &mut policy,
@@ -4379,7 +4390,7 @@ def third(x, y, z):
 
 #[test]
 fn typescript_portable_source_patterns_emit_deterministic_evidence() {
-    let source = r#"class Record {
+    let source = r"class Record {
   name: string;
   age: number;
 }
@@ -4401,7 +4412,7 @@ function second(x: number, y: number, z: number) {
 function third(x: number, y: number, z: number) {
   return x + y + z;
 }
-"#;
+";
     let mut policy = portable_policy("typescript");
     require(
         &mut policy,
@@ -4475,7 +4486,7 @@ fn every_portable_authored_source_rule_executes_on_a_matched_fixture() {
         (
             "python",
             "coverage.py",
-            r#"class Record:
+            r"class Record:
     first: int
     second: int
 
@@ -4490,12 +4501,12 @@ def first(alpha: int, beta: int, gamma: int):
 def second(alpha: int, beta: int, gamma: int):
     value = alpha + beta
     return value + gamma
-"#,
+",
         ),
         (
             "typescript",
             "coverage.ts",
-            r#"class Record {
+            r"class Record {
   first: number;
   second: number;
   read() { return this.first; }
@@ -4511,7 +4522,7 @@ function second(alpha: number, beta: number, gamma: number) {
   const value = alpha + beta;
   return value + gamma;
 }
-"#,
+",
         ),
     ];
     for (language, file, source) in cases {
@@ -4591,7 +4602,7 @@ fn duplicate_budget_counts_only_exactly_pruned_candidates() {
         source.push_str(&format!("def tiny_{index}():\n    return {index}\n\n"));
     }
     source.push_str(
-        r#"def duplicate_a(value):
+        r"def duplicate_a(value):
     first = value + 1
     second = first * 2
     third = second - 3
@@ -4604,7 +4615,7 @@ def duplicate_b(item):
     gamma = beta - 10
     delta = gamma / 11
     return delta
-"#,
+",
     );
     let mut policy = portable_policy("python");
     policy["limits"]["maximum_pairs"] = json!(1);
@@ -4642,12 +4653,12 @@ def duplicate_b(item):
 
 #[test]
 fn duplicate_budget_still_fails_closed_for_too_many_exact_candidates() {
-    let body = r#"    first = value + 1
+    let body = r"    first = value + 1
     second = first * 2
     third = second - 3
     fourth = third / 4
     return fourth
-"#;
+";
     let source =
         format!("def first(value):\n{body}\ndef second(value):\n{body}\ndef third(value):\n{body}");
     let mut policy = portable_policy("python");
@@ -5133,7 +5144,7 @@ fn quality_policy_schemas_enforce_exact_rule_versions() {
             &fs::read_to_string(root.join(format!(
                 "schemas/{}quality-policy.schema.json",
                 if language == "rust" {
-                    "".to_string()
+                    String::new()
                 } else {
                     format!("{language}-")
                 }
