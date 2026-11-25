@@ -3372,41 +3372,8 @@ mod tests {
         }
     }
 
-    fn policy(rule_pack: &str) -> Policy {
-        Policy {
-            schema_version: 1,
-            rule_pack: rule_pack.into(),
-            scanner_version: env!("CARGO_PKG_VERSION").into(),
-            scope: "repository".into(),
-            default_groups: vec!["all".into()],
-            exclude_directories: Vec::new(),
-            source_roles: Vec::new(),
-            limits: crate::policy::Limits {
-                maximum_files: 100,
-                maximum_pairs: 100,
-                maximum_group_combinations: 100,
-            },
-            rules: BTreeMap::new(),
-            exceptions: Vec::new(),
-            resolved: crate::policy::ResolvedSelection::default(),
-        }
-    }
-
     fn input(rule_pack: &str, files: BTreeMap<String, String>) -> Input {
-        Input {
-            files,
-            manifests: BTreeMap::new(),
-            artifacts: BTreeMap::new(),
-            artifact_candidates: BTreeMap::new(),
-            implementations: Vec::new(),
-            source_roles: Vec::new(),
-            history: crate::core::model::History::default(),
-            policy_sha256: String::new(),
-            policy: policy(rule_pack),
-            digest: "0".repeat(64),
-            mode: "test",
-            coverage: None,
-        }
+        Input::fixture(rule_pack, files)
     }
 
     #[test]
@@ -4241,7 +4208,7 @@ mod tests {
             ),
             implementation("worker", Some("worker"), &["worker/migrations/one.py"]),
         ];
-        let mut declared = policy("python-v1");
+        let mut declared = Policy::fixture("python-v1");
         declared.source_roles = vec![SourceRoleDeclaration {
             role: "database_migration".into(),
             framework: "alembic".into(),
@@ -4292,7 +4259,7 @@ mod tests {
             "def upgrade():\n    op.execute('select 1')\n",
         );
         let files = BTreeMap::from([("backend/revision.py".into(), source.into())]);
-        let policies = policy("python-v1");
+        let policies = Policy::fixture("python-v1");
         let implementations = vec![implementation(
             "backend",
             Some("backend"),

@@ -394,11 +394,7 @@ pub(super) fn primitive_slots(rule: &Rule, model: &SourceModel) -> Vec<Observati
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        collectors::model::{ClassFact, FieldFact},
-        core::model::History,
-        policy::{Limits, Policy, ResolvedSelection},
-    };
+    use crate::collectors::model::{ClassFact, FieldFact};
     use std::sync::Arc;
 
     fn rule(id: &str) -> Rule {
@@ -415,39 +411,11 @@ mod tests {
     }
 
     fn input(rule_pack: &str, files: &[(&str, &str)]) -> Input {
-        Input {
-            files: files
-                .iter()
-                .map(|(path, source)| ((*path).into(), (*source).into()))
-                .collect(),
-            manifests: BTreeMap::new(),
-            artifacts: BTreeMap::new(),
-            artifact_candidates: BTreeMap::new(),
-            implementations: Vec::new(),
-            source_roles: Vec::new(),
-            history: History::default(),
-            policy_sha256: String::new(),
-            policy: Policy {
-                schema_version: 1,
-                rule_pack: rule_pack.into(),
-                scanner_version: env!("CARGO_PKG_VERSION").into(),
-                scope: "repository".into(),
-                default_groups: vec!["all".into()],
-                exclude_directories: Vec::new(),
-                source_roles: Vec::new(),
-                limits: Limits {
-                    maximum_files: 10,
-                    maximum_pairs: 10,
-                    maximum_group_combinations: 10,
-                },
-                rules: BTreeMap::new(),
-                exceptions: Vec::new(),
-                resolved: ResolvedSelection::default(),
-            },
-            digest: "0".repeat(64),
-            mode: "test",
-            coverage: None,
-        }
+        let files = files
+            .iter()
+            .map(|(path, source)| ((*path).into(), (*source).into()))
+            .collect();
+        Input::fixture(rule_pack, files)
     }
 
     fn model_with_code(path: &str, source: &str) -> SourceModel {

@@ -586,6 +586,9 @@ fn parse_history_log(log: &str, files: &BTreeMap<String, String>, shallow: bool)
         let Some(id) = ids.next() else {
             continue;
         };
+        // A parentless commit is an initial import. The oldest commit of a shallow
+        // clone also has no parents here, which is only safe because a shallow
+        // boundary inside the history window marks history unavailable.
         let root = ids.next().is_none();
         let mut changed = lines
             .map(str::trim)

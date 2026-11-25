@@ -140,7 +140,9 @@ fn resolve_declared_base<'a>(
     candidates.next().is_none().then_some(resolved)
 }
 
-pub(super) fn port_conformance(model: &SourceModel) -> Vec<Observation> {
+pub(super) fn port_conformance(rule: &Rule, model: &SourceModel) -> Vec<Observation> {
+    // A Rust trait method with a default body is provided, not required.
+    let provides_defaults = rule.id.starts_with("rust.");
     let mut observations = Vec::new();
     for implementation in model.classes.iter().filter(|class| !class.interface) {
         let implemented = implementation
@@ -153,12 +155,10 @@ pub(super) fn port_conformance(model: &SourceModel) -> Vec<Observation> {
             .iter()
             .filter_map(|base| resolve_declared_base(model, implementation, base, true))
         {
-            // A Rust trait method with a default body is provided, not required.
-            let rust = port.location.path.ends_with(".rs");
             let required = port
                 .methods
                 .iter()
-                .filter(|method| !(rust && method.body.is_some()))
+                .filter(|method| !(provides_defaults && method.body.is_some()))
                 .map(|method| method.name.as_str())
                 .collect::<BTreeSet<_>>();
             let missing = required
@@ -372,8 +372,7 @@ mod tests {
     use super::*;
     use crate::{
         collectors::model::{FieldFact, FunctionFact},
-        core::model::{History, Input},
-        policy::{Limits, Policy, ResolvedSelection},
+        core::model::Input,
         report::Location,
     };
     use std::{collections::BTreeMap, sync::Arc};
@@ -433,36 +432,7 @@ mod tests {
     }
 
     fn input(files: BTreeMap<String, String>) -> Input {
-        Input {
-            files,
-            manifests: BTreeMap::new(),
-            artifacts: BTreeMap::new(),
-            artifact_candidates: BTreeMap::new(),
-            implementations: Vec::new(),
-            source_roles: Vec::new(),
-            history: History::default(),
-            policy_sha256: String::new(),
-            policy: Policy {
-                schema_version: 1,
-                rule_pack: "rust-v1".into(),
-                scanner_version: env!("CARGO_PKG_VERSION").into(),
-                scope: "repository".into(),
-                default_groups: vec!["all".into()],
-                exclude_directories: Vec::new(),
-                source_roles: Vec::new(),
-                limits: Limits {
-                    maximum_files: 10,
-                    maximum_pairs: 10,
-                    maximum_group_combinations: 10,
-                },
-                rules: BTreeMap::new(),
-                exceptions: Vec::new(),
-                resolved: ResolvedSelection::default(),
-            },
-            digest: "0".repeat(64),
-            mode: "test",
-            coverage: None,
-        }
+        Input::fixture("rust-v1", files)
     }
 
     #[test]
@@ -657,12 +627,17 @@ mod tests {
         table.bases = vec!["Repository".into()];
         table.methods = vec![function("get", Some("{}"))];
 
-        let observations = port_conformance(&SourceModel {
+        let model = SourceModel {
             classes: vec![port, table],
             ..SourceModel::default()
-        });
+        };
+
+        let observations = port_conformance(&rule("rust.port_conformance"), &model);
         assert_eq!(observations.len(), 1);
         assert_eq!(observations[0].measurements["failures"], 1);
         assert_eq!(observations[0].evidence["missing_methods"], json!(["save"]));
+
+        let observations = port_conformance(&rule("typescript.port_conformance"), &model);
+        assert_eq!(observations[0].measurements["failures"], 2);
     }
 }

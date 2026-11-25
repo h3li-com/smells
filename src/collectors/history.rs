@@ -66,11 +66,36 @@ impl<'a> Owners<'a> {
     }
 }
 
+/// Each changed path's owner, resolved once per scan so commit-sized loops
+/// only look owners up.
+struct Ownership<'a> {
+    by_path: BTreeMap<&'a str, String>,
+}
+
+impl<'a> Ownership<'a> {
+    fn new(input: &'a Input) -> Self {
+        let owners = Owners::new(input);
+        Self {
+            by_path: input
+                .history
+                .commits
+                .iter()
+                .flat_map(|commit| &commit.files)
+                .map(|path| (path.as_str(), owners.of(path)))
+                .collect(),
+        }
+    }
+
+    fn of(&self, path: &str) -> &str {
+        self.by_path.get(path).map_or("unowned", String::as_str)
+    }
+}
+
 pub(super) fn divergent_change(input: &Input) -> Vec<Observation> {
     if !input.history.available {
         return Vec::new();
     }
-    let owners = Owners::new(input);
+    let ownership = Ownership::new(input);
     input
         .files
         .keys()
@@ -88,7 +113,7 @@ pub(super) fn divergent_change(input: &Input) -> Vec<Observation> {
                 .iter()
                 .flat_map(|commit| commit.files.iter())
                 .filter(|changed| *changed != path)
-                .map(|changed| owners.of(changed))
+                .map(|changed| ownership.of(changed))
                 .collect::<BTreeSet<_>>();
             let source = &input.files[path];
             Some(observation(
@@ -113,7 +138,7 @@ pub(super) fn shotgun_surgery(input: &Input) -> Vec<Observation> {
     if !input.history.available {
         return Vec::new();
     }
-    let owner = Owners::new(input);
+    let ownership = Ownership::new(input);
     input
         .history
         .commits
@@ -123,7 +148,7 @@ pub(super) fn shotgun_surgery(input: &Input) -> Vec<Observation> {
             let owners = commit
                 .files
                 .iter()
-                .map(|path| owner.of(path))
+                .map(|path| ownership.of(path))
                 .collect::<BTreeSet<_>>();
             let anchor = commit.files.first()?;
             let source = input.files.get(anchor)?;
@@ -145,11 +170,8 @@ pub(super) fn shotgun_surgery(input: &Input) -> Vec<Observation> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Owners, divergent_change};
-    use crate::{
-        core::model::{History, HistoryCommit, Input},
-        policy::{Limits, Policy, ResolvedSelection},
-    };
+    use super::{Owners, Ownership, divergent_change};
+    use crate::core::model::{History, HistoryCommit, Input};
     use std::collections::BTreeMap;
 
     fn owners<'a>(roots: &[&'a str], files: &'a BTreeMap<String, String>) -> Owners<'a> {
@@ -195,49 +217,38 @@ mod tests {
     }
 
     #[test]
+    fn ownership_resolves_every_changed_path_once() {
+        let mut input = Input::fixture("rust-v1", BTreeMap::new());
+        input.history.commits = vec![HistoryCommit {
+            id: "change".into(),
+            root: false,
+            files: vec!["src/billing/tax.rs".into(), "src/main.rs".into()],
+        }];
+        let ownership = Ownership::new(&input);
+        assert_eq!(ownership.of("src/billing/tax.rs"), "billing");
+        assert_eq!(ownership.of("src/main.rs"), "main");
+        assert_eq!(ownership.of("src/never/changed.rs"), "unowned");
+    }
+
+    #[test]
     fn divergent_change_profiles_only_the_changes_that_touch_the_file() {
         let commit = |id: &str, root: bool, files: &[&str]| HistoryCommit {
             id: id.into(),
             root,
             files: files.iter().map(|file| (*file).into()).collect(),
         };
-        let input = Input {
-            files: BTreeMap::from([("src/a.rs".into(), String::new())]),
-            manifests: BTreeMap::new(),
-            artifacts: BTreeMap::new(),
-            artifact_candidates: BTreeMap::new(),
-            implementations: Vec::new(),
-            source_roles: Vec::new(),
-            history: History {
-                available: true,
-                shallow: false,
-                commits: vec![
-                    commit("touch", false, &["src/a.rs", "src/b/x.rs"]),
-                    commit("other", false, &["src/c/y.rs", "src/d/z.rs"]),
-                    commit("import", true, &["src/e/w.rs"]),
-                ],
-            },
-            policy_sha256: String::new(),
-            policy: Policy {
-                schema_version: 1,
-                rule_pack: "rust-v1".into(),
-                scanner_version: env!("CARGO_PKG_VERSION").into(),
-                scope: "repository".into(),
-                default_groups: vec!["all".into()],
-                exclude_directories: Vec::new(),
-                source_roles: Vec::new(),
-                limits: Limits {
-                    maximum_files: 10,
-                    maximum_pairs: 10,
-                    maximum_group_combinations: 10,
-                },
-                rules: BTreeMap::new(),
-                exceptions: Vec::new(),
-                resolved: ResolvedSelection::default(),
-            },
-            digest: "0".repeat(64),
-            mode: "test",
-            coverage: None,
+        let mut input = Input::fixture(
+            "rust-v1",
+            BTreeMap::from([("src/a.rs".into(), String::new())]),
+        );
+        input.history = History {
+            available: true,
+            shallow: false,
+            commits: vec![
+                commit("touch", false, &["src/a.rs", "src/b/x.rs"]),
+                commit("other", false, &["src/c/y.rs", "src/d/z.rs"]),
+                commit("import", true, &["src/e/w.rs"]),
+            ],
         };
         let observations = divergent_change(&input);
         assert_eq!(observations.len(), 1);

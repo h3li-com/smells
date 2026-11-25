@@ -427,7 +427,9 @@ fn rust_class_key(path: &str, module_path: &str, name: &str) -> String {
 }
 
 /// The line after a multi-line brace body's `{`, so the header row (`fn f() {`) never
-/// counts as body coverage; a one-line body keeps its only line.
+/// counts as body coverage; a one-line body keeps its only line. Code written on the
+/// `{` line itself is therefore not measured: that blind spot is cheaper than letting
+/// an executed declaration line credit an uncalled body.
 fn brace_body_line(open: usize, close: usize) -> usize {
     if close > open { open + 1 } else { open }
 }
@@ -1011,10 +1013,6 @@ pub(super) fn source_model(rule: &Rule, input: &Input) -> Result<SourceModel, St
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        core::model::History,
-        policy::{Limits, Policy, ResolvedSelection},
-    };
 
     fn rule(id: &str) -> Rule {
         Rule {
@@ -1030,39 +1028,11 @@ mod tests {
     }
 
     fn input(rule_pack: &str, files: &[(&str, &str)]) -> Input {
-        Input {
-            files: files
-                .iter()
-                .map(|(path, source)| ((*path).into(), (*source).into()))
-                .collect(),
-            manifests: BTreeMap::new(),
-            artifacts: BTreeMap::new(),
-            artifact_candidates: BTreeMap::new(),
-            implementations: Vec::new(),
-            source_roles: Vec::new(),
-            history: History::default(),
-            policy_sha256: String::new(),
-            policy: Policy {
-                schema_version: 1,
-                rule_pack: rule_pack.into(),
-                scanner_version: env!("CARGO_PKG_VERSION").into(),
-                scope: "repository".into(),
-                default_groups: vec!["all".into()],
-                exclude_directories: Vec::new(),
-                source_roles: Vec::new(),
-                limits: Limits {
-                    maximum_files: 10,
-                    maximum_pairs: 10,
-                    maximum_group_combinations: 10,
-                },
-                rules: BTreeMap::new(),
-                exceptions: Vec::new(),
-                resolved: ResolvedSelection::default(),
-            },
-            digest: "0".repeat(64),
-            mode: "test",
-            coverage: None,
-        }
+        let files = files
+            .iter()
+            .map(|(path, source)| ((*path).into(), (*source).into()))
+            .collect();
+        Input::fixture(rule_pack, files)
     }
 
     #[test]
