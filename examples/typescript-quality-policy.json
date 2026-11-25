@@ -95,7 +95,7 @@
       }
     },
     "typescript.temporary_fields": {
-      "version": 2,
+      "version": 1,
       "mode": "report",
       "parameters": {
         "minimum_fields": 3,
@@ -189,7 +189,7 @@
       }
     },
     "typescript.divergent_change": {
-      "version": 2,
+      "version": 1,
       "mode": "report",
       "parameters": {
         "minimum_changes": 3,
@@ -204,7 +204,7 @@
       }
     },
     "typescript.shotgun_surgery": {
-      "version": 2,
+      "version": 1,
       "mode": "report",
       "parameters": {
         "maximum_owners": 3
@@ -226,7 +226,7 @@
       }
     },
     "typescript.library_capabilities": {
-      "version": 2,
+      "version": 1,
       "mode": "report",
       "parameters": {
         "maximum_failures": 0

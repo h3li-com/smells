@@ -71,7 +71,7 @@ Size is a measurable policy, not proof of cohesion or responsibility count. Unkn
 **Implemented indicator: rust.alternative_interfaces@1.** On distinct resolved local type owners, match method bodies under the duplicate algorithm below (minimum 20 normalized tokens each, similarity at least 8200 basis points) when syntax interfaces differ. The interface includes name, receiver syntax, ordered parameter type syntax, output, generic/where syntax, async/const/unsafe/ABI flags and variadic marker. Ordinary parameter names are excluded. Alias-equivalent spelled types can differ; similar bodies do not prove substitutability. Fixtures: same body/different names, equal interfaces excluded, different owners required and unrelated same-shaped behavior.
 
 <a id="rust-port-conformance"></a>
-**Built-in with optional compiler/test override: rust.port_conformance@2.** Maximum zero failures. For authored trait implementations, compare the trait's required method names with direct implementation methods and count omissions. A trait method with a default body is provided by the trait and is not required. This source shape does not prove compilation or behavioral substitutability; compiler and named capability-test evidence may replace it.
+**Built-in with optional compiler/test override: rust.port_conformance@1.** Maximum zero failures. For authored trait implementations, compare the trait's required method names with direct implementation methods and count omissions. A trait method with a default body is provided by the trait and is not required. This source shape does not prove compilation or behavioral substitutability; compiler and named capability-test evidence may replace it.
 
 ### 7. Refused Bequest
 
@@ -90,7 +90,7 @@ Size is a measurable policy, not proof of cohesion or responsibility count. Unkn
 ### 10. Divergent Change
 
 <a id="rust-divergent-change"></a>
-**Built-in Git-history indicator: rust.divergent_change@2.** Inspect up to 200 commits and, for each current file, count touching commits plus distinct co-change responsibilities. A responsibility is the first module below the owning implementation root, after a leading `src` or `lib` and a top-level Python package (a directory with `__init__.py`); a file directly in that root is its own responsibility. The repository's initial commit is an import, not a change, and is skipped. Match at least 3 changes and 3 responsibilities. No commit prose or LLM inference is used. An external logical-change/ownership ledger may replace this repository-local approximation.
+**Built-in Git-history indicator: rust.divergent_change@1.** Inspect up to 200 commits and, for each current file, count touching commits plus distinct co-change responsibilities. A responsibility is the first module below the owning implementation root, after a leading `src` or `lib` and a top-level Python package (a directory with `__init__.py`); a file directly in that root is its own responsibility. The repository's initial commit is an import, not a change, and is skipped. Match at least 3 changes and 3 responsibilities. No commit prose or LLM inference is used. An external logical-change/ownership ledger may replace this repository-local approximation.
 
 Without Git history this rule is incomplete, never clean.
 
@@ -101,7 +101,7 @@ Without Git history this rule is incomplete, never clean.
 ### 12. Shotgun Surgery
 
 <a id="rust-shotgun-surgery"></a>
-**Built-in Git-history indicator: rust.shotgun_surgery@2.** Inspect up to 200 commits and count distinct source responsibilities changed by each commit. A responsibility is the first module below the owning implementation root, after a leading `src` or `lib` and a top-level Python package (a directory with `__init__.py`); a file directly in that root is its own responsibility. The repository's initial commit is an import, not a change, and is skipped. Match more than 3. One commit is used as the built-in logical-change boundary; broad migrations can legitimately match. An external ownership/change ledger may replace this approximation.
+**Built-in Git-history indicator: rust.shotgun_surgery@1.** Inspect up to 200 commits and count distinct source responsibilities changed by each commit. A responsibility is the first module below the owning implementation root, after a leading `src` or `lib` and a top-level Python package (a directory with `__init__.py`); a file directly in that root is its own responsibility. The repository's initial commit is an import, not a change, and is skipped. Match more than 3. One commit is used as the built-in logical-change boundary; broad migrations can legitimately match. An external ownership/change ledger may replace this approximation.
 
 Without Git history this rule is incomplete, never clean.
 

@@ -133,18 +133,6 @@
         "python.navigation_chains": {
           "$ref": "#/$defs/selection_v2"
         },
-        "python.divergent_change": {
-          "$ref": "#/$defs/selection_v2"
-        },
-        "python.shotgun_surgery": {
-          "$ref": "#/$defs/selection_v2"
-        },
-        "python.temporary_fields": {
-          "$ref": "#/$defs/selection_v2"
-        },
-        "python.library_capabilities": {
-          "$ref": "#/$defs/selection_v2"
-        },
         "python.function_crap": {
           "$ref": "#/$defs/selection_v3"
         }

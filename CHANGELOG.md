@@ -50,7 +50,7 @@ All notable changes to Smells are recorded here. Release tags use `vMAJOR.MINOR.
   says why. A zero-coverage upper bound never blocks. The starter policies make
   `function_crap` `required`, so a measured score above 10 now fails the check.
 - Calibrate detectors against seeded Python, TypeScript and Rust fixture
-  projects. Each rule whose observable contract changed moves to version `2`:
+  projects. Rule versions are unchanged, so existing policies keep working:
   - `divergent_change` and `shotgun_surgery` (all languages) take a file's owner
     from the first module below its implementation root, after a leading `src`
     or `lib` and a top-level Python package. Before, every file under `src/` had

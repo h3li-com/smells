@@ -211,11 +211,7 @@ fn selection(rule: &str, mode: &str, parameters: Value) -> Value {
         }
         _ if rule.ends_with(".data_clumps")
             || rule.ends_with(".foreign_accesses")
-            || rule.ends_with(".navigation_chains")
-            || rule.ends_with(".divergent_change")
-            || rule.ends_with(".shotgun_surgery")
-            || rule.ends_with(".temporary_fields")
-            || rule.ends_with(".library_capabilities") =>
+            || rule.ends_with(".navigation_chains") =>
         {
             2
         }

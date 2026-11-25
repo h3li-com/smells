@@ -83,7 +83,7 @@ Compare distinct classes with different method-name sets using identifier-normal
 Group callables by their authored `case` label sequence. Match `minimum_sites` sharing at least `minimum_arms`; type identity is not inferred.
 
 <a id="python-temporary-fields"></a>
-### `python.temporary_fields@2` — built in
+### `python.temporary_fields@1` — built in
 Treat fields annotated with `Optional`/`None` or assigned `None` as lifecycle candidates and count direct `self.field` use across non-constructor class methods; `__init__` initializes fields and is not lifecycle use. Apply the configured field, method, and maximum-use thresholds.
 
 <a id="python-forwarding-share"></a>
@@ -115,7 +115,7 @@ For classes inheriting an authored `Protocol`/`ABC`, compare direct method names
 For same-corpus inheritance, count base methods and derived overrides that explicitly reject them using `pass`, `NotImplemented`, or `NotImplementedError`. Apply the inherited-member and unused-share thresholds.
 
 <a id="python-divergent-change"></a>
-### `python.divergent_change@2` — built in
+### `python.divergent_change@1` — built in
 Inspect up to 200 commits and measure each current file's change count plus distinct co-change responsibilities. A responsibility is the first module below the owning implementation root, after a leading `src` or `lib` and a top-level Python package (a directory with `__init__.py`); a file directly in that root is its own responsibility. The repository's initial commit is an import, not a change, and is skipped. Apply both configured minima. Without Git history this rule is incomplete, never clean.
 
 <a id="python-parallel-inheritance"></a>
@@ -123,7 +123,7 @@ Inspect up to 200 commits and measure each current file's change count plus dist
 Compare authored inheritance families and count shared child-role prefixes/suffixes across different bases. Match at least `minimum_parallel_pairs`; this detects parallel structure without claiming synchronized historical addition.
 
 <a id="python-shotgun-surgery"></a>
-### `python.shotgun_surgery@2` — built in
+### `python.shotgun_surgery@1` — built in
 Inspect up to 200 commits and count distinct source responsibilities changed in each commit. A responsibility is the first module below the owning implementation root, after a leading `src` or `lib` and a top-level Python package (a directory with `__init__.py`); a file directly in that root is its own responsibility. The repository's initial commit is an import, not a change, and is skipped. Match owner count greater than `maximum_owners`. Without Git history this rule is incomplete, never clean.
 
 <a id="python-foreign-accesses"></a>
@@ -135,7 +135,7 @@ Measure each method that has an owned receiver: count its dotted member accesses
 Count foreign accesses to underscore/private-style members. Match forbidden accesses greater than `maximum_forbidden_accesses`; an explicit dependency contract may replace this visibility heuristic.
 
 <a id="python-library-capabilities"></a>
-### `python.library_capabilities@2` — built in
+### `python.library_capabilities@1` — built in
 Count authored foreign/prototype attribute assignments (not `==` comparisons) and `setattr` workarounds as missing-capability signals. Match failures greater than `maximum_failures`; capability tests may replace the heuristic.
 
 <a id="python-navigation-chains"></a>
