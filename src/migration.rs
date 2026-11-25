@@ -19,7 +19,7 @@ use std::{
 use tree_sitter::{Node, Parser};
 
 #[derive(Default)]
-pub struct MigrationArtifactIndex {
+pub(crate) struct MigrationArtifactIndex {
     drizzle_directories: BTreeMap<String, BTreeSet<String>>,
     prisma_7_directories: BTreeMap<String, BTreeSet<String>>,
     prisma_8_directories: BTreeMap<String, BTreeSet<String>>,
@@ -90,7 +90,7 @@ fn declared_role(
     }
 }
 
-pub fn resolve_source_roles(
+pub(crate) fn resolve_source_roles(
     policy: &Policy,
     files: &BTreeMap<String, String>,
     manifests: &BTreeMap<String, String>,
@@ -231,9 +231,6 @@ fn actual_imports(path: &str, source: &str) -> Option<Vec<String>> {
 }
 
 fn migration_contract_version(framework: &str) -> &'static str {
-    if let Some(contract) = crate::core::test_suite::contract_version(framework) {
-        return contract;
-    }
     const CONTRACTS: &[(&str, &str)] = &[
         ("alembic", "alembic:revision-v1"),
         ("django", "django:migration-class-v1"),
@@ -247,6 +244,9 @@ fn migration_contract_version(framework: &str) -> &'static str {
         ("refinery", "refinery:versioned-rust-v1"),
         ("rusqlite_migration", "rusqlite-migration:sequence-v1"),
     ];
+    if let Some(contract) = crate::core::test_suite::contract_version(framework) {
+        return contract;
+    }
     CONTRACTS
         .iter()
         .find_map(|(name, contract)| (*name == framework).then_some(*contract))
@@ -1733,7 +1733,7 @@ fn reported_role_at(
     Some(context)
 }
 
-pub fn function_role(
+pub(crate) fn function_role(
     input: &Input,
     path: &str,
     symbol: &str,
@@ -1753,7 +1753,7 @@ pub fn function_role(
     reported_role_at(role, declaration_role, canonical, source, location)
 }
 
-pub fn class_role(
+pub(crate) fn class_role(
     input: &Input,
     path: &str,
     symbol: &str,
@@ -1770,7 +1770,7 @@ pub fn class_role(
     reported_role_at(source_role, "migration_shell", canonical, source, location)
 }
 
-pub fn type_role(
+pub(crate) fn type_role(
     input: &Input,
     path: &str,
     symbol: &str,
@@ -2332,6 +2332,10 @@ impl JustPatterns {
 }
 
 #[derive(Default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the flags track independent Justfile lexer states"
+)]
 struct JustRecipeState {
     recipe_body: bool,
     script_recipe: bool,
@@ -2500,7 +2504,9 @@ fn nonempty_toml_array_setting(source: &str, section: &str, setting: &str) -> bo
         if current_section != section {
             continue;
         }
-        if !collecting {
+        if collecting {
+            value.push_str(line);
+        } else {
             let Some((key, remainder)) = line.split_once('=') else {
                 continue;
             };
@@ -2509,8 +2515,6 @@ fn nonempty_toml_array_setting(source: &str, section: &str, setting: &str) -> bo
             }
             value.push_str(remainder.trim());
             collecting = true;
-        } else {
-            value.push_str(line);
         }
         if value.contains(']') {
             return value
@@ -2765,7 +2769,7 @@ fn attach_declaration(
     artifact
 }
 
-pub fn migration_artifact_index(
+pub(crate) fn migration_artifact_index(
     rule_pack: &str,
     files: &BTreeMap<String, String>,
     manifests: &BTreeMap<String, String>,
@@ -2774,7 +2778,7 @@ pub fn migration_artifact_index(
     let mut index = MigrationArtifactIndex::default();
     match rule_pack {
         "typescript-v1" => {
-            index_typescript_migration_artifacts(&mut index, files, manifests, implementations)
+            index_typescript_migration_artifacts(&mut index, files, manifests, implementations);
         }
         "rust-v1" => index_rust_migration_artifacts(&mut index, files, manifests, implementations),
         _ => {}
@@ -3177,7 +3181,7 @@ fn migration_artifact_for(
     }
 }
 
-pub fn migration_artifact_path_candidate(rule_pack: &str, path: &str) -> bool {
+pub(crate) fn migration_artifact_path_candidate(rule_pack: &str, path: &str) -> bool {
     static VERSIONED_SQL: OnceLock<Regex> = OnceLock::new();
     static DRIZZLE_V1_SQL: OnceLock<Regex> = OnceLock::new();
     static PRISMA_SQL: OnceLock<Regex> = OnceLock::new();
@@ -3212,7 +3216,7 @@ pub fn migration_artifact_path_candidate(rule_pack: &str, path: &str) -> bool {
     }
 }
 
-pub fn is_recognized_migration_artifact(
+pub(crate) fn is_recognized_migration_artifact(
     rule_pack: &str,
     files: &BTreeMap<String, String>,
     manifests: &BTreeMap<String, String>,
@@ -3225,7 +3229,7 @@ pub fn is_recognized_migration_artifact(
     })
 }
 
-pub fn resolve_migration_artifacts(input: &Input) -> Vec<MigrationArtifact> {
+pub(crate) fn resolve_migration_artifacts(input: &Input) -> Vec<MigrationArtifact> {
     let index = migration_artifact_index(
         &input.policy.rule_pack,
         &input.files,
@@ -3249,7 +3253,9 @@ pub fn resolve_migration_artifacts(input: &Input) -> Vec<MigrationArtifact> {
         .collect()
 }
 
-pub fn resolve_migration_artifact_candidates(input: &Input) -> Vec<MigrationArtifactCandidate> {
+pub(crate) fn resolve_migration_artifact_candidates(
+    input: &Input,
+) -> Vec<MigrationArtifactCandidate> {
     input
         .artifact_candidates
         .keys()
@@ -3284,7 +3290,7 @@ pub fn resolve_migration_artifact_candidates(input: &Input) -> Vec<MigrationArti
         .collect()
 }
 
-pub fn resolve_source_role_candidates(input: &Input) -> Vec<SourceRoleCandidate> {
+pub(crate) fn resolve_source_role_candidates(input: &Input) -> Vec<SourceRoleCandidate> {
     static REFINERY_SOURCE_FILE: OnceLock<Regex> = OnceLock::new();
     let resolved = input
         .source_roles

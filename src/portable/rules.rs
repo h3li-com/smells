@@ -1,5 +1,8 @@
 use super::extract::{ClassSummary, record_class_metrics};
-use super::*;
+use super::{
+    BTreeSet, Facts, FindingRelations, FunctionFact, Input, Policy, Registry, Report,
+    exact_jaccard_pairs, json,
+};
 use crate::patterns::closed_slot_groups;
 
 fn data_class_match(fields: usize, operations: usize, minimum: u64, maximum: u64) -> bool {
@@ -25,7 +28,8 @@ fn body_line_total(lines: usize, comments: usize) -> usize {
 
 fn comment_share_match(lines: usize, comments: usize, minimum_lines: u64, share: u64) -> bool {
     let total = body_line_total(lines, comments);
-    lines as u64 >= minimum_lines && 100_u128 * comments as u128 >= share as u128 * total as u128
+    lines as u64 >= minimum_lines
+        && 100_u128 * comments as u128 >= u128::from(share) * total as u128
 }
 
 fn enough_clump_slots(slots: usize, minimum: usize) -> bool {
@@ -111,7 +115,7 @@ fn clumps(facts: &Facts, policy: &Policy, language: &str, report: &mut Report) {
     if !policy.enabled(&id) {
         return;
     }
-    let size = policy.parameter(&id, "minimum_group_size") as usize;
+    let size = usize::try_from(policy.parameter(&id, "minimum_group_size")).unwrap_or(usize::MAX);
     let minimum = policy.parameter(&id, "minimum_declarations");
     let mut remaining = policy.limits.maximum_group_combinations;
     let mut populations = Vec::new();
@@ -249,7 +253,7 @@ fn duplicates(facts: &Facts, policy: &Policy, language: &str, report: &mut Repor
     let pairs = match pairs {
         Ok(pairs) => pairs,
         Err(error) => {
-            report.rule_error(&id, error);
+            report.rule_error(&id, &error);
             return;
         }
     };
@@ -272,14 +276,63 @@ pub(super) fn patterns(facts: &Facts, policy: &Policy, language: &str, report: &
     duplicates(facts, policy, language, report);
 }
 
+pub(super) fn source_metrics(
+    facts: &Facts,
+    registry: &Registry,
+    input: &Input,
+    report: &mut Report,
+) {
+    for function in &facts.functions {
+        report.maximum(
+            &input.policy,
+            &format!("{}.function_arguments", registry.language),
+            &function.symbol,
+            &function.location,
+            function.parameters.len(),
+            "declared parameters",
+        );
+        report.maximum_with_role(
+            &input.policy,
+            &format!("{}.function_lines", registry.language),
+            &function.symbol,
+            &function.location,
+            crate::report::RoleAdjustedMaximum::new(
+                function.lines,
+                "authored body code lines",
+                crate::migration::function_role(
+                    input,
+                    &function.location.path,
+                    &function.symbol,
+                    function.owner.as_deref(),
+                    &function.location,
+                ),
+            ),
+        );
+    }
+    for class in &facts.classes {
+        record_class_metrics(
+            &ClassSummary {
+                symbol: &class.symbol,
+                location: &class.location,
+                fields: class.fields,
+                methods: class.methods,
+                method_lines: class.method_lines,
+            },
+            registry,
+            input,
+            report,
+        );
+    }
+}
+
 #[cfg(test)]
-#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::{
-        FunctionFact, Location, body_line_total, comment_share_match, data_class_match,
-        enough_clump_slots, lazy_class_match, ordered_functions, overlapping_functions,
+        FunctionFact, body_line_total, comment_share_match, data_class_match, enough_clump_slots,
+        lazy_class_match, ordered_functions, overlapping_functions,
     };
     use crate::patterns::combinations;
+    use crate::report::Location;
 
     fn function(symbol: &str, path: &str, line: usize, body_range: (usize, usize)) -> FunctionFact {
         FunctionFact {
@@ -391,54 +444,5 @@ mod tests {
         let (ordered_first, ordered_second) = ordered_functions(&overlapping, &first);
         assert_eq!(ordered_first.symbol, "alpha");
         assert_eq!(ordered_second.symbol, "zeta");
-    }
-}
-
-pub(super) fn source_metrics(
-    facts: &Facts,
-    registry: &Registry,
-    input: &Input,
-    report: &mut Report,
-) {
-    for function in &facts.functions {
-        report.maximum(
-            &input.policy,
-            &format!("{}.function_arguments", registry.language),
-            &function.symbol,
-            &function.location,
-            function.parameters.len(),
-            "declared parameters",
-        );
-        report.maximum_with_role(
-            &input.policy,
-            &format!("{}.function_lines", registry.language),
-            &function.symbol,
-            &function.location,
-            crate::report::RoleAdjustedMaximum::new(
-                function.lines,
-                "authored body code lines",
-                crate::migration::function_role(
-                    input,
-                    &function.location.path,
-                    &function.symbol,
-                    function.owner.as_deref(),
-                    &function.location,
-                ),
-            ),
-        );
-    }
-    for class in &facts.classes {
-        record_class_metrics(
-            &ClassSummary {
-                symbol: &class.symbol,
-                location: &class.location,
-                fields: class.fields,
-                methods: class.methods,
-                method_lines: class.method_lines,
-            },
-            registry,
-            input,
-            report,
-        );
     }
 }

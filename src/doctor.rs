@@ -5,6 +5,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fmt::Write as _,
     fs,
     path::{Path, PathBuf},
     process::Command,
@@ -157,7 +158,7 @@ pub(crate) fn health_score(
 ) -> u8 {
     let blocking_penalty = blocking_findings.saturating_mul(10).min(75);
     let review_penalty = (review_signals / scanned_files.max(1)).min(25);
-    100u8.saturating_sub((blocking_penalty + review_penalty) as u8)
+    100u8.saturating_sub(u8::try_from(blocking_penalty + review_penalty).unwrap_or(u8::MAX))
 }
 
 pub(crate) fn health_grade(score: u8) -> &'static str {
@@ -569,16 +570,16 @@ pub(crate) fn burndown_between(
         base_commit: base_commit.into(),
         base_score,
         current_score: current.score,
-        score_delta: current.score as isize - base_score as isize,
+        score_delta: isize::from(current.score) - isize::from(base_score),
         base_blocking,
         current_blocking: current.blocking_findings,
-        blocking_delta: current.blocking_findings as isize - base_blocking as isize,
+        blocking_delta: current.blocking_findings.cast_signed() - base_blocking.cast_signed(),
         base_review,
         current_review: current.review_signals,
-        review_delta: current.review_signals as isize - base_review as isize,
+        review_delta: current.review_signals.cast_signed() - base_review.cast_signed(),
         base_ignored,
         current_ignored: current.ignored_findings,
-        ignored_delta: current.ignored_findings as isize - base_ignored as isize,
+        ignored_delta: current.ignored_findings.cast_signed() - base_ignored.cast_signed(),
         smell_deltas,
     }
 }
@@ -599,8 +600,8 @@ fn compute_smell_deltas(base: &[SmellDiagnostic], current: &[SmellDiagnostic]) -
             let (base_blocking, base_review) = base_map.get(smell).copied().unwrap_or((0, 0));
             let (current_blocking, current_review) =
                 current_map.get(smell).copied().unwrap_or((0, 0));
-            let blocking_delta = current_blocking as isize - base_blocking as isize;
-            let review_delta = current_review as isize - base_review as isize;
+            let blocking_delta = current_blocking.cast_signed() - base_blocking.cast_signed();
+            let review_delta = current_review.cast_signed() - base_review.cast_signed();
             (blocking_delta != 0 || review_delta != 0).then(|| SmellDelta {
                 smell: smell.into(),
                 base_blocking,
@@ -1099,12 +1100,13 @@ pub(crate) fn to_table(report: &DoctorReport, color: bool) -> String {
         .max()
         .unwrap_or(0);
     for check in &report.checks {
-        output.push_str(&format!(
-            "  {} {:<id_width$}  {}\n",
+        let _ = writeln!(
+            output,
+            "  {} {:<id_width$}  {}",
             status_badge(check.status, palette),
             check.id,
             check.detail,
-        ));
+        );
     }
     if let Some(diagnostics) = &report.diagnostics {
         append_diagnostics_table(&mut output, diagnostics, palette);
@@ -1118,7 +1120,8 @@ pub(crate) fn to_table(report: &DoctorReport, color: bool) -> String {
 fn append_diagnostics_table(output: &mut String, diagnostics: &Diagnostics, palette: Palette) {
     let color = score_color(diagnostics.score);
     let score_label = format!("{}/100", diagnostics.score);
-    output.push_str(&format!(
+    let _ = write!(
+        output,
         "\n{}\n  {}  {}  {}\n  {} files · {} blocking · {} ignored · {} review warnings · {}/{} smells matched\n",
         palette.paint("1", "Codebase Health"),
         health_bar(diagnostics.score, palette),
@@ -1126,17 +1129,25 @@ fn append_diagnostics_table(output: &mut String, diagnostics: &Diagnostics, pale
         palette.paint(color, diagnostics.grade),
         diagnostics.scanned_files,
         palette.paint(
-            if diagnostics.blocking_findings > 0 { "1;31" } else { "32" },
+            if diagnostics.blocking_findings > 0 {
+                "1;31"
+            } else {
+                "32"
+            },
             &diagnostics.blocking_findings.to_string(),
         ),
         diagnostics.ignored_findings,
         palette.paint(
-            if diagnostics.review_signals > 0 { "33" } else { "2" },
+            if diagnostics.review_signals > 0 {
+                "33"
+            } else {
+                "2"
+            },
             &diagnostics.review_signals.to_string(),
         ),
         diagnostics.matched_smells,
         diagnostics.total_smells,
-    ));
+    );
     append_smells_section(output, &diagnostics.smells, palette);
     append_hotspots_section(output, &diagnostics.hotspots, palette);
 }
@@ -1157,7 +1168,8 @@ fn append_smells_section(output: &mut String, smells: &[SmellDiagnostic], palett
         .max()
         .unwrap_or(0)
         .max("Category".len());
-    output.push_str(&format!(
+    let _ = write!(
+        output,
         "\n{}\n  {}\n",
         palette.paint("1", "Smells (hard blockers first)"),
         palette.paint(
@@ -1167,16 +1179,17 @@ fn append_smells_section(output: &mut String, smells: &[SmellDiagnostic], palett
                 "Smell", "Category", "Blocking", "Ignored", "Review"
             ),
         ),
-    ));
+    );
     for row in smells {
-        output.push_str(&format!(
-            "  {:<smell_width$}  {:<category_width$}  {}  {}  {}\n",
+        let _ = writeln!(
+            output,
+            "  {:<smell_width$}  {:<category_width$}  {}  {}  {}",
             row.smell,
             palette.paint("2", &format!("{:<category_width$}", row.category)),
             palette.count(row.blocking, 8, "1;31"),
             palette.count(row.ignored, 7, "36"),
             palette.count(row.review, 6, "33"),
-        ));
+        );
     }
 }
 
@@ -1190,7 +1203,8 @@ fn append_hotspots_section(output: &mut String, hotspots: &[HotspotFile], palett
         .max()
         .unwrap_or(0)
         .max("File".len());
-    output.push_str(&format!(
+    let _ = write!(
+        output,
         "\n{}\n  {}\n",
         palette.paint("1", "Top Hotspot Files"),
         palette.paint(
@@ -1200,20 +1214,22 @@ fn append_hotspots_section(output: &mut String, hotspots: &[HotspotFile], palett
                 "File", "Blocking", "Review"
             ),
         ),
-    ));
+    );
     for row in hotspots {
-        output.push_str(&format!(
-            "  {:<file_width$}  {}  {}\n",
+        let _ = writeln!(
+            output,
+            "  {:<file_width$}  {}  {}",
             row.path,
             palette.count(row.blocking, 8, "1;31"),
             palette.count(row.review, 6, "33"),
-        ));
+        );
     }
 }
 
 fn append_burndown_table(output: &mut String, burndown: &Burndown, palette: Palette) {
     let short_commit: String = burndown.base_commit.chars().take(7).collect();
-    output.push_str(&format!(
+    let _ = write!(
+        output,
         "\n{}\n  Score: {} -> {} ({}) · Blockers: {} -> {} ({}) · Review: {} -> {} ({}) · Ignored: {} -> {} ({})\n",
         palette.paint(
             "1",
@@ -1231,7 +1247,7 @@ fn append_burndown_table(output: &mut String, burndown: &Burndown, palette: Pale
         burndown.base_ignored,
         burndown.current_ignored,
         palette.delta(burndown.ignored_delta, 0, false),
-    ));
+    );
     if burndown.smell_deltas.is_empty() {
         return;
     }
@@ -1242,8 +1258,9 @@ fn append_burndown_table(output: &mut String, burndown: &Burndown, palette: Pale
         .max()
         .unwrap_or(0)
         .max("Smell".len());
-    output.push_str(&format!(
-        "  {}\n",
+    let _ = writeln!(
+        output,
+        "  {}",
         palette.paint(
             "2",
             &format!(
@@ -1251,16 +1268,17 @@ fn append_burndown_table(output: &mut String, burndown: &Burndown, palette: Pale
                 "Smell", "Base", "Current", "Delta", "Review"
             ),
         ),
-    ));
+    );
     for row in &burndown.smell_deltas {
-        output.push_str(&format!(
-            "  {:<smell_width$}  {:>4}  {:>7}  {}  {}\n",
+        let _ = writeln!(
+            output,
+            "  {:<smell_width$}  {:>4}  {:>7}  {}  {}",
             row.smell,
             row.base_blocking,
             row.current_blocking,
             palette.delta(row.blocking_delta, 5, false),
             palette.delta(row.review_delta, 6, false),
-        ));
+        );
     }
 }
 
@@ -1312,7 +1330,7 @@ mod tests {
         );
         let shallow = History {
             shallow: true,
-            ..complete.clone()
+            ..complete
         };
         let shallow = history_check(&shallow);
         assert_eq!(shallow.status, Status::Error);
@@ -1629,6 +1647,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one fixture walks the full burndown table and its JSON"
+    )]
     fn burndown_between_tracks_improvements_regressions_and_table_json_output() {
         let base = Diagnostics {
             score: 54,

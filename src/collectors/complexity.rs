@@ -4,7 +4,7 @@
 //! Rust follows cargo-crap's decision points, so both tools agree on the same
 //! source: `if` (with `else if` and `if let`), `for`, `while`, `loop`, every
 //! match arm, `&&`, `||` and each `?`. Python follows radon and TypeScript
-//! follows ESLint's `complexity` rule. Closures, lambdas and nested items are
+//! follows `ESLint`'s `complexity` rule. Closures, lambdas and nested items are
 //! their own scope.
 
 use super::model::{class_node, function_node};
@@ -83,6 +83,10 @@ fn portable_decisions(node: Node<'_>, language: &str) -> u64 {
         .sum()
 }
 
+#[expect(
+    clippy::match_same_arms,
+    reason = "each language keeps its own list of decision nodes"
+)]
 fn decision(node: Node<'_>, language: &str) -> bool {
     match (language, node.kind()) {
         (
@@ -168,6 +172,10 @@ mod tests {
         rust(&syn::parse_str(body).unwrap())
     }
 
+    #[expect(
+        clippy::redundant_closure_for_method_calls,
+        reason = "a method path is not general over the node lifetime"
+    )]
     fn portable_cc(language: &str, path: &str, source: &str) -> u64 {
         portable_function_cc(language, path, source, |node| node.start_byte())
     }

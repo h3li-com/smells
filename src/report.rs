@@ -23,7 +23,7 @@ use guidance::{
     REFERENCE_RESEARCH_ACTION, REFERENCE_RESEARCH_REQUIRED_BEFORE,
     REFERENCE_RESEARCH_UNAVAILABLE_ACTION, RuleMetadata, guidance, research_gated_review,
 };
-pub use model::{
+pub(crate) use model::{
     Diagnostic, Evaluation, Finding, FindingRelations, HistoryScope, ImplementationResult,
     Location, Measurement, ReferenceCheck, ReportSummary, RuleStatusIds, SmellResult, SmellState,
     SourceExcerpt, Suppression,
@@ -161,7 +161,7 @@ where
 }
 
 #[derive(Serialize)]
-pub struct Report {
+pub(crate) struct Report {
     #[serde(flatten)]
     metadata: ReportMetadata,
     pub(crate) scanned_files: Vec<String>,
@@ -195,7 +195,7 @@ pub struct Report {
 }
 
 #[derive(Serialize)]
-pub struct ReportEvidence {
+pub(crate) struct ReportEvidence {
     guidance_catalog: Vec<crate::policy::WhenToIgnore>,
     evidence_provider_catalog: Vec<Value>,
     suppressions: Vec<Suppression>,
@@ -282,7 +282,11 @@ fn ignored_status(status: &str) -> bool {
 }
 
 impl Report {
-    pub fn new(
+    #[expect(
+        clippy::too_many_lines,
+        reason = "assembles the report skeleton in one pass over the registry"
+    )]
+    pub(crate) fn new(
         registry: &Registry,
         policy: &Policy,
         source_mode: &str,
@@ -407,7 +411,7 @@ impl Report {
         }
     }
 
-    pub fn rule_error(&mut self, rule_id: &str, error: String) {
+    pub(crate) fn rule_error(&mut self, rule_id: &str, error: &str) {
         self.incomplete_rule_ids.insert(rule_id.to_string());
         self.errors.push(ReportError {
             message: format!("rule {rule_id}: {error}"),
@@ -416,7 +420,7 @@ impl Report {
         });
     }
 
-    pub fn begin_scan(&mut self, input: &Input) {
+    pub(crate) fn begin_scan(&mut self, input: &Input) {
         self.metadata.input_sha256.clone_from(&input.digest);
         self.policy_sha256.clone_from(&input.policy_sha256);
         self.scanned_files = input.files.keys().cloned().collect();
@@ -450,11 +454,11 @@ impl Report {
         }
     }
 
-    pub fn set_provider_evidence_digest(&mut self, digest: String) {
+    pub(crate) fn set_provider_evidence_digest(&mut self, digest: String) {
         self.metadata.provider_evidence_sha256 = digest;
     }
 
-    pub fn error(&mut self, error: impl Into<String>) {
+    pub(crate) fn error(&mut self, error: impl Into<String>) {
         self.has_global_error = true;
         self.errors.push(ReportError {
             message: error.into(),
@@ -463,7 +467,7 @@ impl Report {
         });
     }
 
-    pub fn error_at(&mut self, error: impl Into<String>, location: Location) {
+    pub(crate) fn error_at(&mut self, error: impl Into<String>, location: Location) {
         self.has_global_error = true;
         self.errors.push(ReportError {
             message: error.into(),
@@ -472,12 +476,15 @@ impl Report {
         });
     }
 
-    pub fn has_errors(&self) -> bool {
+    pub(crate) fn has_errors(&self) -> bool {
         !self.errors.is_empty()
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn finding(
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one independent field of the finding record"
+    )]
+    pub(crate) fn finding(
         &mut self,
         policy: &Policy,
         id: &str,
@@ -512,8 +519,11 @@ impl Report {
         );
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn finding_with_relations(
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is one independent field of the finding record"
+    )]
+    pub(crate) fn finding_with_relations(
         &mut self,
         policy: &Policy,
         id: &str,
@@ -574,7 +584,11 @@ impl Report {
         );
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "one place builds and classifies every finding record"
+    )]
     fn finding_with_relations_and_role(
         &mut self,
         policy: &Policy,
@@ -711,7 +725,7 @@ impl Report {
         });
     }
 
-    pub fn apply_suppressions(&mut self, parsed: crate::suppressions::ParsedSuppressions) {
+    pub(crate) fn apply_suppressions(&mut self, parsed: crate::suppressions::ParsedSuppressions) {
         for error in parsed.errors {
             self.error_at(error.message, error.location);
         }
@@ -748,7 +762,7 @@ impl Report {
         }
     }
 
-    pub fn maximum(
+    pub(crate) fn maximum(
         &mut self,
         policy: &Policy,
         id: &str,
@@ -772,7 +786,7 @@ impl Report {
         );
     }
 
-    pub fn maximum_with_role(
+    pub(crate) fn maximum_with_role(
         &mut self,
         policy: &Policy,
         id: &str,
@@ -803,11 +817,18 @@ impl Report {
         );
     }
 
-    pub fn finish(&mut self) {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "settles every coverage row's status in one ordered pass"
+    )]
+    pub(crate) fn finish(&mut self) {
         for smell in &mut self.coverage {
-            for rule in smell["rules"].as_array_mut().unwrap() {
-                let mode = rule["mode"].as_str().unwrap();
-                let rule_id = rule["rule_id"].as_str().unwrap();
+            for rule in smell["rules"]
+                .as_array_mut()
+                .expect("coverage rows are built by the scanner")
+            {
+                let mode = coverage_text(rule, "mode");
+                let rule_id = coverage_text(rule, "rule_id");
                 rule["measurement_status"] = json!(if rule["selected"] == false {
                     "excluded_by_group"
                 } else if rule["implementation"] == "not_implemented" {
@@ -1100,44 +1121,46 @@ fn path_in_source_files(path: &str, source_files: Option<&[String]>) -> bool {
     })
 }
 
+fn coverage_text<'a>(row: &'a Value, field: &str) -> &'a str {
+    row[field]
+        .as_str()
+        .expect("coverage rows are built by the scanner")
+}
+
+fn rule_ids_with_status(rules: &[Value], statuses: &[&str]) -> Vec<String> {
+    rules
+        .iter()
+        .filter(|rule| {
+            rule["measurement_status"]
+                .as_str()
+                .is_some_and(|status| statuses.contains(&status))
+        })
+        .map(|rule| coverage_text(rule, "rule_id").to_string())
+        .collect()
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "one smell result gathers fields from coverage, measurements, and findings"
+)]
 fn build_smell_results(report: &Report, source_files: Option<&[String]>) -> Vec<SmellResult> {
     report
         .coverage
         .iter()
         .map(|smell| {
-            let smell_id = smell["smell_id"].as_str().unwrap();
-            let applicability = smell["applicability"].as_str().unwrap();
-            let rules = smell["rules"].as_array().unwrap();
-            let measured_rule_ids: Vec<_> = rules
-                .iter()
-                .filter(|rule| rule["measurement_status"] == "measured_defined_scope")
-                .map(|rule| rule["rule_id"].as_str().unwrap().to_string())
-                .collect();
-            let pending_rule_ids: Vec<_> = rules
-                .iter()
-                .filter(|rule| rule["measurement_status"] == "not_implemented")
-                .map(|rule| rule["rule_id"].as_str().unwrap().to_string())
-                .collect();
-            let disabled_rule_ids: Vec<_> = rules
-                .iter()
-                .filter(|rule| rule["measurement_status"] == "disabled")
-                .map(|rule| rule["rule_id"].as_str().unwrap().to_string())
-                .collect();
-            let excluded_rule_ids: Vec<_> = rules
-                .iter()
-                .filter(|rule| rule["measurement_status"] == "excluded_by_group")
-                .map(|rule| rule["rule_id"].as_str().unwrap().to_string())
-                .collect();
-            let incomplete_rule_ids: Vec<_> = rules
-                .iter()
-                .filter(|rule| {
-                    matches!(
-                        rule["measurement_status"].as_str(),
-                        Some("incomplete_scan" | "error_required_detector_missing")
-                    )
-                })
-                .map(|rule| rule["rule_id"].as_str().unwrap().to_string())
-                .collect();
+            let smell_id = coverage_text(smell, "smell_id");
+            let applicability = coverage_text(smell, "applicability");
+            let rules = smell["rules"]
+                .as_array()
+                .expect("coverage rows are built by the scanner");
+            let measured_rule_ids = rule_ids_with_status(rules, &["measured_defined_scope"]);
+            let pending_rule_ids = rule_ids_with_status(rules, &["not_implemented"]);
+            let disabled_rule_ids = rule_ids_with_status(rules, &["disabled"]);
+            let excluded_rule_ids = rule_ids_with_status(rules, &["excluded_by_group"]);
+            let incomplete_rule_ids = rule_ids_with_status(
+                rules,
+                &["incomplete_scan", "error_required_detector_missing"],
+            );
             let indexed_measurements: Vec<_> = report
                 .measurements
                 .iter()
@@ -1171,7 +1194,7 @@ fn build_smell_results(report: &Report, source_files: Option<&[String]>) -> Vec<
                     matches!(finding.status.as_str(), "indicator" | "reported_by_role")
                 })
                 .count();
-            let status = smell_state(SmellStateInputs {
+            let status = smell_state(&SmellStateInputs {
                 applicable: applicability == "applicable",
                 incomplete: !incomplete_rule_ids.is_empty(),
                 blocking_findings,
@@ -1215,9 +1238,9 @@ fn build_smell_results(report: &Report, source_files: Option<&[String]>) -> Vec<
                 .collect();
             SmellResult {
                 smell_id: smell_id.to_string(),
-                smell: smell["smell"].as_str().unwrap().to_string(),
-                category: smell["category"].as_str().unwrap().to_string(),
-                reference_url: smell["reference_url"].as_str().unwrap().to_string(),
+                smell: coverage_text(smell, "smell").to_string(),
+                category: coverage_text(smell, "category").to_string(),
+                reference_url: coverage_text(smell, "reference_url").to_string(),
                 reference_check: ReferenceCheck {
                     required: true,
                     non_negotiable: true,
@@ -1252,7 +1275,7 @@ fn build_smell_results(report: &Report, source_files: Option<&[String]>) -> Vec<
 }
 
 impl Report {
-    pub fn attach_sources(&mut self, files: &BTreeMap<String, String>) {
+    pub(crate) fn attach_sources(&mut self, files: &BTreeMap<String, String>) {
         const MAX_RELATED_EXCERPTS: usize = 5;
         for finding in &mut self.findings {
             if !finding.evaluation.matched {
@@ -1271,20 +1294,22 @@ impl Report {
                 .saturating_sub(finding.related_source_excerpts.len());
         }
     }
-    pub fn exit(&self) -> u8 {
-        if !self.errors.is_empty() {
-            2
-        } else if self.findings.iter().any(|f| f.blocking)
-            || ratchet_guardrail_blocked(self.ratchet.as_ref())
-        {
-            1
+    pub(crate) fn exit(&self) -> u8 {
+        if self.errors.is_empty() {
+            u8::from(
+                self.findings.iter().any(|f| f.blocking)
+                    || ratchet_guardrail_blocked(self.ratchet.as_ref()),
+            )
         } else {
-            0
+            2
         }
     }
 }
 
-pub fn write_finding_log(report: &Report, output: impl std::io::Write) -> std::io::Result<()> {
+pub(crate) fn write_finding_log(
+    report: &Report,
+    output: impl std::io::Write,
+) -> std::io::Result<()> {
     table::write_finding_log(report, output)
 }
 
@@ -1363,7 +1388,7 @@ mod tests {
             "blocked_by_suppression_growth"
         );
 
-        let mut policy_blocked = suppression_blocked.clone();
+        let mut policy_blocked = suppression_blocked;
         policy_blocked.suppression_guardrail_triggered = false;
         policy_blocked.policy_weakened_rules = vec!["rust.function_lines".into()];
         assert!(ratchet_guardrail_blocked(Some(&policy_blocked)));
@@ -1434,7 +1459,7 @@ mod tests {
         for (inputs, expected_state, expected_coverage) in cases {
             let (applicable, incomplete, blocking, ignored, review, measured, pending, excluded) =
                 inputs;
-            let actual = smell_state(SmellStateInputs {
+            let actual = smell_state(&SmellStateInputs {
                 applicable,
                 incomplete,
                 blocking_findings: blocking,
@@ -1495,7 +1520,7 @@ mod tests {
                 commits: Vec::new(),
             },
         );
-        report.rule_error("rust.function_arguments", "z failure".into());
+        report.rule_error("rust.function_arguments", "z failure");
         report.error_at(
             "a failure",
             Location {

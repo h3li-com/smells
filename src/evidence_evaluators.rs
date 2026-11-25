@@ -70,7 +70,7 @@ pub(crate) fn advisory(
     }
     let (numerator, denominator) = (measurements["numerator"], measurements["denominator"]);
     let maximum = policy.parameter(id, "maximum");
-    (numerator as u128 <= maximum as u128 * denominator as u128).then_some(WARNING_CRAP)
+    (u128::from(numerator) <= u128::from(maximum) * u128::from(denominator)).then_some(WARNING_CRAP)
 }
 
 fn values(
@@ -103,7 +103,7 @@ fn primitive_slots(
         observed: json!({"raw_slots":raw,"total_slots":total}),
         comparison: "count and share >=",
         threshold: json!({"minimum_raw_slots":minimum,"minimum_share_percent":share}),
-        matched: raw >= minimum && raw as u128 * 100 >= share as u128 * total as u128,
+        matched: raw >= minimum && u128::from(raw) * 100 >= u128::from(share) * u128::from(total),
     })
 }
 
@@ -130,7 +130,7 @@ fn alternative_interfaces(
         threshold: json!({"minimum_tokens":minimum,"minimum_similarity_basis_points":similarity}),
         matched: first >= minimum
             && second >= minimum
-            && intersection as u128 * 10_000 >= similarity as u128 * union as u128,
+            && u128::from(intersection) * 10_000 >= u128::from(similarity) * u128::from(union),
     })
 }
 
@@ -175,7 +175,7 @@ fn temporary_fields(
         threshold: json!({"minimum_fields":minimum_fields,"minimum_methods":minimum_methods,"maximum_use_percent":maximum_share}),
         matched: fields >= minimum_fields
             && methods >= minimum_methods
-            && uses as u128 * 100 <= maximum_share as u128 * possible as u128,
+            && u128::from(uses) * 100 <= u128::from(maximum_share) * u128::from(possible),
     })
 }
 
@@ -196,7 +196,8 @@ fn forwarding_share(
         observed: json!({"forwarders":forwarders,"methods":methods}),
         comparison: "methods and share >=",
         threshold: json!({"minimum_methods":minimum,"minimum_share_percent":share}),
-        matched: methods >= minimum && forwarders as u128 * 100 >= share as u128 * methods as u128,
+        matched: methods >= minimum
+            && u128::from(forwarders) * 100 >= u128::from(share) * u128::from(methods),
     })
 }
 
@@ -217,7 +218,7 @@ fn function_crap(
         observed: json!({"numerator":numerator,"denominator":denominator}),
         comparison: ">",
         threshold: json!({"warning_maximum":warning,"maximum":maximum}),
-        matched: numerator as u128 > warning.min(maximum) as u128 * denominator as u128,
+        matched: u128::from(numerator) > u128::from(warning.min(maximum)) * u128::from(denominator),
     })
 }
 
@@ -299,7 +300,7 @@ fn refused_bequest(
         comparison: "count and unused share >=",
         threshold: json!({"minimum_inherited_members":minimum,"minimum_unused_percent":unused_share}),
         matched: inherited >= minimum
-            && unused as u128 * 100 >= unused_share as u128 * inherited as u128,
+            && u128::from(unused) * 100 >= u128::from(unused_share) * u128::from(inherited),
     })
 }
 
@@ -367,7 +368,8 @@ fn foreign_accesses(
         observed: json!({"foreign_accesses":foreign,"total_accesses":total}),
         comparison: "count >= and share >",
         threshold: json!({"minimum_foreign_accesses":minimum,"minimum_share_percent_exclusive":share}),
-        matched: foreign >= minimum && foreign as u128 * 100 > share as u128 * total as u128,
+        matched: foreign >= minimum
+            && u128::from(foreign) * 100 > u128::from(share) * u128::from(total),
     })
 }
 

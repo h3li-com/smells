@@ -1,7 +1,7 @@
 use serde::Serialize;
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
-pub struct SourceSpan {
+pub(crate) struct SourceSpan {
     pub start_line: usize,
     pub start_column: usize,
     pub end_line: usize,
@@ -9,7 +9,7 @@ pub struct SourceSpan {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
-pub struct ResolvedSourceRole {
+pub(crate) struct ResolvedSourceRole {
     pub role: String,
     pub framework: String,
     pub implementation_id: String,
@@ -26,7 +26,7 @@ pub struct ResolvedSourceRole {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
-pub struct RoleContext {
+pub(crate) struct RoleContext {
     pub source_role: String,
     pub declaration_role: String,
     pub framework: String,
@@ -42,7 +42,7 @@ pub struct RoleContext {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
-pub struct MigrationIntegrity {
+pub(crate) struct MigrationIntegrity {
     pub mechanism: String,
     pub content_normalization: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -50,7 +50,7 @@ pub struct MigrationIntegrity {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
-pub struct MigrationArtifact {
+pub(crate) struct MigrationArtifact {
     pub role: String,
     pub framework: String,
     pub implementation_id: String,
@@ -67,7 +67,7 @@ pub struct MigrationArtifact {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
-pub struct MigrationArtifactCandidate {
+pub(crate) struct MigrationArtifactCandidate {
     pub role: String,
     pub path: String,
     pub matched_convention: String,
@@ -76,7 +76,7 @@ pub struct MigrationArtifactCandidate {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
-pub struct SourceRoleCandidate {
+pub(crate) struct SourceRoleCandidate {
     pub role: String,
     pub path: String,
     pub confidence: String,

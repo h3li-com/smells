@@ -496,7 +496,7 @@ pub(super) fn write_finding_log(report: &Report, mut output: impl Write) -> io::
 }
 
 impl Report {
-    pub fn print_table(&self) {
+    pub(crate) fn print_table(&self) {
         println!(
             "Scope: {} | source: {} | {} {} files",
             self.metadata.scope,

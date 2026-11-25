@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Registry {
+pub(crate) struct Registry {
     pub schema_version: u32,
     pub rule_pack: String,
     pub language: String,
@@ -18,7 +18,7 @@ pub struct Registry {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Catalog {
+pub(crate) struct Catalog {
     pub source: String,
     pub checked_on: String,
     pub item_count: usize,
@@ -27,7 +27,7 @@ pub struct Catalog {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Smell {
+pub(crate) struct Smell {
     pub id: String,
     pub name: String,
     pub category: String,
@@ -37,7 +37,7 @@ pub struct Smell {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct WhenToIgnore {
+pub(crate) struct WhenToIgnore {
     pub guidance_ref: String,
     pub smell_id: String,
     pub version: u32,
@@ -57,7 +57,7 @@ struct GuidanceCatalog {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Rule {
+pub(crate) struct Rule {
     pub id: String,
     pub version: u32,
     pub smell: String,
@@ -70,14 +70,14 @@ pub struct Rule {
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Mode {
+pub(crate) enum Mode {
     Required,
     Report,
     Off,
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct SelectionOptions {
+pub(crate) struct SelectionOptions {
     pub included_groups: Vec<String>,
     pub only_groups: Vec<String>,
     pub excluded_groups: Vec<String>,
@@ -86,7 +86,7 @@ pub struct SelectionOptions {
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
-pub struct ResolvedSelection {
+pub(crate) struct ResolvedSelection {
     pub default_groups: Vec<String>,
     pub included_groups: Vec<String>,
     pub only_groups: Vec<String>,
@@ -102,7 +102,7 @@ pub struct ResolvedSelection {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Selection {
+pub(crate) struct Selection {
     pub version: u32,
     pub mode: Mode,
     #[serde(deserialize_with = "unique_map")]
@@ -111,7 +111,7 @@ pub struct Selection {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Limits {
+pub(crate) struct Limits {
     pub maximum_files: usize,
     pub maximum_pairs: usize,
     pub maximum_group_combinations: usize,
@@ -119,7 +119,7 @@ pub struct Limits {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct SourceRoleDeclaration {
+pub(crate) struct SourceRoleDeclaration {
     pub role: String,
     pub framework: String,
     pub paths: Vec<String>,
@@ -129,7 +129,7 @@ pub struct SourceRoleDeclaration {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Policy {
+pub(crate) struct Policy {
     pub schema_version: u32,
     pub rule_pack: String,
     pub scanner_version: String,
@@ -178,7 +178,7 @@ fn all_default_groups() -> Vec<String> {
 struct UniqueMapVisitor<T>(std::marker::PhantomData<T>);
 impl<'de, T: Deserialize<'de>> serde::de::Visitor<'de> for UniqueMapVisitor<T> {
     type Value = BTreeMap<String, T>;
-    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("an object with unique keys")
     }
     fn visit_map<A: serde::de::MapAccess<'de>>(
@@ -204,7 +204,7 @@ where
     deserializer.deserialize_map(UniqueMapVisitor(std::marker::PhantomData))
 }
 
-pub fn registry_json(rule_pack: &str) -> Result<&'static str, String> {
+pub(crate) fn registry_json(rule_pack: &str) -> Result<&'static str, String> {
     Ok(match rule_pack {
         "rust-v1" => include_str!("../rules/rust-v1.json"),
         "python-v1" => include_str!("../rules/python-v1.json"),
@@ -441,7 +441,7 @@ fn embedded_guidance_catalog(registry: &Registry) -> Result<Vec<WhenToIgnore>, S
     Ok(catalog.records)
 }
 
-pub fn registry(rule_pack: &str) -> Result<Registry, String> {
+pub(crate) fn registry(rule_pack: &str) -> Result<Registry, String> {
     let source = registry_json(rule_pack)?;
     let mut registry: Registry =
         serde_json::from_str(source).map_err(|e| format!("invalid embedded registry: {e}"))?;
@@ -455,7 +455,7 @@ pub fn registry(rule_pack: &str) -> Result<Registry, String> {
     Ok(registry)
 }
 
-pub fn registry_for_policy(bytes: &str) -> Result<Registry, String> {
+pub(crate) fn registry_for_policy(bytes: &str) -> Result<Registry, String> {
     let value: serde_json::Value =
         serde_json::from_str(bytes).map_err(|e| format!("invalid policy: {e}"))?;
     let rule_pack = value
@@ -657,15 +657,18 @@ fn group_definitions(registry: &Registry) -> BTreeMap<String, BTreeSet<String>> 
         groups.entry(smell.category.clone()).or_default();
     }
     for rule in &registry.rules {
-        groups.get_mut("all").unwrap().insert(rule.id.clone());
+        groups
+            .entry("all".into())
+            .or_default()
+            .insert(rule.id.clone());
         let evaluator_group = if rule.inputs.iter().any(|input| input == "authored_source") {
             "source"
         } else {
             "evidence"
         };
         groups
-            .get_mut(evaluator_group)
-            .unwrap()
+            .entry(evaluator_group.into())
+            .or_default()
             .insert(rule.id.clone());
         let category = &registry
             .smells
@@ -769,9 +772,7 @@ fn selected_rules(
     groups: &BTreeMap<String, BTreeSet<String>>,
 ) -> BTreeSet<String> {
     let mut selected = BTreeSet::new();
-    if !selection.only.is_empty() {
-        add_group_rules(&mut selected, &selection.only, groups);
-    } else {
+    if selection.only.is_empty() {
         if !options.no_default_groups {
             add_group_rules(&mut selected, &selection.defaults, groups);
         }
@@ -779,6 +780,8 @@ fn selected_rules(
             selected.extend(groups["all"].iter().cloned());
         }
         add_group_rules(&mut selected, &selection.included, groups);
+    } else {
+        add_group_rules(&mut selected, &selection.only, groups);
     }
     let mut removed = BTreeSet::new();
     add_group_rules(&mut removed, &selection.excluded, groups);
@@ -858,7 +861,7 @@ fn validate_rule_parameters(policy: &Policy, registry: &Registry) -> Result<(), 
     Ok(())
 }
 
-pub fn parse_with_selection(
+pub(crate) fn parse_with_selection(
     bytes: &str,
     registry: &Registry,
     options: &SelectionOptions,
@@ -876,27 +879,27 @@ pub fn parse_with_selection(
     Ok(policy)
 }
 
-pub fn parse(bytes: &str, registry: &Registry) -> Result<Policy, String> {
+pub(crate) fn parse(bytes: &str, registry: &Registry) -> Result<Policy, String> {
     parse_with_selection(bytes, registry, &SelectionOptions::default())
 }
 
 impl Policy {
-    pub fn selected(&self, id: &str) -> bool {
+    pub(crate) fn selected(&self, id: &str) -> bool {
         self.resolved
             .selected_rule_ids
             .binary_search_by(|rule| rule.as_str().cmp(id))
             .is_ok()
     }
-    pub fn enabled(&self, id: &str) -> bool {
+    pub(crate) fn enabled(&self, id: &str) -> bool {
         self.resolved
             .active_rule_ids
             .binary_search_by(|rule| rule.as_str().cmp(id))
             .is_ok()
     }
-    pub fn required(&self, id: &str) -> bool {
+    pub(crate) fn required(&self, id: &str) -> bool {
         self.rules[id].mode == Mode::Required
     }
-    pub fn parameter(&self, id: &str, name: &str) -> u64 {
+    pub(crate) fn parameter(&self, id: &str, name: &str) -> u64 {
         self.rules[id].parameters[name]
     }
 }

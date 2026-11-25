@@ -72,6 +72,10 @@ struct Facts {
 }
 
 #[derive(Clone, Copy)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each flag gates one independent extraction pass"
+)]
 struct RuleNeeds {
     functions: bool,
     parameters: bool,
@@ -110,12 +114,12 @@ impl RuleNeeds {
 
     fn cache_bytes(self) -> [u8; 6] {
         [
-            self.functions as u8,
-            self.parameters as u8,
-            self.lines as u8,
-            self.comments as u8,
-            self.tokens as u8,
-            self.classes as u8,
+            u8::from(self.functions),
+            u8::from(self.parameters),
+            u8::from(self.lines),
+            u8::from(self.comments),
+            u8::from(self.tokens),
+            u8::from(self.classes),
         ]
     }
 }
@@ -128,10 +132,10 @@ struct SourceStats {
     normalized_tokens: usize,
 }
 
-fn configured_parser(path: &str, grammar: Language) -> Result<Parser, String> {
+fn configured_parser(path: &str, grammar: &Language) -> Result<Parser, String> {
     let mut parser = Parser::new();
     parser
-        .set_language(&grammar)
+        .set_language(grammar)
         .map_err(|error| format!("cannot load grammar for {path}: {error}"))?;
     Ok(parser)
 }
@@ -157,7 +161,7 @@ impl ParserPool {
             other => return Err(format!("unsupported portable language: {other}")),
         };
         if slot.is_none() {
-            *slot = Some(configured_parser(path, grammar)?);
+            *slot = Some(configured_parser(path, &grammar)?);
         }
         Ok(slot.as_mut().expect("parser initialized"))
     }
@@ -186,9 +190,10 @@ fn parse_source(
             .ok_or_else(|| at_start(format!("parser cancelled for {path}")))?
     };
     if tree.root_node().has_error() {
-        let point = first_syntax_error(tree.root_node())
-            .map(|node| node.start_position())
-            .unwrap_or_else(|| tree.root_node().start_position());
+        let point = first_syntax_error(tree.root_node()).map_or_else(
+            || tree.root_node().start_position(),
+            |node| node.start_position(),
+        );
         return Err(SourceError {
             message: format!("parse error in {path}"),
             location: Location {
@@ -209,7 +214,7 @@ fn first_syntax_error(node: Node<'_>) -> Option<Node<'_>> {
     node.children(&mut cursor).find_map(first_syntax_error)
 }
 
-pub fn check(input: &Input, registry: &Registry) -> Report {
+pub(crate) fn check(input: &Input, registry: &Registry) -> Report {
     let mut report = Report::new(
         registry,
         &input.policy,

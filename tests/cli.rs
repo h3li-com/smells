@@ -1,3 +1,12 @@
+#![expect(
+    clippy::unwrap_used,
+    clippy::too_many_lines,
+    clippy::cast_possible_truncation,
+    clippy::format_collect,
+    clippy::format_push_string,
+    reason = "CLI test helpers fail loudly, and fixtures read best as one block"
+)]
+
 use serde_json::{Value, json};
 use std::{
     collections::BTreeSet,
@@ -1910,7 +1919,7 @@ fn function_lines_include_the_maximum_and_fail_above_it() {
             finding(&data, "rust.function_lines", "::f")["evaluation"]["observed"],
             lines
         );
-        assert_eq!(output.status.code(), Some(if lines > 100 { 1 } else { 0 }));
+        assert_eq!(output.status.code(), Some(i32::from(lines > 100)));
     }
 }
 
@@ -1930,7 +1939,7 @@ fn argument_limits_count_the_receiver_as_one() {
             finding(&data, "rust.function_arguments", "::f")["evaluation"]["observed"],
             count
         );
-        assert_eq!(output.status.code(), Some(if count > 7 { 1 } else { 0 }));
+        assert_eq!(output.status.code(), Some(i32::from(count > 7)));
     }
 }
 
@@ -1958,7 +1967,7 @@ fn type_field_limits_are_per_declaration_or_variant() {
             finding(&data, "rust.type_fields", "::E::Unit")["evaluation"]["observed"],
             0
         );
-        assert_eq!(output.status.code(), Some(if count > 15 { 1 } else { 0 }));
+        assert_eq!(output.status.code(), Some(i32::from(count > 15)));
     }
 }
 
@@ -1983,7 +1992,7 @@ fn enum_and_trait_limits_are_inclusive() {
             finding(&data, "rust.trait_functions", "::T")["evaluation"]["observed"],
             count
         );
-        assert_eq!(output.status.code(), Some(if count > 20 { 1 } else { 0 }));
+        assert_eq!(output.status.code(), Some(i32::from(count > 20)));
     }
 }
 
@@ -2021,7 +2030,7 @@ fn method_counts_and_type_line_sums_have_exact_boundaries() {
             finding(&data, "rust.type_functions", "::A")["evaluation"]["observed"],
             count
         );
-        assert_eq!(output.status.code(), Some(if count > 20 { 1 } else { 0 }));
+        assert_eq!(output.status.code(), Some(i32::from(count > 20)));
     }
     for lines in [499, 500, 501] {
         let workspace = Workspace::new(&format!(
@@ -2035,7 +2044,7 @@ fn method_counts_and_type_line_sums_have_exact_boundaries() {
             finding(&data, "rust.type_function_lines", "::A")["evaluation"]["observed"],
             lines
         );
-        assert_eq!(output.status.code(), Some(if lines > 500 { 1 } else { 0 }));
+        assert_eq!(output.status.code(), Some(i32::from(lines > 500)));
     }
 }
 
@@ -2884,13 +2893,13 @@ fn git_stage_and_commit(root: &std::path::Path, message: &str) {
         .current_dir(root)
         .output()
         .unwrap();
-    assert!(add.status.success());
+    assert!(add.status.success(), "git add failed: {add:?}");
     let commit = Command::new("git")
         .args(["commit", "-q", "-m", message])
         .current_dir(root)
         .output()
         .unwrap();
-    assert!(commit.status.success());
+    assert!(commit.status.success(), "git commit failed: {commit:?}");
 }
 
 #[test]
@@ -3079,7 +3088,8 @@ fn staged_ratchet_against_head(root: &std::path::Path, source: &str) -> Value {
             .current_dir(root)
             .status()
             .unwrap()
-            .success()
+            .success(),
+        "git add failed"
     );
     let output = Command::new(env!("CARGO_BIN_EXE_smells"))
         .args([
@@ -3097,8 +3107,12 @@ fn staged_ratchet_against_head(root: &std::path::Path, source: &str) -> Value {
         .unwrap();
     let data = report(&output);
     assert_eq!(
-        output.status.code().map(|code| code as u64),
-        data["attestation"]["exit_code"].as_u64()
+        output
+            .status
+            .code()
+            .and_then(|code| u64::try_from(code).ok()),
+        data["attestation"]["exit_code"].as_u64(),
+        "the attested exit code must match the process exit code"
     );
     data
 }
@@ -3510,7 +3524,8 @@ fn doctor(workspace: &Workspace, extra: &[&str]) -> (Option<i32>, Value) {
     let data: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(
         output.status.code().map(i64::from),
-        data["exit_code"].as_i64()
+        data["exit_code"].as_i64(),
+        "the JSON exit code must match the process exit code"
     );
     (output.status.code(), data)
 }

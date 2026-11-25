@@ -1,5 +1,9 @@
 use super::extract::extract_facts;
-use super::*;
+use super::{
+    AsRawFd, AtomicUsize, CString, Counter, Deserialize, Facts, File, FromRawFd, OnceLock,
+    OpenOptions, OpenOptionsExt, Ordering, OsStr, OsStrExt, OsString, ParserPool, Path, PathBuf,
+    Registry, RuleNeeds, Serialize, SourceError, SourceStats, Write, fs, metrics, parse_source,
+};
 
 #[cfg(unix)]
 fn directory_custom_flags() -> libc::c_int {
@@ -74,8 +78,7 @@ fn cache_root() -> Option<&'static CacheRoot> {
     static ROOT: OnceLock<Option<CacheRoot>> = OnceLock::new();
     ROOT.get_or_init(|| {
         let configured = std::env::var_os("SMELLS_CACHE_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| std::env::temp_dir().join("smells-cache"));
+            .map_or_else(|| std::env::temp_dir().join("smells-cache"), PathBuf::from);
         initialize_cache_root(&configured)
     })
     .as_ref()
@@ -137,11 +140,11 @@ fn open_at(parent: &File, name: &OsStr, flags: libc::c_int) -> Option<File> {
     // SAFETY: parent is an open directory descriptor, name is NUL-terminated,
     // and a successful openat returns a uniquely owned descriptor.
     let descriptor = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), flags, 0o600) };
-    if !descriptor_succeeded(descriptor) {
-        None
-    } else {
+    if descriptor_succeeded(descriptor) {
         // SAFETY: the successful openat call transferred ownership of descriptor.
         Some(unsafe { File::from_raw_fd(descriptor) })
+    } else {
+        None
     }
 }
 
@@ -355,18 +358,16 @@ pub(super) fn store_analysis(
     analysis: &SourceAnalysis,
 ) {
     static NEXT_TEMPORARY: AtomicUsize = AtomicUsize::new(0);
-    let analysis = match serde_json::value::to_raw_value(analysis) {
-        Ok(analysis) => analysis,
-        Err(_) => return,
+    let Ok(analysis) = serde_json::value::to_raw_value(analysis) else {
+        return;
     };
     let analysis_sha256 = analysis_digest(key, analysis.get().as_bytes());
-    let bytes = match serde_json::to_vec(&CacheEntryRef {
+    let Ok(bytes) = serde_json::to_vec(&CacheEntryRef {
         key,
         analysis_sha256,
         analysis: &analysis,
-    }) {
-        Ok(bytes) => bytes,
-        Err(_) => return,
+    }) else {
+        return;
     };
     let _ = write_cache_entry(
         root,

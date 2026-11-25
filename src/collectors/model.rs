@@ -185,9 +185,10 @@ fn node_location(path: &str, node: Node<'_>) -> Location {
 }
 
 fn node_name(node: Node<'_>, source: &str) -> String {
-    node.child_by_field_name("name")
-        .map(|name| text_of(name, source))
-        .unwrap_or_else(|| format!("anonymous@{}", node.start_position().row + 1))
+    node.child_by_field_name("name").map_or_else(
+        || format!("anonymous@{}", node.start_position().row + 1),
+        |name| text_of(name, source),
+    )
 }
 
 fn header_before_body(node: Node<'_>, source: &str) -> String {
@@ -264,7 +265,7 @@ fn class_field_declarations(body: Node<'_>, source: &str, language: &str) -> Str
         .join("\n")
 }
 
-fn authored_field(slot: regex::Captures<'_>, language: &str) -> Option<FieldFact> {
+fn authored_field(slot: &regex::Captures<'_>, language: &str) -> Option<FieldFact> {
     let whole = slot.get(0).expect("annotated slot match").as_str();
     let (name, authored_type) = if language == "typescript" {
         (slot[1].to_string(), slot[2].trim().to_string())
@@ -290,7 +291,7 @@ fn declared_fields(body: Node<'_>, source: &str, language: &str) -> BTreeMap<Str
         annotated_slot()
     };
     slot.captures_iter(&declarations)
-        .filter_map(|capture| authored_field(capture, language))
+        .filter_map(|capture| authored_field(&capture, language))
         .map(|field| (field.name.clone(), field))
         .collect()
 }

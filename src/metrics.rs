@@ -10,7 +10,7 @@ use std::{
 
 #[derive(Clone, Copy)]
 #[repr(usize)]
-pub enum Counter {
+pub(crate) enum Counter {
     Files,
     SyntaxNodes,
     SyntaxTokens,
@@ -42,7 +42,7 @@ fn output_path() -> Option<&'static OsString> {
         .as_ref()
 }
 
-pub fn reset() {
+pub(crate) fn reset() {
     METRICS_WRITTEN.store(false, Ordering::Relaxed);
     if output_path().is_some() {
         for counter in &COUNTERS {
@@ -51,7 +51,7 @@ pub fn reset() {
     }
 }
 
-pub fn add(counter: Counter, value: usize) {
+pub(crate) fn add(counter: Counter, value: usize) {
     if output_path().is_some() {
         COUNTERS[counter as usize].fetch_add(value as u64, Ordering::Relaxed);
     }
@@ -72,7 +72,7 @@ fn peak_resident_bytes() -> u64 {
         // SAFETY: getrusage initializes the supplied rusage structure when it succeeds.
         if getrusage_succeeded(unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) }) {
             // SAFETY: the successful call above initialized usage.
-            let peak = unsafe { usage.assume_init() }.ru_maxrss.max(0) as u64;
+            let peak = u64::try_from(unsafe { usage.assume_init() }.ru_maxrss).unwrap_or(0);
             #[cfg(target_os = "macos")]
             {
                 peak
@@ -117,7 +117,7 @@ struct Snapshot {
     peak_resident_bytes: u64,
 }
 
-pub fn write(json_bytes: usize) -> Result<(), String> {
+pub(crate) fn write(json_bytes: usize) -> Result<(), String> {
     let Some(path) = output_path() else {
         return Ok(());
     };

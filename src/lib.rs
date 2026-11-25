@@ -26,7 +26,7 @@ use core::ScanEngine;
 ///
 /// The binary owns process concerns such as reading the environment and
 /// selecting an exit code. The adapter owns command parsing and presentation.
-pub fn run(args: Vec<String>) -> Result<u8, String> {
+pub fn run(args: &[String]) -> Result<u8, String> {
     let repository = LocalRepository;
     let scanner = ScanEngine::new(&repository);
     adapters::inbound::cli::run(args, &scanner)
