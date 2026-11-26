@@ -774,6 +774,17 @@ fn duplicate_thresholds(policy: &Policy) -> Option<(u64, u64)> {
         .reduce(|left, right| (left.0.min(right.0), left.1.min(right.1)))
 }
 
+/// A method from `impl Trait for Type`, whose symbol carries the trait as
+/// `Type[Trait]::name` (cfg variant markers removed): the trait already fixes its
+/// name and signature, so it shares an interface rather than offering an alternative.
+fn trait_impl_method(function: &Function) -> bool {
+    let symbol = without_variants(&function.symbol);
+    symbol
+        .strip_suffix(&function.signature.ident.to_string())
+        .and_then(|owner| owner.strip_suffix("::"))
+        .is_some_and(|owner| owner.ends_with(']'))
+}
+
 /// Declarations sharing one qualified symbol, possibly in different
 /// configuration variants of a module, are mutually exclusive cfg
 /// alternatives, so only one of them is ever compiled.
@@ -789,6 +800,8 @@ fn duplicate_rule_applies(
             || (first.owner.is_some()
                 && second.owner.is_some()
                 && owner(first) != owner(second)
+                && !trait_impl_method(first)
+                && !trait_impl_method(second)
                 && interface(first) != interface(second)))
 }
 
@@ -1078,6 +1091,43 @@ mod tests {
             "rust.alternative_interfaces",
             &canonical,
             &variant
+        ));
+    }
+
+    #[test]
+    fn trait_impl_methods_never_pair_as_alternative_interfaces() {
+        let alternative = "rust.alternative_interfaces";
+        let mut stream = method("fn poll_next(&mut self) -> bool { self.inner.poll(1) }");
+        stream.symbol = "crate::Field[Stream]::poll_next".into();
+        let mut sink = method("fn poll_flush(&mut self) -> bool { self.inner.poll(2) }");
+        sink.symbol = "crate::Socket[Sink < Message >]::poll_flush".into();
+        sink.owner = Some("crate::Socket".into());
+        assert!(trait_impl_method(&stream));
+        assert!(!duplicate_rule_applies(
+            alternative,
+            alternative,
+            &stream,
+            &sink
+        ));
+        assert!(duplicate_rule_applies(
+            "rust.duplicate_functions",
+            alternative,
+            &stream,
+            &sink
+        ));
+
+        let mut inherent = method("fn poll_flush(&mut self) -> bool { self.inner.poll(2) }");
+        inherent.symbol = "crate::imp [cfg variant 2]::Socket::poll_flush".into();
+        inherent.owner = Some("crate::imp [cfg variant 2]::Socket".into());
+        let mut other = method("fn poll_close(&mut self) -> bool { self.inner.poll(3) }");
+        other.symbol = "crate::Other::poll_close".into();
+        other.owner = Some("crate::Other".into());
+        assert!(!trait_impl_method(&inherent));
+        assert!(duplicate_rule_applies(
+            alternative,
+            alternative,
+            &inherent,
+            &other
         ));
     }
 

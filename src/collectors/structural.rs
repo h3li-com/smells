@@ -1,10 +1,14 @@
 use super::{
     common::observation,
-    model::{CodeScope, FunctionFact, SourceModel},
+    model::{self, ClassFact, CodeScope, FieldFact, FunctionFact, SourceModel},
 };
 use crate::{
-    core::model::Input, coverage::LineCoverage, evidence::Observation, policy::Rule,
+    core::model::Input,
+    coverage::LineCoverage,
+    evidence::Observation,
+    policy::Rule,
     report::Location,
+    similarity::{SimilarPair, exact_jaccard_pairs},
 };
 use regex::Regex;
 use serde_json::json;
@@ -12,49 +16,125 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     sync::OnceLock,
 };
+use tree_sitter::Node;
 
-type SimilarityFeature = (String, u64);
-
-fn normalized_tokens(source: &str) -> BTreeMap<String, u64> {
+fn normalized_tokens(source: &str) -> Vec<String> {
     static TOKEN: OnceLock<Regex> = OnceLock::new();
     let token = TOKEN.get_or_init(|| {
         Regex::new(r"[A-Za-z_][A-Za-z0-9_]*|\d+(?:\.\d+)?|==|!=|<=|>=|=>|&&|\|\||[^\s]")
             .expect("valid normalized-token expression")
     });
-    let keywords = [
+    token
+        .find_iter(source)
+        .map(|found| normalized_token(found.as_str()).into())
+        .collect()
+}
+
+fn normalized_token(value: &str) -> &str {
+    const KEYWORDS: [&str; 19] = [
         "if", "else", "elif", "for", "while", "match", "case", "switch", "return", "throw",
         "raise", "await", "yield", "and", "or", "not", "in", "is", "new",
     ];
-    let mut result = BTreeMap::new();
-    for found in token.find_iter(source) {
-        let value = found.as_str();
-        let normalized = if value.chars().next().is_some_and(char::is_alphabetic) {
-            if keywords.contains(&value) {
+    match value.chars().next() {
+        Some(first) if first.is_alphabetic() || first == '_' => {
+            if KEYWORDS.contains(&value) {
                 value
             } else {
                 "identifier"
             }
-        } else if value
-            .chars()
-            .next()
-            .is_some_and(|character| character.is_ascii_digit())
-        {
-            "number"
-        } else {
-            value
-        };
-        *result.entry(normalized.into()).or_insert(0) += 1;
+        }
+        Some(first) if first.is_ascii_digit() => "number",
+        _ => value,
     }
-    result
 }
 
-fn token_similarity(first: &BTreeMap<String, u64>, second: &BTreeMap<String, u64>) -> (u64, u64) {
-    let keys = first.keys().chain(second.keys()).collect::<BTreeSet<_>>();
-    keys.into_iter().fold((0, 0), |(intersection, union), key| {
-        let first = first.get(key).copied().unwrap_or(0);
-        let second = second.get(key).copied().unwrap_or(0);
-        (intersection + first.min(second), union + first.max(second))
-    })
+/// Python data-model special methods. The language fixes their names, so
+/// implementing different ones (`__bool__` versus `__hash__`) is a protocol choice,
+/// not an alternative interface. Library protocol hooks such as `__rich_console__`
+/// are not listed and still count.
+fn language_special_method(name: &str) -> bool {
+    const SPECIAL: [&str; 66] = [
+        "new",
+        "init",
+        "del",
+        "repr",
+        "str",
+        "bytes",
+        "format",
+        "lt",
+        "le",
+        "eq",
+        "ne",
+        "gt",
+        "ge",
+        "hash",
+        "bool",
+        "getattr",
+        "getattribute",
+        "setattr",
+        "delattr",
+        "dir",
+        "get",
+        "set",
+        "delete",
+        "set_name",
+        "init_subclass",
+        "class_getitem",
+        "call",
+        "len",
+        "length_hint",
+        "getitem",
+        "setitem",
+        "delitem",
+        "missing",
+        "iter",
+        "reversed",
+        "contains",
+        "next",
+        "enter",
+        "exit",
+        "aenter",
+        "aexit",
+        "aiter",
+        "anext",
+        "await",
+        "neg",
+        "pos",
+        "abs",
+        "invert",
+        "complex",
+        "int",
+        "float",
+        "index",
+        "round",
+        "trunc",
+        "floor",
+        "ceil",
+        "copy",
+        "deepcopy",
+        "reduce",
+        "reduce_ex",
+        "getstate",
+        "setstate",
+        "getnewargs",
+        "sizeof",
+        "fspath",
+        "post_init",
+    ];
+    const OPERATORS: [&str; 13] = [
+        "add", "sub", "mul", "matmul", "truediv", "floordiv", "mod", "divmod", "pow", "lshift",
+        "rshift", "and", "xor",
+    ];
+    let Some(inner) = name
+        .strip_prefix("__")
+        .and_then(|rest| rest.strip_suffix("__"))
+    else {
+        return false;
+    };
+    let operator = |value: &str| value == "or" || OPERATORS.contains(&value);
+    SPECIAL.contains(&inner)
+        || operator(inner)
+        || inner.strip_prefix(['r', 'i']).is_some_and(operator)
 }
 
 fn class_interfaces(model: &SourceModel) -> Vec<BTreeSet<&str>> {
@@ -66,125 +146,66 @@ fn class_interfaces(model: &SourceModel) -> Vec<BTreeSet<&str>> {
                 .methods
                 .iter()
                 .map(|method| method.name.as_str())
+                .filter(|name| !language_special_method(name))
                 .collect()
         })
         .collect()
 }
 
-fn class_token_maps(model: &SourceModel) -> Vec<BTreeMap<String, u64>> {
+/// Each class's concrete method bodies as one normalized token sequence, in source
+/// order. A boundary token keeps a 4-token shingle from spanning two methods.
+fn class_token_lists(model: &SourceModel) -> Vec<Vec<String>> {
     model
         .classes
         .iter()
         .map(|class| {
-            let bodies = class
+            let mut tokens = Vec::new();
+            for body in class
                 .methods
                 .iter()
                 .filter_map(|method| method.body.as_deref())
-                .collect::<Vec<_>>()
-                .join("\n");
-            normalized_tokens(&bodies)
+            {
+                if !tokens.is_empty() {
+                    tokens.push("method-boundary".into());
+                }
+                tokens.extend(normalized_tokens(body));
+            }
+            tokens
         })
         .collect()
-}
-
-fn feature_frequencies(token_maps: &[BTreeMap<String, u64>]) -> BTreeMap<SimilarityFeature, usize> {
-    let mut frequencies = BTreeMap::new();
-    for tokens in token_maps {
-        for (token, count) in tokens {
-            for occurrence in 0..*count {
-                *frequencies.entry((token.clone(), occurrence)).or_default() += 1;
-            }
-        }
-    }
-    frequencies
-}
-
-fn similarity_prefixes(
-    interfaces: &[BTreeSet<&str>],
-    token_maps: &[BTreeMap<String, u64>],
-    token_counts: &[u64],
-    minimum: u64,
-    similarity: u64,
-) -> Vec<Vec<SimilarityFeature>> {
-    let frequencies = feature_frequencies(token_maps);
-    token_maps
-        .iter()
-        .enumerate()
-        .map(|(index, tokens)| {
-            if interfaces[index].is_empty() || token_counts[index] < minimum {
-                return Vec::new();
-            }
-            let mut features = tokens
-                .iter()
-                .flat_map(|(token, count)| {
-                    (0..*count).map(|occurrence| (token.clone(), occurrence))
-                })
-                .collect::<Vec<_>>();
-            features.sort_by_key(|feature| (frequencies[feature], feature.clone()));
-            let required =
-                (u128::from(similarity) * features.len() as u128).div_ceil(10_000) as usize;
-            features.truncate((features.len() - required + 1).min(features.len()));
-            features
-        })
-        .collect()
-}
-
-fn candidate_pairs(prefixes: &[Vec<SimilarityFeature>]) -> BTreeSet<(usize, usize)> {
-    let mut postings = BTreeMap::<SimilarityFeature, Vec<usize>>::new();
-    let mut candidates = BTreeSet::new();
-    for (right, prefix) in prefixes.iter().enumerate() {
-        for feature in prefix {
-            for left in postings.get(feature).into_iter().flatten() {
-                candidates.insert((*left, right));
-            }
-            postings.entry(feature.clone()).or_default().push(right);
-        }
-    }
-    candidates
-}
-
-fn lengths_can_match(first: u64, second: u64, similarity: u64) -> bool {
-    let (smaller, larger) = if first <= second {
-        (first, second)
-    } else {
-        (second, first)
-    };
-    u128::from(smaller) * 10_000 >= u128::from(similarity) * u128::from(larger)
 }
 
 fn interface_observation(
     model: &SourceModel,
-    token_maps: &[BTreeMap<String, u64>],
-    token_counts: &[u64],
-    left: usize,
-    right: usize,
-) -> Option<Observation> {
-    let (intersection, union) = token_similarity(&token_maps[left], &token_maps[right]);
-    if union == 0 {
-        return None;
-    }
-    let first = &model.classes[left];
-    let second = &model.classes[right];
+    token_lists: &[Vec<String>],
+    pair: &SimilarPair,
+) -> Observation {
+    let first = &model.classes[pair.left];
+    let second = &model.classes[pair.right];
     let mut candidate = observation(
         first.symbol.clone(),
         first.location.clone(),
         [
-            ("first_tokens", token_counts[left]),
-            ("second_tokens", token_counts[right]),
-            ("intersection", intersection),
-            ("union", union),
+            ("first_tokens", token_lists[pair.left].len() as u64),
+            ("second_tokens", token_lists[pair.right].len() as u64),
+            ("intersection", pair.intersection as u64),
+            ("union", pair.union as u64),
         ],
         json!({
-            "collector": "authored_class_behavior_similarity_v1",
-            "normalization": "lexical token multiset; identifiers normalized",
-            "candidate_filter": "multiset_jaccard_prefix_and_length_v1",
+            "collector": "authored_class_behavior_similarity_v2",
+            "normalization": "code-only lexical tokens; identifiers normalized; 4-token shingle multiset Jaccard",
+            "candidate_filter": "exact_jaccard_prefix_and_length_v1",
         }),
     );
     candidate.related_symbols.push(second.symbol.clone());
     candidate.related_locations.push(second.location.clone());
-    Some(candidate)
+    candidate
 }
 
+/// Classes whose method bodies share at least the configured share of normalized
+/// 4-token shingles while exposing different method-name interfaces. Ordered
+/// shingles, not a bag of single tokens, so two merely similar-sized classes no
+/// longer match on punctuation and identifier counts alone.
 pub(super) fn alternative_interfaces(
     rule: &Rule,
     model: &SourceModel,
@@ -193,146 +214,366 @@ pub(super) fn alternative_interfaces(
     let minimum = rule.parameters["minimum_tokens"];
     let similarity = rule.parameters["minimum_similarity_basis_points"];
     let interfaces = class_interfaces(model);
-    let token_maps = class_token_maps(model);
-    let token_counts = token_maps
+    let token_lists = class_token_lists(model);
+    let pairs = exact_jaccard_pairs(
+        &token_lists,
+        minimum,
+        similarity,
+        input.policy.limits.maximum_pairs,
+        |left, right| {
+            interfaces[left].is_empty()
+                || interfaces[right].is_empty()
+                || interfaces[left] == interfaces[right]
+        },
+    )?;
+    Ok(pairs
         .iter()
-        .map(|tokens| tokens.values().sum::<u64>())
-        .collect::<Vec<_>>();
-    let prefixes =
-        similarity_prefixes(&interfaces, &token_maps, &token_counts, minimum, similarity);
-
-    let mut observations = Vec::new();
-    let mut pairs = 0usize;
-    for (left, right) in candidate_pairs(&prefixes) {
-        if interfaces[left] == interfaces[right] {
-            continue;
-        }
-        if !lengths_can_match(token_counts[left], token_counts[right], similarity) {
-            continue;
-        }
-        pairs += 1;
-        if pairs > input.policy.limits.maximum_pairs {
-            return Err(format!(
-                "maximum_pairs budget exceeded: charged {pairs} exact comparisons; policy limit is {}",
-                input.policy.limits.maximum_pairs
-            ));
-        }
-        if let Some(candidate) =
-            interface_observation(model, &token_maps, &token_counts, left, right)
-        {
-            observations.push(candidate);
-        }
-    }
-    Ok(observations)
+        .map(|pair| interface_observation(model, &token_lists, pair))
+        .collect())
 }
 
-fn dispatch_labels(body: &str) -> Vec<String> {
-    static CASE: OnceLock<Regex> = OnceLock::new();
-    let case = CASE.get_or_init(|| {
-        Regex::new(r"(?m)^\s*case\s+([^:\n=]+?)(?:\s*=>|\s*:)")
-            .expect("valid dispatch-case expression")
-    });
-    case.captures_iter(body)
-        .map(|capture| capture[1].split_whitespace().collect::<String>())
+fn dispatch_node(kind: &str, language: &str) -> bool {
+    match language {
+        "python" => kind == "match_statement",
+        "typescript" => kind == "switch_statement",
+        _ => false,
+    }
+}
+
+fn compact_label(node: Node<'_>, source: &str) -> String {
+    node.utf8_text(source.as_bytes())
+        .unwrap_or_default()
+        .split_whitespace()
         .collect()
 }
 
-pub(super) fn repeated_dispatch(model: &SourceModel) -> Vec<Observation> {
-    let mut grouped: BTreeMap<Vec<String>, Vec<&FunctionFact>> = BTreeMap::new();
-    for function in &model.functions {
-        let Some(body) = &function.body else {
-            continue;
-        };
-        let labels = dispatch_labels(body);
+/// The authored case labels of one `switch`/`match`, read from the raw source so
+/// string labels keep their values, sorted so arm order does not split a dispatch.
+fn case_labels(dispatch: Node<'_>, source: &str, language: &str) -> Vec<String> {
+    let Some(body) = dispatch.child_by_field_name("body") else {
+        return Vec::new();
+    };
+    let mut cursor = body.walk();
+    let mut labels = body
+        .named_children(&mut cursor)
+        .filter_map(|arm| match (language, arm.kind()) {
+            ("typescript", "switch_case") => arm
+                .child_by_field_name("value")
+                .map(|value| compact_label(value, source)),
+            ("python", "case_clause") => {
+                let mut patterns = arm.walk();
+                let label = arm
+                    .named_children(&mut patterns)
+                    .filter(|pattern| pattern.kind() == "case_pattern")
+                    .map(|pattern| compact_label(pattern, source))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                Some(label)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    labels.sort();
+    labels
+}
+
+/// Every `switch`/`match` with its labels, attributed once to its innermost enclosing
+/// function as `(line, column)` of that function's declaration.
+fn dispatch_sites(
+    node: Node<'_>,
+    source: &str,
+    language: &str,
+    owner: Option<(usize, usize)>,
+    sites: &mut Vec<((usize, usize), Vec<String>)>,
+) {
+    let owner = if model::function_node(node.kind(), language) {
+        let start = node.start_position();
+        Some((start.row + 1, start.column + 1))
+    } else {
+        owner
+    };
+    if let Some(owner) = owner.filter(|_| dispatch_node(node.kind(), language)) {
+        let labels = case_labels(node, source, language);
         if !labels.is_empty() {
-            grouped.entry(labels).or_default().push(function);
+            sites.push((owner, labels));
         }
     }
-    grouped
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        dispatch_sites(child, source, language, owner, sites);
+    }
+}
+
+type FunctionsByStart<'model> = BTreeMap<(&'model str, usize, usize), &'model FunctionFact>;
+
+fn file_dispatch_sites<'model>(
+    functions: &FunctionsByStart<'model>,
+    language: &str,
+    path: &str,
+    source: &str,
+) -> Result<Vec<(&'model FunctionFact, Vec<String>)>, String> {
+    let tree = model::parse_portable_tree(language, path, source)?;
+    let mut sites = Vec::new();
+    dispatch_sites(tree.root_node(), source, language, None, &mut sites);
+    Ok(sites
         .into_iter()
-        .filter_map(|(labels, functions)| {
-            let first = functions.first()?;
-            let mut candidate = observation(
-                first.symbol.clone(),
-                first.location.clone(),
-                [
-                    ("sites", functions.len() as u64),
-                    ("arms_per_site", labels.len() as u64),
-                ],
-                json!({
-                    "collector": "authored_repeated_case_labels_v1",
-                    "case_labels": labels,
-                }),
-            );
-            for related in functions.iter().skip(1) {
-                candidate.related_symbols.push(related.symbol.clone());
-                candidate.related_locations.push(related.location.clone());
+        .filter_map(|((line, column), labels)| {
+            Some((*functions.get(&(path, line, column))?, labels))
+        })
+        .collect())
+}
+
+fn dispatch_observation(labels: &[String], functions: &[&FunctionFact]) -> Option<Observation> {
+    let first = functions.first()?;
+    let mut candidate = observation(
+        first.symbol.clone(),
+        first.location.clone(),
+        [
+            ("sites", functions.len() as u64),
+            ("arms_per_site", labels.len() as u64),
+        ],
+        json!({
+            "collector": "authored_repeated_case_labels_v2",
+            "case_labels": labels,
+            "scope": "one site per innermost function holding a switch/match with the same sorted authored case labels",
+        }),
+    );
+    for related in functions.iter().skip(1) {
+        candidate.related_symbols.push(related.symbol.clone());
+        candidate.related_locations.push(related.location.clone());
+    }
+    Some(candidate)
+}
+
+/// Functions whose own `switch`/`match` statements carry the same set of authored
+/// case labels. Each statement counts once, for its innermost enclosing function,
+/// and a function with several identical statements is one site.
+pub(super) fn repeated_dispatch(
+    rule: &Rule,
+    model: &SourceModel,
+    input: &Input,
+) -> Result<Vec<Observation>, String> {
+    let language = rule.id.split_once('.').map_or("", |(language, _)| language);
+    let functions = model
+        .functions
+        .iter()
+        .map(|function| {
+            let location = &function.location;
+            (
+                (location.path.as_str(), location.line, location.column),
+                function,
+            )
+        })
+        .collect::<FunctionsByStart<'_>>();
+    let mut grouped: BTreeMap<Vec<String>, Vec<&FunctionFact>> = BTreeMap::new();
+    for path in model.code_by_path.keys() {
+        let Some(source) = input.files.get(path) else {
+            continue;
+        };
+        for (function, labels) in file_dispatch_sites(&functions, language, path, source)? {
+            let sites = grouped.entry(labels).or_default();
+            if !sites.iter().any(|site| std::ptr::eq(*site, function)) {
+                sites.push(function);
             }
-            Some(candidate)
+        }
+    }
+    Ok(grouped
+        .into_iter()
+        .filter_map(|(labels, functions)| dispatch_observation(&labels, &functions))
+        .collect())
+}
+
+fn lifecycle_methods(class: &ClassFact) -> Vec<&FunctionFact> {
+    class
+        .methods
+        .iter()
+        // A constructor initializes every field, so it never shows lifecycle use.
+        .filter(|method| {
+            method.body.is_some() && !matches!(method.name.as_str(), "__init__" | "constructor")
         })
         .collect()
 }
 
-pub(super) fn temporary_fields(rule: &Rule, model: &SourceModel) -> Vec<Observation> {
+fn field_uses(receiver: &str, field: &FieldFact, methods: &[&FunctionFact]) -> usize {
+    let access = Regex::new(&format!(
+        r"\b{}\s*\.\s*{}\b",
+        regex::escape(receiver),
+        regex::escape(&field.name)
+    ))
+    .expect("escaped temporary-field access expression");
+    methods
+        .iter()
+        .filter(|method| {
+            method
+                .body
+                .as_deref()
+                .is_some_and(|body| access.is_match(body))
+        })
+        .count()
+}
+
+fn temporary_field_observation(
+    class: &ClassFact,
+    receiver: &str,
+    own_fields: Option<&BTreeSet<String>>,
+) -> Option<Observation> {
+    let temporary = class
+        .fields
+        .iter()
+        .filter(|field| field.temporary)
+        .filter(|field| own_fields.is_none_or(|names| names.contains(&field.name)))
+        .collect::<Vec<_>>();
+    let methods = lifecycle_methods(class);
+    if temporary.is_empty() || methods.is_empty() {
+        return None;
+    }
+    let uses = temporary
+        .iter()
+        .map(|field| field_uses(receiver, field, &methods))
+        .sum::<usize>();
+    Some(observation(
+        class.symbol.clone(),
+        class.location.clone(),
+        [
+            ("fields", temporary.len() as u64),
+            ("methods", methods.len() as u64),
+            ("uses", uses as u64),
+            ("possible_uses", (temporary.len() * methods.len()) as u64),
+        ],
+        json!({
+            "collector": "authored_nullable_field_use_v2",
+            "fields": temporary.iter().map(|field| &field.name).collect::<Vec<_>>(),
+        }),
+    ))
+}
+
+fn node_text<'source>(node: Node<'_>, source: &'source str) -> &'source str {
+    node.utf8_text(source.as_bytes()).unwrap_or_default()
+}
+
+fn constructor_parameter_names(method: Node<'_>, source: &str, names: &mut BTreeSet<String>) {
+    let Some(parameters) = method.child_by_field_name("parameters") else {
+        return;
+    };
+    let mut cursor = parameters.walk();
+    for parameter in parameters.named_children(&mut cursor) {
+        if let Some(name) = parameter
+            .child_by_field_name("name")
+            .or_else(|| parameter.child_by_field_name("pattern"))
+        {
+            names.insert(node_text(name, source).into());
+        }
+    }
+}
+
+/// The names a TypeScript class itself declares: direct property declarations,
+/// constructor parameters (parameter properties among them), and `this.name = ...`
+/// assignments. Members of other declarations, inline object types, parameter
+/// lists, and object literals nested inside a member are not the class's fields.
+fn typescript_own_field_names(class: Node<'_>, source: &str) -> BTreeSet<String> {
+    static ASSIGNMENT: OnceLock<Regex> = OnceLock::new();
+    let assignment = ASSIGNMENT.get_or_init(|| {
+        Regex::new(r"\bthis\s*\.\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*=[^=]")
+            .expect("valid receiver assignment expression")
+    });
+    let mut names = assignment
+        .captures_iter(node_text(class, source))
+        .map(|capture| capture[1].to_string())
+        .collect::<BTreeSet<_>>();
+    let body = class.child_by_field_name("body").unwrap_or(class);
+    let mut cursor = body.walk();
+    for member in body.named_children(&mut cursor) {
+        match member.kind() {
+            "public_field_definition" | "property_signature" | "abstract_property_signature" => {
+                if let Some(name) = member.child_by_field_name("name") {
+                    names.insert(node_text(name, source).trim_start_matches('#').into());
+                }
+            }
+            "method_definition"
+                if member
+                    .child_by_field_name("name")
+                    .is_some_and(|name| node_text(name, source) == "constructor") =>
+            {
+                constructor_parameter_names(member, source, &mut names);
+            }
+            _ => {}
+        }
+    }
+    names
+}
+
+fn class_nodes_by_range<'tree>(
+    node: Node<'tree>,
+    ranges: &BTreeSet<(usize, usize)>,
+    found: &mut BTreeMap<(usize, usize), Node<'tree>>,
+) {
+    let range = (node.start_byte(), node.end_byte());
+    if ranges.contains(&range) && model::class_node(node.kind(), "typescript") {
+        found.insert(range, node);
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        class_nodes_by_range(child, ranges, found);
+    }
+}
+
+/// Own field names keyed by class path and byte range.
+type OwnFieldsByClass = BTreeMap<(String, (usize, usize)), BTreeSet<String>>;
+
+/// Own field names of each TypeScript class that has a temporary-field candidate,
+/// keyed by class symbol and byte range. Files without candidates are not reparsed.
+fn typescript_own_fields(model: &SourceModel, input: &Input) -> Result<OwnFieldsByClass, String> {
+    let mut ranges = BTreeMap::<&str, BTreeSet<(usize, usize)>>::new();
+    for class in &model.classes {
+        if class.fields.iter().any(|field| field.temporary) {
+            ranges
+                .entry(class.location.path.as_str())
+                .or_default()
+                .insert(class.range);
+        }
+    }
+    let mut own = BTreeMap::new();
+    for (path, ranges) in ranges {
+        let Some(source) = input.files.get(path) else {
+            continue;
+        };
+        let tree = model::parse_portable_tree("typescript", path, source)?;
+        let mut found = BTreeMap::new();
+        class_nodes_by_range(tree.root_node(), &ranges, &mut found);
+        for (range, node) in found {
+            own.insert(
+                (path.to_string(), range),
+                typescript_own_field_names(node, source),
+            );
+        }
+    }
+    Ok(own)
+}
+
+pub(super) fn temporary_fields(
+    rule: &Rule,
+    model: &SourceModel,
+    input: &Input,
+) -> Result<Vec<Observation>, String> {
     let language = rule.id.split_once('.').map_or("", |(language, _)| language);
     let receiver = if language == "python" { "self" } else { "this" };
-    model
+    let own = if language == "typescript" {
+        Some(typescript_own_fields(model, input)?)
+    } else {
+        None
+    };
+    Ok(model
         .classes
         .iter()
         .filter_map(|class| {
-            let temporary = class
-                .fields
-                .iter()
-                .filter(|field| field.temporary)
-                .collect::<Vec<_>>();
-            let methods = class
-                .methods
-                .iter()
-                // A constructor initializes every field, so it never shows lifecycle use.
-                .filter(|method| {
-                    method.body.is_some()
-                        && !matches!(method.name.as_str(), "__init__" | "constructor")
-                })
-                .collect::<Vec<_>>();
-            if temporary.is_empty() || methods.is_empty() {
-                return None;
-            }
-            let uses = temporary
-                .iter()
-                .map(|field| {
-                    let access = Regex::new(&format!(
-                        r"\b{}\s*\.\s*{}\b",
-                        regex::escape(receiver),
-                        regex::escape(&field.name)
-                    ))
-                    .expect("escaped temporary-field access expression");
-                    methods
-                        .iter()
-                        .filter(|method| {
-                            method
-                                .body
-                                .as_deref()
-                                .is_some_and(|body| access.is_match(body))
-                        })
-                        .count()
-                })
-                .sum::<usize>();
-            Some(observation(
-                class.symbol.clone(),
-                class.location.clone(),
-                [
-                    ("fields", temporary.len() as u64),
-                    ("methods", methods.len() as u64),
-                    ("uses", uses as u64),
-                    ("possible_uses", (temporary.len() * methods.len()) as u64),
-                ],
-                json!({
-                    "collector": "authored_nullable_field_use_v1",
-                    "fields": temporary.iter().map(|field| &field.name).collect::<Vec<_>>(),
-                }),
-            ))
+            let names = own.as_ref().map(|own| {
+                own.get(&(class.location.path.clone(), class.range))
+                    .cloned()
+                    .unwrap_or_default()
+            });
+            temporary_field_observation(class, receiver, names.as_ref())
         })
-        .collect()
+        .collect())
 }
 
 fn forwarding_method(body: &str, language: &str) -> bool {
@@ -586,8 +827,6 @@ pub(super) fn unused_type_parameters(model: &SourceModel) -> Vec<Observation> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::collectors::model::{ClassFact, FieldFact};
-    use proptest::prelude::*;
     use std::sync::Arc;
 
     fn location(line: usize) -> Location {
@@ -633,47 +872,169 @@ mod tests {
         }
     }
 
-    #[test]
-    fn token_multisets_preserve_control_flow_and_count_normalized_values() {
-        let first = normalized_tokens("if account == 42 { return account; }");
-        let second = normalized_tokens("if customer == 7 { return other; }");
-        assert_eq!(first, second);
-        assert_eq!(first["identifier"], 2);
-        assert_eq!(first["number"], 1);
-        assert_eq!(first["if"], 1);
+    fn portable_rule(id: &str, parameters: &[(&str, u64)]) -> Rule {
+        Rule {
+            id: id.into(),
+            version: 2,
+            smell: "test".into(),
+            kind: "indicator".into(),
+            implementation: "implemented".into(),
+            inputs: Vec::new(),
+            parameters: parameters
+                .iter()
+                .map(|(name, value)| ((*name).into(), *value))
+                .collect(),
+            contract: "test".into(),
+        }
+    }
 
-        let different = normalized_tokens("while account != 1 { account = account + 1; }");
-        assert_eq!(token_similarity(&first, &first), (9, 9));
-        let (intersection, union) = token_similarity(&first, &different);
-        assert!(intersection > 0);
-        assert!(union > intersection);
+    fn portable_input(rule_pack: &str, files: &[(&str, &str)]) -> Input {
+        Input::fixture(
+            rule_pack,
+            files
+                .iter()
+                .map(|(path, source)| ((*path).into(), (*source).into()))
+                .collect(),
+        )
+    }
+
+    fn portable_observations(
+        collect: fn(&Rule, &SourceModel, &Input) -> Result<Vec<Observation>, String>,
+        rule: &Rule,
+        input: &Input,
+    ) -> Vec<Observation> {
+        let model = model::source_model(rule, input).expect("fixture source model");
+        collect(rule, &model, input).expect("fixture observations")
     }
 
     #[test]
-    fn prefix_filter_counts_repeated_features_and_keeps_exact_threshold_boundaries() {
-        let maps = vec![
-            BTreeMap::from([("identifier".into(), 2), ("return".into(), 1)]),
-            BTreeMap::from([("identifier".into(), 1), ("number".into(), 1)]),
-        ];
-        assert_eq!(
-            feature_frequencies(&maps),
-            BTreeMap::from([
-                (("identifier".into(), 0), 2),
-                (("identifier".into(), 1), 1),
-                (("number".into(), 0), 1),
-                (("return".into(), 0), 1),
-            ])
-        );
-        let interfaces = vec![BTreeSet::from(["run"]), BTreeSet::from(["execute"])];
-        let prefixes = similarity_prefixes(&interfaces, &maps, &[3, 2], 2, 5_000);
-        assert_eq!(prefixes[0].len(), 2);
-        assert_eq!(prefixes[1].len(), 2);
-        assert!(candidate_pairs(&prefixes).is_empty());
+    fn language_special_methods_are_protocols_not_interface_names() {
+        for special in [
+            "__init__", "__eq__", "__hash__", "__bool__", "__radd__", "__ior__",
+        ] {
+            assert!(language_special_method(special), "{special}");
+        }
+        for named in ["__rich_console__", "__private", "close", "__rxor", "__ip__"] {
+            assert!(!language_special_method(named), "{named}");
+        }
+    }
 
-        let complete_prefixes = similarity_prefixes(&interfaces, &maps, &[3, 2], 2, 0);
+    #[test]
+    fn alternative_interfaces_pair_ordered_shingles_not_similar_token_bags() {
+        let body = "        total = 0\n        for item in self.items:\n            if item.ready:\n                total = total + item.amount\n        return total\n";
+        let reordered = "        if self.ready:\n            return 0\n        for item in self.items:\n            total = item.amount + total\n        total = 0\n        return total\n";
+        let source = format!(
+            "class Ledger:\n    def balance(self):\n{body}\n\
+             class Wallet:\n    def funds(self):\n{body}\n\
+             class Shuffled:\n    def other(self):\n{reordered}\n\
+             class Placeholder:\n    def __bool__(self):\n{body}\n\
+             class Identity:\n    def __hash__(self):\n{body}\n"
+        );
+        let rule = portable_rule(
+            "python.alternative_interfaces",
+            &[
+                ("minimum_tokens", 20),
+                ("minimum_similarity_basis_points", 6200),
+            ],
+        );
+        let input = portable_input("python-v1", &[("src/money.py", &source)]);
+        let observations = portable_observations(alternative_interfaces, &rule, &input);
+
+        let pairs = observations
+            .iter()
+            .map(|found| (found.symbol.as_str(), found.related_symbols[0].as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(pairs, [("src/money.py::Ledger", "src/money.py::Wallet")]);
         assert_eq!(
-            candidate_pairs(&complete_prefixes),
-            BTreeSet::from([(0, 1)])
+            observations[0].measurements["intersection"],
+            observations[0].measurements["union"]
+        );
+    }
+
+    #[test]
+    fn repeated_dispatch_groups_real_labels_once_per_innermost_function() {
+        let kinds = "case 'add': return 1; case 'remove': return 2; case 'move': return 3; case 'copy': return 4;";
+        let levels = "case 'info': return 1; case 'warn': return 2; case 'error': return 3; case 'debug': return 4;";
+        let source = format!(
+            "export function first(kind: string) {{ switch (kind) {{ {kinds} }} }}\n\
+             export function second(kind: string) {{ switch (kind) {{ {kinds} }} }}\n\
+             export function outer() {{ return (kind: string) => {{ switch (kind) {{ {kinds} }} }}; }}\n\
+             export function log(level: string) {{ switch (level) {{ {levels} }} }}\n"
+        );
+        let rule = portable_rule("typescript.repeated_dispatch", &[]);
+        let input = portable_input("typescript-v1", &[("src/dispatch.ts", &source)]);
+        let observations = portable_observations(repeated_dispatch, &rule, &input);
+
+        let shared = observations
+            .iter()
+            .find(|found| found.evidence["case_labels"][0] == "'add'")
+            .expect("shared kind dispatch");
+        assert_eq!(shared.measurements["sites"], 3);
+        assert_eq!(shared.measurements["arms_per_site"], 4);
+        assert!(
+            shared
+                .related_symbols
+                .iter()
+                .all(|symbol| !symbol.ends_with("::outer"))
+        );
+        let logging = observations
+            .iter()
+            .find(|found| found.evidence["case_labels"][0] == "'debug'")
+            .expect("separate level dispatch");
+        assert_eq!(logging.measurements["sites"], 1);
+    }
+
+    #[test]
+    fn typescript_temporary_fields_are_only_the_class_own_declarations() {
+        let source = "export class Schema {\n\
+             \x20 ready?: string;\n\
+             \x20 pending: number | null = null;\n\
+             \x20 cache: Map<string, {\n    request?: string\n  }> = new Map();\n\
+             \x20 constructor(private retry?: number) {}\n\
+             \x20 static create = (\n    params?: string,\n  ) => new Schema({\n    exactLength: null,\n    maxLength: null,\n  });\n\
+             \x20 first() { return 1; }\n\
+             \x20 second() { return 2; }\n\
+             \x20 third() { return this.ready; }\n\
+             \x20 fourth() { return 4; }\n\
+             }\n";
+        let rule = portable_rule("typescript.temporary_fields", &[]);
+        let input = portable_input("typescript-v1", &[("src/schema.ts", source)]);
+        let model = model::source_model(&rule, &input).expect("fixture source model");
+        let observations = temporary_fields(&rule, &model, &input).expect("fixture observations");
+
+        assert_eq!(observations.len(), 1);
+        let mut fields = observations[0].evidence["fields"]
+            .as_array()
+            .expect("field names")
+            .iter()
+            .map(|name| name.as_str().expect("field name"))
+            .collect::<Vec<_>>();
+        fields.sort_unstable();
+        for nested in ["request", "params", "exactLength", "maxLength"] {
+            assert!(!fields.contains(&nested), "{nested} in {fields:?}");
+        }
+        assert!(fields.contains(&"ready"), "{fields:?}");
+        assert!(fields.contains(&"pending"), "{fields:?}");
+    }
+
+    #[test]
+    fn token_sequences_keep_order_keywords_and_normalized_values() {
+        let first = normalized_tokens("if account == 42 { return _account; }");
+        let second = normalized_tokens("if customer == 7 { return other; }");
+        assert_eq!(first, second);
+        assert_eq!(
+            first,
+            [
+                "if",
+                "identifier",
+                "==",
+                "number",
+                "{",
+                "return",
+                "identifier",
+                ";",
+                "}"
+            ]
         );
     }
 
@@ -763,7 +1124,9 @@ mod tests {
             parameters: BTreeMap::new(),
             contract: "test".into(),
         };
-        let observations = temporary_fields(&rule, &model);
+        let observations =
+            temporary_fields(&rule, &model, &Input::fixture("python-v1", BTreeMap::new()))
+                .expect("python temporary fields need no reparse");
         assert_eq!(observations.len(), 1);
         assert_eq!(observations[0].measurements["fields"], 1);
         assert_eq!(observations[0].measurements["methods"], 2);
@@ -931,31 +1294,5 @@ mod tests {
         assert_eq!(covered_crap(4, 1, 3), Some((236, 27)));
         assert_eq!(covered_crap(u64::MAX, 0, u64::MAX), None);
         assert_eq!(gcd(12, 18), 6);
-    }
-
-    proptest! {
-        #![proptest_config(ProptestConfig {
-            cases: 96,
-            max_shrink_iters: 128,
-            ..ProptestConfig::default()
-        })]
-
-        #[test]
-        fn length_filter_matches_the_exact_ratio_contract(
-            first in 0_u64..10_000,
-            second in 0_u64..10_000,
-            similarity in 0_u64..=10_000,
-        ) {
-            let smaller = u128::from(first.min(second));
-            let larger = u128::from(first.max(second));
-            prop_assert_eq!(
-                lengths_can_match(first, second, similarity),
-                smaller * 10_000 >= u128::from(similarity) * larger,
-            );
-            prop_assert_eq!(
-                lengths_can_match(first, second, similarity),
-                lengths_can_match(second, first, similarity),
-            );
-        }
     }
 }

@@ -578,7 +578,7 @@ fn captured_history_at(
         "-c",
         "core.quotepath=false",
         "log",
-        "--format=%x1e%H %P",
+        "--format=%x1e%H %P%x1f%s",
         "--name-only",
         "--no-renames",
         "--relative",
@@ -624,7 +624,8 @@ fn parse_history_log(log: &str, files: &BTreeMap<String, String>, shallow: bool)
         let Some(header) = lines.next() else {
             continue;
         };
-        let mut ids = header.split_whitespace();
+        let (ids, subject) = header.split_once('\u{1f}').unwrap_or((header, ""));
+        let mut ids = ids.split_whitespace();
         let Some(id) = ids.next() else {
             continue;
         };
@@ -643,6 +644,7 @@ fn parse_history_log(log: &str, files: &BTreeMap<String, String>, shallow: bool)
             commits.push(HistoryCommit {
                 id: id.into(),
                 root,
+                subject: subject.trim().into(),
                 files: changed,
             });
         }
@@ -1609,9 +1611,14 @@ mod tests {
         assert!(!non_shallow.shallow);
         assert_eq!(non_shallow.commits.len(), 1);
 
-        let parented =
-            parse_history_log("\u{1e}child root\na.rs\n\u{1e}root\nb.rs\n", &files, false);
+        let parented = parse_history_log(
+            "\u{1e}child root\u{1f}fix: the bug\na.rs\n\u{1e}root\u{1f}\nb.rs\n",
+            &files,
+            false,
+        );
         assert_eq!(parented.commits[0].id, "child");
+        assert_eq!(parented.commits[0].subject, "fix: the bug");
+        assert_eq!(parented.commits[1].subject, "");
         assert!(!parented.commits[0].root);
         assert_eq!(parented.commits[1].id, "root");
         assert!(parented.commits[1].root);

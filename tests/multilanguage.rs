@@ -215,16 +215,33 @@ impl Drop for Workspace {
 
 fn selection(rule: &str, mode: &str, parameters: Value) -> Value {
     let version = match rule {
-        "python.function_lines" | "typescript.function_lines" | "typescript.class_method_lines" => {
-            2
-        }
-        _ if rule.ends_with(".data_clumps")
-            || rule.ends_with(".foreign_accesses")
-            || rule.ends_with(".navigation_chains") =>
+        "python.function_lines"
+        | "typescript.function_lines"
+        | "typescript.class_method_lines"
+        | "typescript.primitive_slots"
+        | "typescript.temporary_fields"
+        | "python.unused_code" => 2,
+        "rust.unused_code" => 3,
+        _ if rule.ends_with(".foreign_accesses") || rule.ends_with(".navigation_chains") => 3,
+        _ if rule.ends_with(".function_crap") => 3,
+        _ if [
+            ".data_clumps",
+            ".dependency_contract",
+            ".divergent_change",
+            ".shotgun_surgery",
+            ".port_conformance",
+            ".library_capabilities",
+            ".nominal_slot_contract",
+            ".parallel_inheritance",
+            ".alternative_interfaces",
+            ".repeated_dispatch",
+            ".function_arguments",
+        ]
+        .iter()
+        .any(|suffix| rule.ends_with(suffix)) =>
         {
             2
         }
-        _ if rule.ends_with(".function_crap") => 3,
         _ => 1,
     };
     let mut selection = json!({"version": version, "mode": mode});
@@ -5279,15 +5296,11 @@ fn quality_policy_schemas_enforce_exact_rule_versions() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     for (language, version_two_rule, version_one_rule) in [
         ("rust", "rust.function_lines", "rust.function_arguments"),
-        (
-            "python",
-            "python.function_lines",
-            "python.function_arguments",
-        ),
+        ("python", "python.function_lines", "python.class_fields"),
         (
             "typescript",
             "typescript.function_lines",
-            "typescript.function_arguments",
+            "typescript.class_fields",
         ),
     ] {
         let schema: Value = serde_json::from_str(

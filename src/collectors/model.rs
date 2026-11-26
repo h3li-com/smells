@@ -527,15 +527,40 @@ fn rust_private(
         && !rust_allows_unused(attributes)
 }
 
+/// Whether a path's last segment names a test or benchmark harness: `test`, `bench`,
+/// any `*_test` (`wasm_bindgen_test`, an aliased `maybe_tokio_test`), or a
+/// property/parameterised harness such as `quickcheck`, `rstest`, or `test_case`.
+fn rust_harness_path(path: &syn::Path) -> bool {
+    path.segments.last().is_some_and(|segment| {
+        let name = segment.ident.to_string();
+        name.ends_with("_test")
+            || matches!(
+                name.as_str(),
+                "test" | "bench" | "quickcheck" | "rstest" | "test_case" | "test_matrix"
+            )
+    })
+}
+
+/// A harness attribute, directly or as a `cfg_attr(predicate, ...)` expansion.
+fn rust_harness_attribute(attribute: &syn::Attribute) -> bool {
+    if !attribute.path().is_ident("cfg_attr") {
+        return rust_harness_path(attribute.path());
+    }
+    attribute
+        .parse_args_with(syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated)
+        .is_ok_and(|metas| {
+            metas
+                .iter()
+                .skip(1)
+                .any(|meta| rust_harness_path(meta.path()))
+        })
+}
+
 /// Test and benchmark functions run under the harness, and a crate-level
 /// `main` runs as the binary entry point.
 fn rust_entry_point(function: &syn::ItemFn, module_path: &[String]) -> bool {
     (module_path.is_empty() && function.sig.ident == "main")
-        || function.attrs.iter().any(|attribute| {
-            attribute.path().segments.last().is_some_and(|segment| {
-                matches!(segment.ident.to_string().as_str(), "test" | "bench")
-            })
-        })
+        || function.attrs.iter().any(rust_harness_attribute)
 }
 
 #[derive(Default)]
@@ -623,6 +648,8 @@ struct RustModelVisitor<'model> {
     module_path: Vec<String>,
     /// Inside a conventional test path or a `#[cfg(test)]` module.
     test: bool,
+    /// Inside a file or module whose attributes allow `dead_code` or `unused`.
+    allows_unused: bool,
     model: &'model mut SourceModel,
     classes: &'model mut BTreeMap<String, ClassFact>,
 }
@@ -630,6 +657,16 @@ struct RustModelVisitor<'model> {
 impl RustModelVisitor<'_> {
     fn module(&self) -> String {
         self.module_path.join("::")
+    }
+
+    /// [`rust_private`], unless an enclosing file or module allows unused code.
+    fn private(
+        &self,
+        visibility: &syn::Visibility,
+        name: &syn::Ident,
+        attributes: &[syn::Attribute],
+    ) -> bool {
+        !self.allows_unused && rust_private(visibility, name, attributes)
     }
 
     fn record_nested_functions(&mut self, parent: &str, block: &syn::Block) {
@@ -642,8 +679,14 @@ impl RustModelVisitor<'_> {
                 function.sig.ident.span().start().line,
                 function.sig.ident.span().start().column
             );
-            let mut fact =
-                rust_function(&self.path, None, &function.sig, Some(&function.block), true);
+            let private = self.private(&function.vis, &function.sig.ident, &function.attrs);
+            let mut fact = rust_function(
+                &self.path,
+                None,
+                &function.sig,
+                Some(&function.block),
+                private,
+            );
             fact.symbol.clone_from(&symbol);
             fact.scope = CodeScope::of(self.test);
             self.model.functions.push(fact);
@@ -688,7 +731,7 @@ impl<'ast> Visit<'ast> for RustModelVisitor<'_> {
             None,
             &function.sig,
             Some(&function.block),
-            rust_private(&function.vis, &function.sig.ident, &function.attrs),
+            self.private(&function.vis, &function.sig.ident, &function.attrs),
         );
         fact.entry_point = rust_entry_point(function, &self.module_path);
         fact.scope =
@@ -703,6 +746,7 @@ impl<'ast> Visit<'ast> for RustModelVisitor<'_> {
     }
 
     fn visit_item_struct(&mut self, structure: &'ast syn::ItemStruct) {
+        let private = self.private(&structure.vis, &structure.ident, &structure.attrs);
         let name = structure.ident.to_string();
         let module = self.module();
         let class = ensure_rust_class(
@@ -716,7 +760,7 @@ impl<'ast> Visit<'ast> for RustModelVisitor<'_> {
             .expect("Rust type token masking cannot fail")
             .into();
         class.type_parameters = rust_type_parameters(&structure.generics);
-        class.private = rust_private(&structure.vis, &structure.ident, &structure.attrs);
+        class.private = private;
         class.scope = CodeScope::of(self.test);
         class.fields = structure
             .fields
@@ -727,6 +771,7 @@ impl<'ast> Visit<'ast> for RustModelVisitor<'_> {
     }
 
     fn visit_item_enum(&mut self, enumeration: &'ast syn::ItemEnum) {
+        let private = self.private(&enumeration.vis, &enumeration.ident, &enumeration.attrs);
         let name = enumeration.ident.to_string();
         let module = self.module();
         let class = ensure_rust_class(
@@ -740,7 +785,7 @@ impl<'ast> Visit<'ast> for RustModelVisitor<'_> {
             .expect("Rust type token masking cannot fail")
             .into();
         class.type_parameters = rust_type_parameters(&enumeration.generics);
-        class.private = rust_private(&enumeration.vis, &enumeration.ident, &enumeration.attrs);
+        class.private = private;
         class.scope = CodeScope::of(self.test);
     }
 
@@ -810,7 +855,7 @@ impl<'ast> Visit<'ast> for RustModelVisitor<'_> {
                         Some(&owner),
                         &method.sig,
                         Some(&method.block),
-                        inherent && rust_private(&method.vis, &method.sig.ident, &method.attrs),
+                        inherent && self.private(&method.vis, &method.sig.ident, &method.attrs),
                     );
                     fact.scope = CodeScope::of(test);
                     Some(fact)
@@ -848,14 +893,15 @@ impl<'ast> Visit<'ast> for RustModelVisitor<'_> {
         let Some((_, items)) = &module.content else {
             return;
         };
-        let enclosing_test = self.test;
+        let (enclosing_test, enclosing_allows) = (self.test, self.allows_unused);
         self.test |= crate::core::test_suite::rust_cfg_test(&module.attrs);
+        self.allows_unused |= rust_allows_unused(&module.attrs);
         self.module_path.push(module.ident.to_string());
         for item in items {
             self.visit_item(item);
         }
         self.module_path.pop();
-        self.test = enclosing_test;
+        (self.test, self.allows_unused) = (enclosing_test, enclosing_allows);
     }
 }
 
@@ -875,6 +921,7 @@ fn rust_source_model(input: &Input) -> Result<SourceModel, String> {
             path: path.clone(),
             module_path: Vec::new(),
             test: crate::core::test_suite::conventional_test_path(path),
+            allows_unused: rust_allows_unused(&file.attrs),
             model: &mut model,
             classes: &mut classes,
         }
@@ -987,6 +1034,73 @@ fn portable_private(node: Node<'_>, name: &str, signature: &str) -> bool {
     !exported && !hook && (name.starts_with('_') || signature.contains("private "))
 }
 
+/// A decorator keyword argument that makes pytest reach a fixture without its
+/// function name: `autouse=True` runs it for every test, `name=` renames it.
+fn python_fixture_reached_by_keyword(arguments: Node<'_>, source: &str) -> bool {
+    let mut cursor = arguments.walk();
+    arguments
+        .named_children(&mut cursor)
+        .filter(|argument| argument.kind() == "keyword_argument")
+        .any(|argument| {
+            let field = |name| {
+                argument
+                    .child_by_field_name(name)
+                    .map(|node| text_of(node, source))
+            };
+            match field("name").as_deref() {
+                Some("name") => true,
+                Some("autouse") => field("value").as_deref() != Some("False"),
+                _ => false,
+            }
+        })
+}
+
+/// Whether a decorator registers its function with a framework that calls it by
+/// decoration rather than by name: pydantic/marshmallow validators, serializers and
+/// load/dump hooks, and pytest fixtures that are autouse or renamed.
+fn python_framework_decorator(decorator: Node<'_>, source: &str) -> bool {
+    let Some(expression) = decorator.named_child(0) else {
+        return false;
+    };
+    let (callee, arguments) = if expression.kind() == "call" {
+        (
+            expression
+                .child_by_field_name("function")
+                .unwrap_or(expression),
+            expression.child_by_field_name("arguments"),
+        )
+    } else {
+        (expression, None)
+    };
+    let callee = text_of(callee, source);
+    let name = callee.rsplit('.').next().unwrap_or_default();
+    if name == "fixture" {
+        return arguments
+            .is_some_and(|arguments| python_fixture_reached_by_keyword(arguments, source));
+    }
+    name.ends_with("validator")
+        || name.ends_with("serializer")
+        || matches!(
+            name,
+            "validates" | "validates_schema" | "pre_load" | "post_load" | "pre_dump" | "post_dump"
+        )
+}
+
+/// A Python function invoked through a framework-registering decorator.
+fn python_decorated_entry_point(node: Node<'_>, source: &str) -> bool {
+    let Some(parent) = node
+        .parent()
+        .filter(|parent| parent.kind() == "decorated_definition")
+    else {
+        return false;
+    };
+    let mut cursor = parent.walk();
+    parent
+        .named_children(&mut cursor)
+        .filter(|child| child.kind() == "decorator")
+        .any(|decorator| python_framework_decorator(decorator, source))
+}
+
 fn portable_function(
     node: Node<'_>,
     source: &str,
@@ -1026,7 +1140,7 @@ fn portable_function(
         complexity: body_node.map(|body| super::complexity::portable(node, body, language)),
         private: portable_private(node, &name, &signature),
         receiver: owner.is_some() && portable_receiver(&signature, language),
-        entry_point: false,
+        entry_point: language == "python" && python_decorated_entry_point(node, source),
         scope: CodeScope::of(crate::core::test_suite::conventional_test_path(path)),
         name,
     };
@@ -1475,6 +1589,15 @@ mod tests {
             "/// Mentions \"helper\" only in prose.\n",
             "fn helper() {}\n",
             "mod nested { fn main() {} #[test] fn runs() {} #[tokio::test] async fn runs_async() {} }\n",
+            "#[maybe_tokio_test] async fn aliased() {}\n",
+            "#[wasm_bindgen_test] fn in_browser() {}\n",
+            "#[quickcheck] fn property(input: u8) -> bool { true }\n",
+            "#[rstest] fn parameterised() {}\n",
+            "#[test_case(1)] fn with_case(value: u8) {}\n",
+            "#[inline] fn not_a_test() {}\n",
+            "#[attest] fn not_a_harness() {}\n",
+            "#[cfg_attr(unix, tokio::test(start_paused))] async fn gated() {}\n",
+            "#[cfg_attr(test, allow(unused))] fn not_gated_harness() {}\n",
         );
         let model = source_model(
             &rule("rust.unused_code"),
@@ -1492,13 +1615,95 @@ mod tests {
             [
                 "src/main.rs::main",
                 "src/main.rs::nested::runs",
-                "src/main.rs::nested::runs_async"
+                "src/main.rs::nested::runs_async",
+                "src/main.rs::aliased",
+                "src/main.rs::in_browser",
+                "src/main.rs::property",
+                "src/main.rs::parameterised",
+                "src/main.rs::with_case",
+                "src/main.rs::gated",
             ]
         );
         assert_eq!(
             model.attribute_references,
             BTreeSet::from(["codec".into(), "port".into()])
         );
+    }
+
+    #[test]
+    fn rust_model_honours_inner_file_and_module_unused_allowances() {
+        let allowed_file = concat!(
+            "#![allow(dead_code)]\n",
+            "fn helper() { fn nested() {} }\n",
+            "struct Fixture;\n",
+            "enum Kind { A }\n",
+            "impl Fixture { fn build() {} }\n",
+        );
+        let module = concat!(
+            "fn plain() {}\n",
+            "mod quiet { #![allow(unused)] fn inner() {} }\n",
+            "#[allow(dead_code)] mod outer { fn hushed() {} }\n",
+            "mod loud { fn reported() {} }\n",
+        );
+        let model = source_model(
+            &rule("rust.unused_code"),
+            &input(
+                "rust-v1",
+                &[("src/allowed.rs", allowed_file), ("src/lib.rs", module)],
+            ),
+        )
+        .unwrap();
+        let mut private = model
+            .functions
+            .iter()
+            .filter(|function| function.private)
+            .map(|function| function.symbol.as_str())
+            .chain(
+                model
+                    .classes
+                    .iter()
+                    .filter(|class| class.private)
+                    .map(|class| class.symbol.as_str()),
+            )
+            .collect::<Vec<_>>();
+        private.sort_unstable();
+        assert_eq!(private, ["src/lib.rs::loud::reported", "src/lib.rs::plain"]);
+    }
+
+    #[test]
+    fn python_model_treats_framework_registered_decorators_as_entry_points() {
+        let source = concat!(
+            "import pytest\n",
+            "from pydantic import BaseModel, model_validator, field_validator\n",
+            "@pytest.fixture(autouse=True)\n",
+            "def _environment(monkeypatch): pass\n",
+            "@pytest.fixture(name=\"app\")\n",
+            "def _app(): pass\n",
+            "@pytest.fixture\n",
+            "def _bare(): pass\n",
+            "@pytest.fixture(autouse=False)\n",
+            "def _manual(): pass\n",
+            "@functools.cache\n",
+            "def _cached(): pass\n",
+            "class Event(BaseModel):\n",
+            "    @model_validator(mode=\"after\")\n",
+            "    def _check(self): return self\n",
+            "    @field_validator(\"data\")\n",
+            "    @classmethod\n",
+            "    def _strip(cls, value): return value\n",
+        );
+        let model = source_model(
+            &rule("python.unused_code"),
+            &input("python-v1", &[("tests/conftest.py", source)]),
+        )
+        .unwrap();
+        let entry_points = model
+            .functions
+            .iter()
+            .filter(|function| function.entry_point)
+            .map(|function| function.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(entry_points, ["_environment", "_app", "_check", "_strip"]);
     }
 
     #[test]

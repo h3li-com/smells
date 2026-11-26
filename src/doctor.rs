@@ -1321,6 +1321,7 @@ mod tests {
         let commit = |id: &str| HistoryCommit {
             id: id.into(),
             root: false,
+            subject: String::new(),
             files: vec!["src/lib.rs".into()],
         };
         let complete = History {

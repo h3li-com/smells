@@ -35,7 +35,7 @@
       }
     },
     "typescript.function_arguments": {
-      "version": 1,
+      "version": 2,
       "mode": "required",
       "parameters": {
         "maximum": 7
@@ -63,7 +63,7 @@
       }
     },
     "typescript.primitive_slots": {
-      "version": 1,
+      "version": 2,
       "mode": "report",
       "parameters": {
         "minimum_raw_slots": 5,
@@ -79,15 +79,15 @@
       }
     },
     "typescript.alternative_interfaces": {
-      "version": 1,
+      "version": 2,
       "mode": "report",
       "parameters": {
-        "minimum_similarity_basis_points": 8200,
+        "minimum_similarity_basis_points": 6200,
         "minimum_tokens": 20
       }
     },
     "typescript.repeated_dispatch": {
-      "version": 1,
+      "version": 2,
       "mode": "report",
       "parameters": {
         "minimum_sites": 3,
@@ -95,7 +95,7 @@
       }
     },
     "typescript.temporary_fields": {
-      "version": 1,
+      "version": 2,
       "mode": "report",
       "parameters": {
         "minimum_fields": 3,
@@ -167,14 +167,14 @@
       }
     },
     "typescript.nominal_slot_contract": {
-      "version": 1,
+      "version": 2,
       "mode": "report",
       "parameters": {
         "maximum_mismatches": 0
       }
     },
     "typescript.port_conformance": {
-      "version": 1,
+      "version": 2,
       "mode": "report",
       "parameters": {
         "maximum_failures": 0
@@ -189,7 +189,7 @@
       }
     },
     "typescript.divergent_change": {
-      "version": 1,
+      "version": 2,
       "mode": "report",
       "parameters": {
         "minimum_changes": 3,
@@ -197,21 +197,21 @@
       }
     },
     "typescript.parallel_inheritance": {
-      "version": 1,
+      "version": 2,
       "mode": "report",
       "parameters": {
         "minimum_parallel_pairs": 3
       }
     },
     "typescript.shotgun_surgery": {
-      "version": 1,
+      "version": 2,
       "mode": "report",
       "parameters": {
         "maximum_owners": 3
       }
     },
     "typescript.foreign_accesses": {
-      "version": 2,
+      "version": 3,
       "mode": "report",
       "parameters": {
         "minimum_foreign_accesses": 5,
@@ -219,21 +219,21 @@
       }
     },
     "typescript.dependency_contract": {
-      "version": 1,
+      "version": 2,
       "mode": "report",
       "parameters": {
         "maximum_forbidden_accesses": 0
       }
     },
     "typescript.library_capabilities": {
-      "version": 1,
+      "version": 2,
       "mode": "report",
       "parameters": {
         "maximum_failures": 0
       }
     },
     "typescript.navigation_chains": {
-      "version": 2,
+      "version": 3,
       "mode": "report",
       "parameters": {
         "minimum_transitions": 3

@@ -128,9 +128,42 @@
           "$ref": "#/$defs/selection_v2"
         },
         "python.foreign_accesses": {
-          "$ref": "#/$defs/selection_v2"
+          "$ref": "#/$defs/selection_v3"
         },
         "python.navigation_chains": {
+          "$ref": "#/$defs/selection_v3"
+        },
+        "python.alternative_interfaces": {
+          "$ref": "#/$defs/selection_v2"
+        },
+        "python.dependency_contract": {
+          "$ref": "#/$defs/selection_v2"
+        },
+        "python.divergent_change": {
+          "$ref": "#/$defs/selection_v2"
+        },
+        "python.function_arguments": {
+          "$ref": "#/$defs/selection_v2"
+        },
+        "python.library_capabilities": {
+          "$ref": "#/$defs/selection_v2"
+        },
+        "python.nominal_slot_contract": {
+          "$ref": "#/$defs/selection_v2"
+        },
+        "python.parallel_inheritance": {
+          "$ref": "#/$defs/selection_v2"
+        },
+        "python.port_conformance": {
+          "$ref": "#/$defs/selection_v2"
+        },
+        "python.repeated_dispatch": {
+          "$ref": "#/$defs/selection_v2"
+        },
+        "python.shotgun_surgery": {
+          "$ref": "#/$defs/selection_v2"
+        },
+        "python.unused_code": {
           "$ref": "#/$defs/selection_v2"
         },
         "python.function_crap": {
