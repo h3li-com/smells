@@ -72,6 +72,34 @@ _Avoid_: Complete report, sufficient diagnosis
 The single deterministic source anchor that owns a Finding and is the only place where its Suppression may be declared. Related locations remain evidence for the same Finding but cannot independently suppress it.
 _Avoid_: Any related location, arbitrary suppression site
 
+**Blocking Finding**:
+A matched Finding that fails the policy gate because its rule is required and no Suppression, Declaration Role, or Test Code classification downgrades it.
+_Avoid_: Error, failure
+
+**Indicator**:
+A matched Finding that is reported with its full evidence but never fails the policy gate.
+_Avoid_: Advisory, warning, info
+
+**Scan Error**:
+A file or rule the scanner could not analyze. Any Scan Error makes the scan incomplete, so it fails closed rather than vouching for code it did not read.
+_Avoid_: Parse failure, crash
+
+**Test Code**:
+Source that exists to exercise or demonstrate other source: test files, test modules, test functions, examples, and benchmarks. It stays in the corpus, but its Findings are always Indicators.
+_Avoid_: Non-production code, excluded files
+
+**Configuration Variant**:
+One of the files or items that conditional compilation chooses between for the same module or symbol, such as a Unix and a Windows implementation. Every variant is scanned and reported at its own location; a name resolves if any variant defines it, and code used by any variant is used.
+_Avoid_: cfg alternative, platform version, candidate
+
+**Duplicate Family**:
+A set of functions linked by matching duplicate pairs, reported as one Finding.
+_Avoid_: Duplicate pair, clone group
+
+**Counted Parameter**:
+A parameter a caller must supply or place correctly. Keyword-only parameters with a default are not Counted Parameters.
+_Avoid_: Argument, arity
+
 ## Example dialogue
 
 > **Developer:** The Consumer Policy requires the long-parameter-list rule, and it matched this function.

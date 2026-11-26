@@ -7,6 +7,9 @@ use super::ResolvedSourceRole;
 pub(crate) struct Input {
     pub files: BTreeMap<String, String>,
     pub manifests: BTreeMap<String, String>,
+    /// Directory symlinks inside the corpus root, from link path to target
+    /// path. Module paths through a link resolve to the captured target files.
+    pub directory_links: BTreeMap<String, String>,
     pub artifacts: BTreeMap<String, Vec<u8>>,
     pub artifact_candidates: BTreeMap<String, Vec<u8>>,
     pub implementations: Vec<Implementation>,
@@ -28,6 +31,7 @@ impl Input {
         Self {
             files,
             manifests: BTreeMap::new(),
+            directory_links: BTreeMap::new(),
             artifacts: BTreeMap::new(),
             artifact_candidates: BTreeMap::new(),
             implementations: Vec::new(),

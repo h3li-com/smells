@@ -22,14 +22,56 @@ fn clean_path(path: &Path) -> Result<String, String> {
         .replace('\\', "/"))
 }
 
-fn path_attribute(item: &ItemMod) -> Result<Option<String>, String> {
-    let mut found = None;
-    for attr in &item.attrs {
-        if conditional_path_attribute(attr) {
-            return Err("conditional module path requires active-cfg analysis".into());
+/// The parsed corpus and the in-root directory symlinks a module path may
+/// cross on its way to a captured file.
+#[derive(Clone, Copy)]
+pub(super) struct Sources<'a> {
+    pub parsed: &'a BTreeMap<String, syn::File>,
+    pub directory_links: &'a BTreeMap<String, String>,
+}
+
+impl Sources<'_> {
+    /// The corpus file a module path names, following directory symlinks to
+    /// the file captured at their target so it is scanned once. `None` when no
+    /// captured file matches, including paths through links that leave the
+    /// corpus root, which were never recorded.
+    fn resolve(&self, path: String) -> Result<Option<String>, String> {
+        let mut path = path;
+        for _ in 0..=self.directory_links.len() {
+            if self.parsed.contains_key(&path) {
+                return Ok(Some(path));
+            }
+            let through_link = self.directory_links.iter().find_map(|(link, target)| {
+                let rest = path.strip_prefix(link.as_str())?.strip_prefix('/')?;
+                Some(Path::new(target).join(rest))
+            });
+            match through_link {
+                Some(next) => path = clean_path(&next)?,
+                None => return Ok(None),
+            }
         }
+        Err(format!("cyclic directory symlink: {path}"))
+    }
+}
+
+/// The `#[path]` attributes of a module declaration: the unconditional one, if
+/// any, and every one a `#[cfg_attr(…, path = "…")]` selects under some `cfg`.
+#[derive(Debug, Default, PartialEq)]
+struct PathAttributes {
+    plain: Option<String>,
+    conditional: Vec<String>,
+}
+
+fn path_attributes(item: &ItemMod) -> Result<PathAttributes, String> {
+    let mut found = PathAttributes::default();
+    for attr in &item.attrs {
         if attr.path().is_ident("path") {
-            found = authored_path_attribute(attr, found.as_deref())?;
+            if found.plain.is_some() {
+                return Err("ambiguous or non-portable module path attribute".into());
+            }
+            found.plain = Some(authored_path_attribute(&attr.meta)?);
+        } else if conditional_path_attribute(attr) {
+            found.conditional.extend(conditional_paths(attr)?);
         }
     }
     Ok(found)
@@ -40,11 +82,29 @@ fn conditional_path_attribute(attribute: &Attribute) -> bool {
         && matches!(&attribute.meta, Meta::List(list) if mentions_path(list.tokens.clone()))
 }
 
-fn authored_path_attribute(
-    attribute: &Attribute,
-    found: Option<&str>,
-) -> Result<Option<String>, String> {
-    let Meta::NameValue(value) = &attribute.meta else {
+/// The paths one `#[cfg_attr(predicate, attributes…)]` applies. A `path` nested
+/// in another `cfg_attr` would need the predicates combined, so it is refused.
+fn conditional_paths(attribute: &Attribute) -> Result<Vec<String>, String> {
+    let attributes = attribute
+        .parse_args_with(|input: syn::parse::ParseStream<'_>| {
+            input.parse::<Meta>()?;
+            input.parse::<syn::Token![,]>()?;
+            syn::punctuated::Punctuated::<Meta, syn::Token![,]>::parse_terminated(input)
+        })
+        .map_err(|_| "unsupported conditional module path attribute")?;
+    let mut paths = vec![];
+    for meta in &attributes {
+        if meta.path().is_ident("path") {
+            paths.push(authored_path_attribute(meta)?);
+        } else if meta.path().is_ident("cfg_attr") {
+            return Err("nested conditional module path requires active-cfg analysis".into());
+        }
+    }
+    Ok(paths)
+}
+
+fn authored_path_attribute(meta: &Meta) -> Result<String, String> {
+    let Meta::NameValue(value) = meta else {
         return Err("unsupported module path attribute".into());
     };
     let Expr::Lit(ExprLit {
@@ -54,10 +114,10 @@ fn authored_path_attribute(
     else {
         return Err("unsupported module path attribute".into());
     };
-    if found.is_some() || path.value().contains('\\') || Path::new(&path.value()).is_absolute() {
+    if path.value().contains('\\') || Path::new(&path.value()).is_absolute() {
         return Err("ambiguous or non-portable module path attribute".into());
     }
-    Ok(Some(path.value()))
+    Ok(path.value())
 }
 
 fn mentions_path(tokens: proc_macro2::TokenStream) -> bool {
@@ -69,36 +129,86 @@ fn mentions_path(tokens: proc_macro2::TokenStream) -> bool {
 }
 
 fn inline_base(item: &ItemMod, base: &Path, attribute_base: &Path) -> Result<PathBuf, String> {
-    let next = match path_attribute(item)? {
+    let paths = path_attributes(item)?;
+    if !paths.conditional.is_empty() {
+        return Err("conditional inline module path requires active-cfg analysis".into());
+    }
+    let next = match paths.plain {
         Some(path) => attribute_base.join(path),
         None => base.join(item.ident.to_string()),
     };
     Ok(PathBuf::from(clean_path(&next)?))
 }
 
-fn module_file(
+/// Every source file a file module declaration can load, one per
+/// configuration variant in declaration order. Each explicit path must be in
+/// the corpus. The conventional `name.rs` or `name/mod.rs` is required only
+/// when no `cfg_attr` path offers an alternative.
+fn module_files(
     item: &ItemMod,
     base: &Path,
     attribute_base: &Path,
-    parsed: &BTreeMap<String, syn::File>,
-) -> Result<String, String> {
-    if let Some(path) = path_attribute(item)? {
-        let path = clean_path(&attribute_base.join(path))?;
-        if parsed.contains_key(&path) {
-            return Ok(path);
-        }
-        return Err(format!("module source missing from corpus: {path}"));
+    sources: Sources<'_>,
+) -> Result<Vec<String>, String> {
+    let paths = path_attributes(item)?;
+    let mut files = vec![];
+    for path in paths.conditional.iter().chain(&paths.plain) {
+        push_unique(
+            &mut files,
+            attributed_module_file(path, attribute_base, sources)?,
+        );
+    }
+    if paths.plain.is_some() {
+        return Ok(files);
     }
     let name = item.ident.to_string();
+    match conventional_module_file(&name, base, sources)? {
+        Some(path) => push_unique(&mut files, path),
+        None if !files.is_empty() => {}
+        None => return Err(format!("missing or ambiguous module source: {name}")),
+    }
+    Ok(files)
+}
+
+fn push_unique(files: &mut Vec<String>, path: String) {
+    if !files.contains(&path) {
+        files.push(path);
+    }
+}
+
+/// The corpus source a `#[path]` attribute names relative to `attribute_base`.
+fn attributed_module_file(
+    path: &str,
+    attribute_base: &Path,
+    sources: Sources<'_>,
+) -> Result<String, String> {
+    let path = clean_path(&attribute_base.join(path))?;
+    sources
+        .resolve(path.clone())?
+        .ok_or_else(|| format!("module source missing from corpus: {path}"))
+}
+
+/// The one source file `mod {name};` names next to `base`, as `{name}.rs` or
+/// `{name}/mod.rs`, or `None` when neither or both exist.
+fn conventional_module_file(
+    name: &str,
+    base: &Path,
+    sources: Sources<'_>,
+) -> Result<Option<String>, String> {
     let candidates = [
         clean_path(&base.join(format!("{name}.rs")))?,
-        clean_path(&base.join(&name).join("mod.rs"))?,
+        clean_path(&base.join(name).join("mod.rs"))?,
     ];
-    let mut found = candidates.into_iter().filter(|p| parsed.contains_key(p));
-    match (found.next(), found.next()) {
-        (Some(path), None) => Ok(path),
-        _ => Err(format!("missing or ambiguous module source: {name}")),
+    let mut found = vec![];
+    for candidate in candidates {
+        if let Some(path) = sources.resolve(candidate)? {
+            found.push(path);
+        }
     }
+    Ok(match <[String; 1]>::try_from(found) {
+        Ok([path]) => Some(path),
+        Err(_) => None,
+    })
 }
 
 /// Whether `path` is a Cargo target root that is not named `lib.rs` or
@@ -156,7 +266,7 @@ fn references(
     items: &[Item],
     base: &Path,
     attribute_base: &Path,
-    parsed: &BTreeMap<String, syn::File>,
+    sources: Sources<'_>,
     found: &mut BTreeSet<String>,
     depth: usize,
 ) -> Result<(), String> {
@@ -167,9 +277,9 @@ fn references(
         if let Item::Mod(module) = item {
             if let Some((_, items)) = &module.content {
                 let next = inline_base(module, base, attribute_base)?;
-                references(items, &next, &next, parsed, found, depth + 1)?;
+                references(items, &next, &next, sources, found, depth + 1)?;
             } else {
-                found.insert(module_file(module, base, attribute_base, parsed)?);
+                found.extend(module_files(module, base, attribute_base, sources)?);
             }
         }
     }
@@ -211,11 +321,11 @@ fn import_group(
         .try_for_each(|tree| imports(tree, prefix, result))
 }
 
-/// The binding recorded for a name that two imports bring in, such as
-/// `pub use self::from_ref::FromRef;` and `pub use axum_macros::FromRef;`.
-/// Rust allows that when the items live in different namespaces (a trait and a
-/// derive macro), which this scan cannot tell apart, so only resolving
-/// through the name is an error.
+/// Heads the binding recorded for a name that two imports bring in, followed
+/// by each imported path joined with `::`. Rust allows that when the items live
+/// in different namespaces, such as `pub use self::from_ref::FromRef;` and
+/// `pub use axum_macros::FromRef;`, or under exclusive `cfg`s, such as a mock
+/// and a real type imported under one name.
 const AMBIGUOUS_IMPORT: &str = "\0ambiguous";
 const EXTERNAL_CRATE: &str = "\0extern";
 
@@ -228,8 +338,17 @@ fn insert_import(alias: String, mut path: Vec<String>, result: &mut BTreeMap<Str
     }
     match result.entry(alias) {
         Entry::Occupied(mut entry) => {
-            if *entry.get() != path {
-                entry.insert(vec![AMBIGUOUS_IMPORT.into()]);
+            let joined = path.join("::");
+            let binding = entry.get_mut();
+            if binding
+                .first()
+                .is_some_and(|first| first == AMBIGUOUS_IMPORT)
+            {
+                if !binding.contains(&joined) {
+                    binding.push(joined);
+                }
+            } else if *binding != path {
+                *binding = vec![AMBIGUOUS_IMPORT.into(), binding.join("::"), joined];
             }
         }
         Entry::Vacant(entry) => {
@@ -238,16 +357,20 @@ fn insert_import(alias: String, mut path: Vec<String>, result: &mut BTreeMap<Str
     }
 }
 
-/// The path an import binds `name` to, or an error when two imports bind it.
-fn imported_path<'a>(
-    imports: &'a BTreeMap<String, Vec<String>>,
-    name: &str,
-) -> Result<Option<&'a Vec<String>>, String> {
+/// Every path the imports bind `name` to, in import order.
+fn imported_paths(imports: &BTreeMap<String, Vec<String>>, name: &str) -> Vec<Vec<String>> {
     match imports.get(name) {
-        Some(path) if path.first().is_some_and(|first| first == AMBIGUOUS_IMPORT) => {
-            Err(format!("ambiguous import binding: {name}"))
+        Some(binding)
+            if binding
+                .first()
+                .is_some_and(|first| first == AMBIGUOUS_IMPORT) =>
+        {
+            binding[1..]
+                .iter()
+                .map(|path| path.split("::").map(str::to_string).collect())
+                .collect()
         }
-        path => Ok(path),
+        binding => binding.into_iter().cloned().collect(),
     }
 }
 
@@ -285,11 +408,15 @@ fn import_rename(
 
 struct ModuleWalker<'a> {
     root: &'a str,
-    parsed: &'a BTreeMap<String, syn::File>,
+    sources: Sources<'a>,
     stack: Vec<String>,
     result: &'a mut BTreeMap<String, Module>,
+    variants: &'a mut BTreeMap<String, Vec<String>>,
     /// Inside a test target root or a `#[cfg(test)]` module.
     test: bool,
+    /// Inside a file that an earlier module path already loaded: the key of
+    /// that repeated load and of the first load.
+    repeated: Option<(String, String)>,
 }
 
 impl ModuleWalker<'_> {
@@ -303,22 +430,43 @@ impl ModuleWalker<'_> {
         Ok(bindings)
     }
 
-    fn insert(&mut self, path: &str, key: &str, items: &[Item]) -> Result<(), String> {
+    /// Records one module and returns its key. A module path declared again
+    /// under another `cfg` is a configuration variant with its own key.
+    fn insert(&mut self, path: &str, key: &str, items: &[Item]) -> Result<String, String> {
+        let key = if self.result.contains_key(key) {
+            let alternatives = self.variants.entry(key.into()).or_default();
+            let variant = super::variant_key(key, alternatives.len() + 2);
+            alternatives.push(variant.clone());
+            variant
+        } else {
+            key.to_string()
+        };
         let module = Module {
-            key: key.into(),
+            key: key.clone(),
             root: self.root.into(),
             path: path.into(),
             items: items.to_vec(),
             imports: Self::bindings(items)?,
             test: self.test,
+            repeated: self.repeated.as_ref().map(|(repeat, first)| {
+                format!(
+                    "{first}{}",
+                    key.strip_prefix(repeat.as_str()).unwrap_or_default()
+                )
+            }),
         };
-        if self.result.insert(key.into(), module).is_some() {
-            Err(format!(
-                "ambiguous authored module: {key}; active-cfg analysis is not implemented"
-            ))
-        } else {
-            Ok(())
-        }
+        self.result.insert(key.clone(), module);
+        Ok(key)
+    }
+
+    /// The key of the module that first loaded the file at `path`, if any.
+    fn first_load(&self, path: &str) -> Option<String> {
+        self.result
+            .values()
+            .filter(|module| module.path == path && module.repeated.is_none())
+            .map(|module| &module.key)
+            .min_by_key(|key| key.len())
+            .cloned()
     }
 
     fn visit_child(
@@ -349,20 +497,29 @@ impl ModuleWalker<'_> {
             let next = inline_base(module, base, attribute_base)?;
             return self.visit(path, &next_key, items, &next, &next);
         }
-        let next_path = module_file(module, base, attribute_base, self.parsed)?;
-        if self.stack.contains(&next_path) {
-            return Err(format!("cyclic module source: {next_path}"));
+        for next_path in module_files(module, base, attribute_base, self.sources)? {
+            if self.stack.contains(&next_path) {
+                return Err(format!("cyclic module source: {next_path}"));
+            }
+            let enclosing_repeated = self.repeated.clone();
+            if self.repeated.is_none() {
+                self.repeated = self
+                    .first_load(&next_path)
+                    .map(|first| (next_key.clone(), first));
+            }
+            self.stack.push(next_path.clone());
+            let result = self.visit(
+                &next_path,
+                &next_key,
+                &self.sources.parsed[&next_path].items,
+                &file_base(&next_path),
+                Path::new(&next_path).parent().unwrap_or(Path::new("")),
+            );
+            self.stack.pop();
+            self.repeated = enclosing_repeated;
+            result?;
         }
-        self.stack.push(next_path.clone());
-        let result = self.visit(
-            &next_path,
-            &next_key,
-            &self.parsed[&next_path].items,
-            &file_base(&next_path),
-            Path::new(&next_path).parent().unwrap_or(Path::new("")),
-        );
-        self.stack.pop();
-        result
+        Ok(())
     }
 
     fn visit(
@@ -383,10 +540,10 @@ impl ModuleWalker<'_> {
         {
             return Err("module nesting limit exceeded".into());
         }
-        self.insert(path, key, items)?;
+        let key = self.insert(path, key, items)?;
         for item in items {
             if let Item::Mod(module) = item {
-                self.visit_child(module, path, key, base, attribute_base)?;
+                self.visit_child(module, path, &key, base, attribute_base)?;
             }
         }
         Ok(())
@@ -419,11 +576,15 @@ impl Facts {
                 module,
                 0,
             ),
+            // Traits own no impl blocks, so `impl dyn Trait` has no local
+            // owner, and `!` is a primitive.
             Type::Array(_)
             | Type::Slice(_)
             | Type::Tuple(_)
             | Type::Reference(_)
-            | Type::Ptr(_) => Ok(None),
+            | Type::Ptr(_)
+            | Type::TraitObject(_)
+            | Type::Never(_) => Ok(None),
             _ => Err(format!(
                 "unsupported impl target in {module}: {}",
                 syntax(ty)
@@ -468,12 +629,14 @@ impl Facts {
             "self" => (module.to_string(), 1),
             "super" => Self::super_prefix(path, module, &context.root)?,
             _ => {
-                if let Some(import) = imported_path(&context.imports, first)? {
-                    let mut next = import.clone();
-                    next.extend_from_slice(&path[1..]);
-                    return self
-                        .resolve_bounded(&next, module, depth + 1, visits)
-                        .map(ResolutionStart::Resolved);
+                if let OwnerLookup::Resolved(owner) = self.imported_name(
+                    &context.imports,
+                    first,
+                    &path[1..],
+                    module,
+                    (depth, visits),
+                )? {
+                    return Ok(ResolutionStart::Resolved(owner));
                 }
                 (module.to_string(), 0)
             }
@@ -484,17 +647,82 @@ impl Facts {
         })
     }
 
+    /// The owner `name::rest` resolves to through the imports of `module`, or
+    /// `Missing` when no import binds `name`. A name two imports bind resolves when
+    /// any of them does, and is ambiguous when none does or they reach
+    /// different local owners.
+    fn imported_name(
+        &self,
+        imports: &BTreeMap<String, Vec<String>>,
+        name: &str,
+        rest: &[String],
+        module: &str,
+        (depth, visits): (usize, &mut usize),
+    ) -> Result<OwnerLookup, String> {
+        let paths = imported_paths(imports, name);
+        let resolve = |path: &Vec<String>, visits: &mut usize| {
+            let mut next = path.clone();
+            next.extend_from_slice(rest);
+            self.resolve_bounded(&next, module, depth + 1, visits)
+        };
+        if let [path] = paths.as_slice() {
+            return resolve(path, visits).map(OwnerLookup::Resolved);
+        }
+        let mut owners = BTreeSet::new();
+        let mut resolved = false;
+        for path in &paths {
+            match resolve(path, visits) {
+                Ok(owner) => {
+                    resolved = true;
+                    owners.extend(owner);
+                }
+                Err(error) if error.contains("cycle/budget") => return Err(error),
+                Err(_) => {}
+            }
+        }
+        if paths.is_empty() {
+            Ok(OwnerLookup::Missing)
+        } else if resolved && owners.len() < 2 {
+            Ok(OwnerLookup::Resolved(owners.pop_first()))
+        } else {
+            Err(format!("ambiguous import binding: {name}"))
+        }
+    }
+
+    /// `key`, then the same path through each configuration variant of the
+    /// modules it names, so a name resolves when any variant declares it.
+    fn variant_keys(&self, key: &str) -> Vec<String> {
+        let mut keys = vec![key.to_string()];
+        let mut index = 0;
+        while let Some(current) = keys.get(index).cloned() {
+            for (end, _) in current.match_indices("::") {
+                let Some(alternatives) = self.variants.get(&current[..end]) else {
+                    continue;
+                };
+                for alternative in alternatives {
+                    let key = format!("{alternative}{}", &current[end..]);
+                    if !keys.contains(&key) {
+                        keys.push(key);
+                    }
+                }
+            }
+            index += 1;
+        }
+        keys
+    }
+
     fn exact_owner(
         &self,
         key: &str,
         depth: usize,
         visits: &mut usize,
     ) -> Result<OwnerLookup, String> {
-        if self.types.contains_key(key) {
-            return Ok(OwnerLookup::Resolved(Some(key.to_string())));
+        let keys = self.variant_keys(key);
+        if let Some(key) = keys.iter().find(|key| self.types.contains_key(*key)) {
+            return Ok(OwnerLookup::Resolved(Some(key.clone())));
         }
-        let Some((module, alias)) = self.aliases.get(key) else {
-            return Ok(OwnerLookup::Missing);
+        let Some((module, alias)) = keys.iter().find_map(|key| self.aliases.get(key)) else {
+            return self.first_load_owner(key, depth, visits);
         };
         match alias {
             Type::Path(path) if path.qself.is_none() => self
@@ -514,44 +742,79 @@ impl Facts {
         }
     }
 
+    /// Resolves a type of a repeated module load at the file's first load,
+    /// which alone holds its declarations.
+    fn first_load_owner(
+        &self,
+        key: &str,
+        depth: usize,
+        visits: &mut usize,
+    ) -> Result<OwnerLookup, String> {
+        let first = key.rsplit_once("::").and_then(|(module, name)| {
+            let first = self.modules.get(module)?.repeated.as_ref()?;
+            Some(format!("{first}::{name}"))
+        });
+        match first {
+            Some(first) => self.exact_owner(&first, depth, visits),
+            None => Ok(OwnerLookup::Missing),
+        }
+    }
+
     fn imported_owner(
         &self,
         prefix: &str,
         remaining: &[String],
         depth: usize,
         visits: &mut usize,
-    ) -> Result<(OwnerLookup, String), String> {
+    ) -> Result<OwnerLookup, String> {
         let mut parent = prefix.to_string();
         for (index, part) in remaining.iter().enumerate() {
-            let imports = self.modules.get(&parent).map(|module| &module.imports);
-            if let Some(import) = imports
-                .map(|imports| imported_path(imports, part))
-                .transpose()?
-                .flatten()
-            {
-                let mut next = import.clone();
-                next.extend_from_slice(&remaining[index + 1..]);
-                let owner = self.resolve_bounded(&next, &parent, depth + 1, visits)?;
-                return Ok((OwnerLookup::Resolved(owner), parent));
+            for variant in self.variant_keys(&parent) {
+                let Some(context) = self.modules.get(&variant) else {
+                    continue;
+                };
+                let rest = &remaining[index + 1..];
+                if let OwnerLookup::Resolved(owner) =
+                    self.imported_name(&context.imports, part, rest, &variant, (depth, visits))?
+                {
+                    return Ok(OwnerLookup::Resolved(owner));
+                }
             }
             if index + 1 < remaining.len() {
                 parent = format!("{parent}::{part}");
             }
         }
-        Ok((OwnerLookup::Missing, parent))
+        Ok(OwnerLookup::Missing)
     }
 
+    /// Resolves the path through the glob imports of the deepest named module
+    /// that has any, so `crate::loom::sync::Arc` reaches `sync` re-exported by
+    /// `pub use self::std::*` in `crate::loom`. The first segment of a longer
+    /// path never resolves through a glob of the starting module, which would
+    /// re-enter `use loom::sync::*` through itself.
     fn glob_owner(
         &self,
-        parent: &str,
+        prefix: &str,
         remaining: &[String],
         module: &str,
         original: &[String],
         depth: usize,
         visits: &mut usize,
     ) -> Result<OwnerLookup, String> {
-        let leaf = remaining.last().ok_or("empty resolved type path")?;
-        let candidates = self.glob_matches(parent, leaf, depth, visits)?;
+        if remaining.is_empty() {
+            return Err("empty resolved type path".into());
+        }
+        let mut candidates = Vec::new();
+        for split in (remaining.len().min(2) - 1..remaining.len()).rev() {
+            let parent = std::iter::once(prefix)
+                .chain(remaining[..split].iter().map(String::as_str))
+                .collect::<Vec<_>>()
+                .join("::");
+            candidates = self.glob_matches(&parent, &remaining[split..], depth, visits)?;
+            if !candidates.is_empty() {
+                break;
+            }
+        }
         let external = candidates.iter().any(Option::is_none);
         let mut matches: Vec<String> = candidates.into_iter().flatten().collect();
         matches.sort();
@@ -573,33 +836,41 @@ impl Facts {
     fn glob_matches(
         &self,
         parent: &str,
-        leaf: &str,
+        tail: &[String],
         depth: usize,
         visits: &mut usize,
     ) -> Result<Vec<Option<String>>, String> {
         let mut matches = vec![];
-        let Some(context) = self.modules.get(parent) else {
-            return Ok(matches);
-        };
-        for (name, import) in &context.imports {
-            if name.starts_with('*') {
-                self.glob_match(import, leaf, (parent, depth), visits, &mut matches)?;
+        for variant in self.variant_keys(parent) {
+            let Some(context) = self.modules.get(&variant) else {
+                continue;
+            };
+            for (name, import) in &context.imports {
+                if name.starts_with('*') {
+                    self.glob_match(
+                        import,
+                        tail,
+                        (variant.as_str(), depth),
+                        visits,
+                        &mut matches,
+                    )?;
+                }
             }
         }
         Ok(matches)
     }
 
-    /// Pushes the owner `leaf` resolves to through one glob import, if it resolves.
+    /// Pushes the owner `tail` resolves to through one glob import, if it resolves.
     fn glob_match(
         &self,
         import: &[String],
-        leaf: &str,
+        tail: &[String],
         (parent, depth): (&str, usize),
         visits: &mut usize,
         matches: &mut Vec<Option<String>>,
     ) -> Result<(), String> {
         let mut candidate = import.to_vec();
-        candidate.push(leaf.to_string());
+        candidate.extend_from_slice(tail);
         match self.resolve_bounded(&candidate, parent, depth + 1, visits) {
             Ok(owner) => matches.push(owner),
             Err(error) if error.contains("cycle/budget") || error.starts_with("ambiguous") => {
@@ -643,7 +914,16 @@ impl Facts {
             || (path.len() > 1
                 && !self.modules.contains_key(&format!("{module}::{first}"))
                 && !matches!(first, "crate" | "self" | "super"));
-        if primitive || prelude || external {
+        // An opaque item macro in the same module, such as mockall's `mock!`,
+        // can declare a bare name this scan cannot expand.
+        let generated = path.len() == 1
+            && self.modules.get(module).is_some_and(|context| {
+                context
+                    .items
+                    .iter()
+                    .any(|item| matches!(item, Item::Macro(item) if item.ident.is_none()))
+            });
+        if primitive || prelude || external || generated {
             Ok(None)
         } else {
             Err(format!(
@@ -666,11 +946,12 @@ impl Facts {
         if let OwnerLookup::Resolved(owner) = self.exact_owner(&key, depth, visits)? {
             return Ok(OwnerLookup::Resolved(owner));
         }
-        let (imported, parent) = self.imported_owner(prefix, remaining, depth, visits)?;
-        if let OwnerLookup::Resolved(owner) = imported {
+        if let OwnerLookup::Resolved(owner) =
+            self.imported_owner(prefix, remaining, depth, visits)?
+        {
             return Ok(OwnerLookup::Resolved(owner));
         }
-        self.glob_owner(&parent, remaining, module, original, depth, visits)
+        self.glob_owner(prefix, remaining, module, original, depth, visits)
     }
 
     fn resolve_bounded(
@@ -714,11 +995,39 @@ fn consume_resolution_budget(depth: usize, visits: &mut usize, module: &str) -> 
     }
 }
 
+/// `items` with each item macro that wraps ordinary items, such as tokio's
+/// `cfg_rt! { … }` or `pin_project! { … }`, replaced by the items it wraps.
+/// Other macro bodies, including `macro_rules!` definitions, stay opaque.
+fn expand_item_macros(items: Vec<Item>) -> Vec<Item> {
+    let mut expanded = Vec::with_capacity(items.len());
+    for item in items {
+        match item {
+            Item::Macro(item) if item.ident.is_none() => {
+                match syn::parse2::<syn::File>(item.mac.tokens.clone()) {
+                    Ok(file) if !file.items.iter().any(|i| matches!(i, Item::Verbatim(_))) => {
+                        expanded.extend(expand_item_macros(file.items));
+                    }
+                    _ => expanded.push(Item::Macro(item)),
+                }
+            }
+            Item::Mod(mut module) => {
+                if let Some((_, items)) = &mut module.content {
+                    *items = expand_item_macros(std::mem::take(items));
+                }
+                expanded.push(Item::Mod(module));
+            }
+            item => expanded.push(item),
+        }
+    }
+    expanded
+}
+
 pub(super) fn parse_sources(input: &Input, report: &mut Report) -> BTreeMap<String, syn::File> {
     let mut parsed = BTreeMap::new();
     for (path, source) in &input.files {
         match syn::parse_file(source) {
-            Ok(file) => {
+            Ok(mut file) => {
+                file.items = expand_item_macros(std::mem::take(&mut file.items));
                 metrics::add(
                     Counter::SyntaxTokens,
                     rustc_lexer::tokenize(source, rustc_lexer::FrontmatterAllowed::No).count(),
@@ -740,24 +1049,22 @@ fn file_references(
     path: &str,
     file: &syn::File,
     base: &Path,
-    parsed: &BTreeMap<String, syn::File>,
+    sources: Sources<'_>,
 ) -> Result<BTreeSet<String>, String> {
     let mut found = BTreeSet::new();
     let attribute_base = Path::new(path).parent().unwrap_or(Path::new(""));
-    references(&file.items, base, attribute_base, parsed, &mut found, 0)?;
+    references(&file.items, base, attribute_base, sources, &mut found, 0)?;
     Ok(found)
 }
 
-pub(super) fn referenced_sources(
-    parsed: &BTreeMap<String, syn::File>,
-    report: &mut Report,
-) -> BTreeSet<String> {
+pub(super) fn referenced_sources(sources: Sources<'_>, report: &mut Report) -> BTreeSet<String> {
     // A Cargo target root such as `tests/cli.rs` resolves its modules next to
     // itself, unless another file declares it as a module after all.
-    let mut found: BTreeMap<&str, Result<BTreeSet<String>, String>> = parsed
+    let mut found: BTreeMap<&str, Result<BTreeSet<String>, String>> = sources
+        .parsed
         .iter()
         .map(|(path, file)| {
-            let references = file_references(path, file, &root_base(path), parsed);
+            let references = file_references(path, file, &root_base(path), sources);
             (path.as_str(), references)
         })
         .collect();
@@ -767,9 +1074,9 @@ pub(super) fn referenced_sources(
         .flatten()
         .cloned()
         .collect();
-    for (path, file) in parsed {
+    for (path, file) in sources.parsed {
         if cargo_target_root(path) && referenced.contains(path) {
-            found.insert(path, file_references(path, file, &file_base(path), parsed));
+            found.insert(path, file_references(path, file, &file_base(path), sources));
         }
     }
     let mut referenced = BTreeSet::new();
@@ -795,29 +1102,32 @@ pub(super) fn root_sources(
 
 pub(super) fn collect_modules(
     roots: Vec<String>,
-    parsed: &BTreeMap<String, syn::File>,
+    sources: Sources<'_>,
     report: &mut Report,
-) -> BTreeMap<String, Module> {
+) -> (BTreeMap<String, Module>, BTreeMap<String, Vec<String>>) {
     let mut modules = BTreeMap::new();
+    let mut variants = BTreeMap::new();
     for root in roots {
         let mut walker = ModuleWalker {
             root: &root,
-            parsed,
+            sources,
             stack: vec![root.clone()],
             result: &mut modules,
+            variants: &mut variants,
             test: crate::core::test_suite::conventional_test_path(&root),
+            repeated: None,
         };
         if let Err(error) = walker.visit(
             &root,
             &root,
-            &parsed[&root].items,
+            &sources.parsed[&root].items,
             &root_base(&root),
             Path::new(&root).parent().unwrap_or(Path::new("")),
         ) {
             report.error(error);
         }
     }
-    modules
+    (modules, variants)
 }
 
 pub(super) fn validate_module_coverage(
@@ -835,15 +1145,53 @@ pub(super) fn validate_module_coverage(
 #[cfg(test)]
 mod tests {
     use super::{
-        Facts, Module, ModuleWalker, cargo_target_root, clean_path, conditional_path_attribute,
-        consume_resolution_budget, imported_path, imports, path_attribute, references, root_base,
-        validate_module_coverage,
+        Facts, Module, ModuleWalker, PathAttributes, Sources, cargo_target_root, clean_path,
+        conditional_path_attribute, consume_resolution_budget, expand_item_macros, imported_paths,
+        imports, path_attributes, references, root_base, validate_module_coverage,
     };
     use crate::{report::Location, scan::TypeFacts};
     use std::{
         collections::{BTreeMap, BTreeSet},
         path::Path,
     };
+
+    static NO_LINKS: BTreeMap<String, String> = BTreeMap::new();
+
+    fn sources(parsed: &BTreeMap<String, syn::File>) -> Sources<'_> {
+        Sources {
+            parsed,
+            directory_links: &NO_LINKS,
+        }
+    }
+
+    #[test]
+    fn sources_resolve_through_directory_links_and_reject_cycles() {
+        let parsed = BTreeMap::from([("common/mod.rs".into(), syn::parse_file("").unwrap())]);
+        let links = BTreeMap::from([
+            ("src/linked".to_string(), "common".to_string()),
+            ("src/hop".to_string(), "src/linked".to_string()),
+            ("src/a".to_string(), "src/b".to_string()),
+            ("src/b".to_string(), "src/a".to_string()),
+        ]);
+        let sources = Sources {
+            parsed: &parsed,
+            directory_links: &links,
+        };
+        let resolve = |path: &str| sources.resolve(path.into());
+        assert_eq!(resolve("common/mod.rs"), Ok(Some("common/mod.rs".into())));
+        assert_eq!(
+            resolve("src/linked/mod.rs"),
+            Ok(Some("common/mod.rs".into()))
+        );
+        assert_eq!(resolve("src/hop/mod.rs"), Ok(Some("common/mod.rs".into())));
+        assert_eq!(resolve("src/linkedx/mod.rs"), Ok(None));
+        assert_eq!(resolve("src/linked/other.rs"), Ok(None));
+        assert!(
+            resolve("src/a/mod.rs")
+                .unwrap_err()
+                .starts_with("cyclic directory symlink")
+        );
+    }
 
     #[test]
     fn clean_path_normalizes_local_segments_without_allowing_repository_escape() {
@@ -868,14 +1216,17 @@ mod tests {
     }
 
     #[test]
-    fn module_path_attributes_are_literal_unique_portable_and_unconditional() {
+    fn module_path_attributes_are_literal_unique_and_portable() {
         let explicit: syn::ItemMod = syn::parse_quote!(
             #[path = "custom/domain.rs"]
             mod domain;
         );
         assert_eq!(
-            path_attribute(&explicit).unwrap().as_deref(),
-            Some("custom/domain.rs")
+            path_attributes(&explicit).unwrap(),
+            PathAttributes {
+                plain: Some("custom/domain.rs".into()),
+                conditional: vec![],
+            }
         );
 
         let duplicate: syn::ItemMod = syn::parse_quote!(
@@ -884,7 +1235,7 @@ mod tests {
             mod domain;
         );
         assert!(
-            path_attribute(&duplicate)
+            path_attributes(&duplicate)
                 .unwrap_err()
                 .contains("ambiguous")
         );
@@ -902,33 +1253,57 @@ mod tests {
                 #[path("dynamic.rs")]
                 mod domain;
             ),
+            syn::parse_quote!(
+                #[cfg_attr(unix, path("dynamic.rs"))]
+                mod domain;
+            ),
+            syn::parse_quote!(
+                #[cfg_attr(path)]
+                mod domain;
+            ),
         ] {
-            assert!(path_attribute(&item).is_err());
+            assert!(path_attributes(&item).is_err());
         }
 
         let conditional: syn::ItemMod = syn::parse_quote!(
             #[cfg_attr(unix, path = "unix.rs")]
+            #[cfg_attr(windows, allow(dead_code), path = "windows.rs")]
             mod domain;
         );
         assert!(conditional_path_attribute(&conditional.attrs[0]));
-        assert!(
-            path_attribute(&conditional)
-                .unwrap_err()
-                .contains("active-cfg")
+        assert_eq!(
+            path_attributes(&conditional).unwrap(),
+            PathAttributes {
+                plain: None,
+                conditional: vec!["unix.rs".into(), "windows.rs".into()],
+            }
         );
+
+        let nested: syn::ItemMod = syn::parse_quote!(
+            #[cfg_attr(unix, cfg_attr(test, path = "unix.rs"))]
+            mod domain;
+        );
+        assert!(path_attributes(&nested).unwrap_err().contains("active-cfg"));
 
         let unrelated: syn::ItemMod = syn::parse_quote!(
             #[cfg_attr(unix, allow(dead_code))]
             mod domain;
         );
         assert!(!conditional_path_attribute(&unrelated.attrs[0]));
-        assert_eq!(path_attribute(&unrelated).unwrap(), None);
+        assert_eq!(
+            path_attributes(&unrelated).unwrap(),
+            PathAttributes::default()
+        );
 
         let nested_path_token: syn::ItemMod = syn::parse_quote!(
             #[cfg_attr(any(unix, path), allow(dead_code))]
             mod domain;
         );
         assert!(conditional_path_attribute(&nested_path_token.attrs[0]));
+        assert_eq!(
+            path_attributes(&nested_path_token).unwrap(),
+            PathAttributes::default()
+        );
     }
 
     #[test]
@@ -940,7 +1315,7 @@ mod tests {
                 &[],
                 Path::new("src"),
                 Path::new("src"),
-                &parsed,
+                sources(&parsed),
                 &mut found,
                 128,
             )
@@ -951,7 +1326,7 @@ mod tests {
                 &[],
                 Path::new("src"),
                 Path::new("src"),
-                &parsed,
+                sources(&parsed),
                 &mut found,
                 129,
             )
@@ -966,7 +1341,7 @@ mod tests {
                 &file.items,
                 Path::new("src"),
                 Path::new("src"),
-                &parsed,
+                sources(&parsed),
                 &mut found,
                 127,
             )
@@ -979,12 +1354,15 @@ mod tests {
     fn module_walker_limits_file_cycles_and_inline_keys_independently() {
         let parsed = BTreeMap::new();
         let mut result = BTreeMap::new();
+        let mut variants = BTreeMap::new();
         let mut walker = ModuleWalker {
             root: "crate",
-            parsed: &parsed,
+            sources: sources(&parsed),
             stack: vec!["path".into(); 129],
             result: &mut result,
+            variants: &mut variants,
             test: false,
+            repeated: None,
         };
         assert_eq!(
             walker
@@ -1000,12 +1378,15 @@ mod tests {
         );
 
         let mut result = BTreeMap::new();
+        let mut variants = BTreeMap::new();
         let mut walker = ModuleWalker {
             root: "crate",
-            parsed: &parsed,
+            sources: sources(&parsed),
             stack: Vec::new(),
             result: &mut result,
+            variants: &mut variants,
             test: false,
+            repeated: None,
         };
         let deep_key = format!("crate{}", "::nested".repeat(129));
         assert_eq!(
@@ -1022,12 +1403,15 @@ mod tests {
         );
 
         let mut result = BTreeMap::new();
+        let mut variants = BTreeMap::new();
         let mut walker = ModuleWalker {
             root: "crate",
-            parsed: &parsed,
+            sources: sources(&parsed),
             stack: vec!["path".into(); 128],
             result: &mut result,
+            variants: &mut variants,
             test: false,
+            repeated: None,
         };
         let boundary_key = format!("crate{}", "::nested".repeat(128));
         assert!(
@@ -1046,6 +1430,7 @@ mod tests {
     #[test]
     fn impl_owner_resolution_rejects_qualified_and_unsupported_targets_but_ignores_wrappers() {
         let facts = Facts {
+            variants: BTreeMap::new(),
             modules: BTreeMap::new(),
             types: BTreeMap::new(),
             functions: Vec::new(),
@@ -1058,6 +1443,8 @@ mod tests {
             syn::parse_quote!((Account, Invoice)),
             syn::parse_quote!(&Account),
             syn::parse_quote!(*const Account),
+            syn::parse_quote!(dyn Port + '_),
+            syn::parse_quote!(!),
         ] {
             assert_eq!(facts.owner(&wrapper, "crate").unwrap(), None);
         }
@@ -1094,6 +1481,7 @@ mod tests {
             functions: Vec::new(),
         };
         let facts = Facts {
+            variants: BTreeMap::new(),
             modules: BTreeMap::from([(
                 "crate::domain".into(),
                 Module {
@@ -1102,6 +1490,7 @@ mod tests {
                     path: "src/domain.rs".into(),
                     items: Vec::new(),
                     test: false,
+                    repeated: None,
                     imports: BTreeMap::from([(
                         "AccountAlias".into(),
                         vec!["crate".into(), "model".into(), "Account".into()],
@@ -1140,6 +1529,7 @@ mod tests {
             column: 1,
         };
         let facts = Facts {
+            variants: BTreeMap::new(),
             modules: BTreeMap::from([(
                 "crate".into(),
                 Module {
@@ -1149,6 +1539,7 @@ mod tests {
                     items: Vec::new(),
                     imports: BTreeMap::new(),
                     test: false,
+                    repeated: None,
                 },
             )]),
             types: BTreeMap::from([(
@@ -1176,6 +1567,7 @@ mod tests {
     #[test]
     fn cyclic_imports_charge_each_recursive_resolution_step() {
         let facts = Facts {
+            variants: BTreeMap::new(),
             modules: BTreeMap::from([(
                 "crate".into(),
                 Module {
@@ -1185,6 +1577,7 @@ mod tests {
                     items: Vec::new(),
                     imports: BTreeMap::from([("Alias".into(), vec!["Alias".into()])]),
                     test: false,
+                    repeated: None,
                 },
             )]),
             types: BTreeMap::new(),
@@ -1211,8 +1604,10 @@ mod tests {
             items: Vec::new(),
             imports: BTreeMap::new(),
             test: false,
+            repeated: None,
         };
         let aliases = Facts {
+            variants: BTreeMap::new(),
             modules: BTreeMap::from([("crate".into(), module.clone())]),
             types: BTreeMap::new(),
             functions: Vec::new(),
@@ -1233,6 +1628,7 @@ mod tests {
         assert_eq!(alias_visits, 2);
 
         let imports = Facts {
+            variants: BTreeMap::new(),
             modules: BTreeMap::from([(
                 "crate".into(),
                 Module {
@@ -1265,8 +1661,10 @@ mod tests {
             items: Vec::new(),
             imports,
             test: false,
+            repeated: None,
         };
         let empty = Facts {
+            variants: BTreeMap::new(),
             modules: BTreeMap::from([("crate".into(), module(BTreeMap::new()))]),
             types: BTreeMap::new(),
             functions: Vec::new(),
@@ -1275,11 +1673,12 @@ mod tests {
         };
         let mut missing = Vec::new();
         empty
-            .glob_match(&[], "Missing", ("crate", 0), &mut 0, &mut missing)
+            .glob_match(&[], &["Missing".into()], ("crate", 0), &mut 0, &mut missing)
             .unwrap();
         assert!(missing.is_empty());
 
         let cyclic = Facts {
+            variants: BTreeMap::new(),
             modules: BTreeMap::from([(
                 "crate".into(),
                 module(BTreeMap::from([("Alias".into(), vec!["Alias".into()])])),
@@ -1294,7 +1693,7 @@ mod tests {
             cyclic
                 .glob_match(
                     &[],
-                    "Alias",
+                    &["Alias".into()],
                     ("crate", 63),
                     &mut cyclic_visits,
                     &mut Vec::new()
@@ -1318,6 +1717,7 @@ mod tests {
             functions: Vec::new(),
         };
         let ambiguous = Facts {
+            variants: BTreeMap::new(),
             modules: BTreeMap::from([(
                 "crate".into(),
                 module(BTreeMap::from([
@@ -1335,7 +1735,13 @@ mod tests {
         };
         assert!(
             ambiguous
-                .glob_match(&[], "Thing", ("crate", 0), &mut 0, &mut Vec::new())
+                .glob_match(
+                    &[],
+                    &["Thing".into()],
+                    ("crate", 0),
+                    &mut 0,
+                    &mut Vec::new()
+                )
                 .unwrap_err()
                 .starts_with("ambiguous")
         );
@@ -1350,11 +1756,28 @@ mod tests {
             items: Vec::new(),
             imports: BTreeMap::new(),
             test: false,
+            repeated: None,
         };
         let facts = Facts {
+            variants: BTreeMap::new(),
             modules: BTreeMap::from([
                 ("crate".into(), module("crate")),
                 ("crate::local".into(), module("crate::local")),
+                ("crate::mocks".into(), {
+                    let mut mocks = module("crate::mocks");
+                    mocks.items =
+                        syn::parse_file("macro_rules! named { () => {} } mock! { pub File {} }")
+                            .unwrap()
+                            .items;
+                    mocks
+                }),
+                ("crate::named".into(), {
+                    let mut named = module("crate::named");
+                    named.items = syn::parse_file("macro_rules! named { () => {} }")
+                        .unwrap()
+                        .items;
+                    named
+                }),
             ]),
             types: BTreeMap::new(),
             functions: Vec::new(),
@@ -1375,6 +1798,25 @@ mod tests {
             ("dependency", vec!["dependency".into(), "Thing".into()]),
         ] {
             assert_eq!(facts.unresolved_owner(first, &path, "crate").unwrap(), None);
+        }
+        let mock = vec!["MockFile".into()];
+        assert_eq!(
+            facts
+                .unresolved_owner("MockFile", &mock, "crate::mocks")
+                .unwrap(),
+            None
+        );
+        for (path, module) in [
+            (mock.clone(), "crate::named"),
+            (mock, "crate::local"),
+            (vec!["crate".into(), "MockFile".into()], "crate::mocks"),
+        ] {
+            assert!(
+                facts
+                    .unresolved_owner(&path[0], &path, module)
+                    .unwrap_err()
+                    .contains("unresolved local impl owner")
+            );
         }
         for (first, path) in [
             ("Missing", vec!["Missing".into()]),
@@ -1428,6 +1870,7 @@ mod tests {
             items: Vec::new(),
             imports: BTreeMap::new(),
             test: false,
+            repeated: None,
         };
         let incomplete = BTreeMap::from([("crate".into(), module("crate", "src/lib.rs"))]);
         assert_eq!(
@@ -1485,40 +1928,271 @@ mod tests {
                 imports(&item.tree, &[], &mut bindings).unwrap();
             }
         }
+        let path = |parts: &[&str]| -> Vec<String> {
+            parts.iter().map(|part| (*part).to_owned()).collect()
+        };
         assert_eq!(
-            imported_path(&bindings, "FromRef").unwrap_err(),
-            "ambiguous import binding: FromRef"
+            imported_paths(&bindings, "FromRef"),
+            vec![
+                path(&["crate", "extract", "FromRef"]),
+                path(&["crate", "macros", "FromRef"])
+            ]
         );
         assert_eq!(
-            imported_path(&bindings, "Router").unwrap().unwrap(),
-            &vec!["crate".to_owned(), "Router".to_owned()]
+            imported_paths(&bindings, "Router"),
+            vec![path(&["crate", "Router"])]
         );
-        assert!(imported_path(&bindings, "_").unwrap().is_none());
-        assert!(imported_path(&bindings, "Missing").unwrap().is_none());
+        assert!(imported_paths(&bindings, "_").is_empty());
+        assert!(imported_paths(&bindings, "Missing").is_empty());
         assert_eq!(
-            imported_path(&bindings, "http").unwrap().unwrap(),
-            &vec!["\0extern".to_owned(), "http".to_owned()]
-        );
-        assert_eq!(
-            imported_path(&bindings, "parse").unwrap().unwrap(),
-            &vec!["parse".to_owned(), "parse".to_owned()]
+            imported_paths(&bindings, "http"),
+            vec![path(&["\0extern", "http"])]
         );
         assert_eq!(
-            imported_path(&bindings, "json").unwrap().unwrap(),
-            &vec!["serde".to_owned()]
+            imported_paths(&bindings, "parse"),
+            vec![path(&["parse", "parse"])]
         );
+        assert_eq!(imported_paths(&bindings, "json"), vec![path(&["serde"])]);
+
+        let file = syn::parse_file("use a::A; use b::A; use a::A; use c::A;").unwrap();
+        let mut bindings = BTreeMap::new();
+        for item in &file.items {
+            if let syn::Item::Use(item) = item {
+                imports(&item.tree, &[], &mut bindings).unwrap();
+            }
+        }
+        assert_eq!(
+            imported_paths(&bindings, "A"),
+            vec![path(&["a", "A"]), path(&["b", "A"]), path(&["c", "A"])]
+        );
+    }
+
+    #[test]
+    fn import_twins_resolve_when_one_binding_reaches_one_local_owner() {
+        let location = Location {
+            path: "src/lib.rs".into(),
+            line: 1,
+            column: 1,
+        };
+        let type_fact = || TypeFacts {
+            location: location.clone(),
+            fields: Vec::new(),
+            field_count: 0,
+            is_enum: false,
+            variants: BTreeSet::new(),
+            functions: Vec::new(),
+        };
+        let file = syn::parse_file(concat!(
+            "use crate::a::Mock; use crate::missing::Mock;",
+            "use crate::a::Real; use std::sync::Real;",
+            "use crate::a::Twin; use crate::b::Twin;",
+            "use crate::gone::Lost; use crate::missing::Lost;",
+        ))
+        .unwrap();
+        let mut bindings = BTreeMap::new();
+        for item in &file.items {
+            if let syn::Item::Use(item) = item {
+                imports(&item.tree, &[], &mut bindings).unwrap();
+            }
+        }
+        let facts = Facts {
+            variants: BTreeMap::new(),
+            modules: BTreeMap::from([(
+                "crate".into(),
+                Module {
+                    key: "crate".into(),
+                    root: "crate".into(),
+                    path: "src/lib.rs".into(),
+                    items: Vec::new(),
+                    test: false,
+                    repeated: None,
+                    imports: bindings,
+                },
+            )]),
+            types: BTreeMap::from([
+                ("crate::a::Mock".into(), type_fact()),
+                ("crate::a::Real".into(), type_fact()),
+                ("crate::a::Twin".into(), type_fact()),
+                ("crate::b::Twin".into(), type_fact()),
+            ]),
+            functions: Vec::new(),
+            slots: Vec::new(),
+            aliases: BTreeMap::new(),
+        };
+        let resolve = |name: &str| facts.resolve(&[name.to_owned()], "crate", 0);
+
+        assert_eq!(resolve("Mock").unwrap().as_deref(), Some("crate::a::Mock"));
+        assert_eq!(resolve("Real").unwrap().as_deref(), Some("crate::a::Real"));
+        assert_eq!(
+            resolve("Twin").unwrap_err(),
+            "ambiguous import binding: Twin"
+        );
+        assert_eq!(
+            resolve("Lost").unwrap_err(),
+            "ambiguous import binding: Lost"
+        );
+    }
+
+    #[test]
+    fn glob_reexports_resolve_through_intermediate_modules() {
+        let location = Location {
+            path: "src/lib.rs".into(),
+            line: 1,
+            column: 1,
+        };
+        let module = |key: &str, imports| Module {
+            key: key.into(),
+            root: "crate".into(),
+            path: "src/lib.rs".into(),
+            items: Vec::new(),
+            imports,
+            test: false,
+            repeated: None,
+        };
+        let facts = Facts {
+            variants: BTreeMap::new(),
+            modules: BTreeMap::from([
+                ("crate".into(), module("crate", BTreeMap::new())),
+                (
+                    "crate::loom".into(),
+                    module(
+                        "crate::loom",
+                        BTreeMap::from([("*0".into(), vec!["self".into(), "imp".into()])]),
+                    ),
+                ),
+                (
+                    "crate::loom::mocked".into(),
+                    module(
+                        "crate::loom::mocked",
+                        BTreeMap::from([("*0".into(), vec!["loom".into(), "sync".into()])]),
+                    ),
+                ),
+                (
+                    "crate::loom::imp::sync".into(),
+                    module(
+                        "crate::loom::imp::sync",
+                        BTreeMap::from([(
+                            "Weak".into(),
+                            vec!["std".into(), "sync".into(), "Weak".into()],
+                        )]),
+                    ),
+                ),
+            ]),
+            types: BTreeMap::from([(
+                "crate::loom::imp::sync::Arc".into(),
+                TypeFacts {
+                    location,
+                    fields: Vec::new(),
+                    field_count: 0,
+                    is_enum: false,
+                    variants: BTreeSet::new(),
+                    functions: Vec::new(),
+                },
+            )]),
+            functions: Vec::new(),
+            slots: Vec::new(),
+            aliases: BTreeMap::new(),
+        };
+        let resolve = |parts: &[&str]| {
+            let path = parts
+                .iter()
+                .map(|part| (*part).to_owned())
+                .collect::<Vec<_>>();
+            facts.resolve(&path, "crate", 0)
+        };
+
+        assert_eq!(
+            resolve(&["crate", "loom", "sync", "Arc"])
+                .unwrap()
+                .as_deref(),
+            Some("crate::loom::imp::sync::Arc")
+        );
+        assert_eq!(resolve(&["crate", "loom", "sync", "Weak"]).unwrap(), None);
+        let mut visits = 0;
+        assert_eq!(
+            facts
+                .resolve_bounded(
+                    &["loom".into(), "sync".into(), "Arc".into()],
+                    "crate::loom::mocked",
+                    0,
+                    &mut visits
+                )
+                .unwrap(),
+            None
+        );
+        assert_eq!(visits, 1);
+        assert!(resolve(&["crate", "loom", "sync", "Missing"]).is_err());
+    }
+
+    #[test]
+    fn item_macros_expand_to_their_ordinary_items_only() {
+        use syn::Item;
+        let file = syn::parse_file(concat!(
+            "cfg_rt! { mod runtime; pub use runtime::Handle; impl Handle {} }",
+            "mod inner { cfg_net! { struct Socket; } }",
+            "macro_rules! keep { () => {} }",
+            "opaque! { not valid rust }",
+            "verbatim! { fn signature_only(); }",
+            "fn after() {}",
+        ))
+        .unwrap();
+        let items = expand_item_macros(file.items);
+        let kinds = items
+            .iter()
+            .map(|item| match item {
+                Item::Mod(module) => match &module.content {
+                    Some((_, items)) => format!("mod {} {{{}}}", module.ident, items.len()),
+                    None => format!("mod {}", module.ident),
+                },
+                Item::Use(_) => "use".to_owned(),
+                Item::Impl(_) => "impl".to_owned(),
+                Item::Macro(item) => format!(
+                    "macro {}",
+                    item.ident.as_ref().map_or_else(
+                        || item.mac.path.segments[0].ident.to_string(),
+                        ToString::to_string
+                    )
+                ),
+                Item::Fn(function) => format!("fn {}", function.sig.ident),
+                _ => "other".to_owned(),
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            kinds,
+            [
+                "mod runtime",
+                "use",
+                "impl",
+                "mod inner {1}",
+                "macro keep",
+                "macro opaque",
+                "macro verbatim",
+                "fn after"
+            ]
+        );
+        let Item::Mod(inner) = &items[3] else {
+            panic!("inline module fixture");
+        };
+        assert!(matches!(
+            inner.content.as_ref().map(|(_, items)| &items[0]),
+            Some(Item::Struct(_))
+        ));
     }
 
     #[test]
     fn modules_nested_in_cfg_test_modules_stay_test_code() {
         let parsed = BTreeMap::new();
         let mut result = BTreeMap::new();
+        let mut variants = BTreeMap::new();
         let mut walker = ModuleWalker {
             root: "crate",
-            parsed: &parsed,
+            sources: sources(&parsed),
             stack: Vec::new(),
             result: &mut result,
+            variants: &mut variants,
             test: false,
+            repeated: None,
         };
         let file = syn::parse_file("#[cfg(test)] mod tests { mod inner {} } mod live {}").unwrap();
         walker

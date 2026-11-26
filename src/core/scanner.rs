@@ -176,6 +176,7 @@ mod tests {
             input: Input {
                 files,
                 manifests: BTreeMap::new(),
+                directory_links: BTreeMap::new(),
                 artifacts: BTreeMap::new(),
                 artifact_candidates: BTreeMap::new(),
                 implementations: vec![Implementation {

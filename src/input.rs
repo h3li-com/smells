@@ -189,13 +189,21 @@ fn implementations(
     result
 }
 
+/// What corpus capture records: source files, runtime manifests and the
+/// directory symlinks whose targets stay inside the root.
+#[derive(Default)]
+struct CapturedCorpus {
+    files: BTreeMap<String, String>,
+    manifests: BTreeMap<String, String>,
+    directory_links: BTreeMap<String, String>,
+}
+
 fn walk(
     root: &Path,
     dir: &Path,
     policy: &Policy,
     registry: &Registry,
-    files: &mut BTreeMap<String, String>,
-    manifests: &mut BTreeMap<String, String>,
+    corpus: &mut CapturedCorpus,
 ) -> Result<(), String> {
     let mut entries = fs::read_dir(dir)
         .map_err(|e| format!("cannot enumerate source directory: {e}"))?
@@ -203,7 +211,7 @@ fn walk(
         .map_err(|e| format!("cannot enumerate source entry: {e}"))?;
     entries.sort_by_key(std::fs::DirEntry::file_name);
     for entry in entries {
-        walk_entry(root, &entry, policy, registry, files, manifests)?;
+        walk_entry(root, &entry, policy, registry, corpus)?;
     }
     Ok(())
 }
@@ -218,12 +226,24 @@ fn reject_symlink(path: &Path, relative: &Path, registry: &Registry) -> Result<(
     Ok(())
 }
 
+/// The root-relative target of a directory symlink, or `None` when the link
+/// does not resolve to a directory inside `root`. The walk never follows the
+/// link; module resolution maps paths through it to files captured at the
+/// target, so each file is scanned once.
+fn in_root_directory_link(root: &Path, path: &Path) -> Option<String> {
+    let target = fs::canonicalize(path).ok()?;
+    if !target.is_dir() {
+        return None;
+    }
+    let relative = target.strip_prefix(root).ok()?.to_str()?;
+    (!relative.is_empty() && !relative.contains('\\')).then(|| relative.to_string())
+}
+
 fn capture_working_file(
     path: &Path,
     relative: &Path,
     policy: &Policy,
-    files: &mut BTreeMap<String, String>,
-    manifests: &mut BTreeMap<String, String>,
+    corpus: &mut CapturedCorpus,
     is_manifest: bool,
 ) -> Result<(), String> {
     let name = relative
@@ -236,12 +256,12 @@ fn capture_working_file(
     let bytes = fs::read(path).map_err(|e| format!("cannot read {name}: {e}"))?;
     let source = text(bytes, &name)?;
     if is_manifest {
-        manifests.insert(name, source);
+        corpus.manifests.insert(name, source);
     } else {
-        if files.len() >= policy.limits.maximum_files {
+        if corpus.files.len() >= policy.limits.maximum_files {
             return Err("maximum_files budget exceeded".into());
         }
-        files.insert(name, source);
+        corpus.files.insert(name, source);
     }
     Ok(())
 }
@@ -251,8 +271,7 @@ fn walk_entry(
     entry: &fs::DirEntry,
     policy: &Policy,
     registry: &Registry,
-    files: &mut BTreeMap<String, String>,
-    manifests: &mut BTreeMap<String, String>,
+    corpus: &mut CapturedCorpus,
 ) -> Result<(), String> {
     let path = entry.path();
     let relative = path
@@ -265,14 +284,29 @@ fn walk_entry(
         .file_type()
         .map_err(|e| format!("cannot inspect source entry: {e}"))?;
     if kind.is_symlink() {
-        return reject_symlink(&path, relative, registry);
+        return capture_working_link(root, &path, relative, registry, corpus);
     }
     if kind.is_dir() {
-        return walk(root, &path, policy, registry, files, manifests);
+        return walk(root, &path, policy, registry, corpus);
     }
     let is_manifest = captured_manifest(relative, registry);
     if source_file(&path, &registry.language) || is_manifest {
-        capture_working_file(&path, relative, policy, files, manifests, is_manifest)?;
+        capture_working_file(&path, relative, policy, corpus, is_manifest)?;
+    }
+    Ok(())
+}
+
+/// Rejects a symlinked source file and records an in-root directory link.
+fn capture_working_link(
+    root: &Path,
+    path: &Path,
+    relative: &Path,
+    registry: &Registry,
+    corpus: &mut CapturedCorpus,
+) -> Result<(), String> {
+    reject_symlink(path, relative, registry)?;
+    if let (Some(link), Some(target)) = (relative.to_str(), in_root_directory_link(root, path)) {
+        corpus.directory_links.insert(link.to_string(), target);
     }
     Ok(())
 }
@@ -445,15 +479,16 @@ fn capture_recognized_migration_artifact(
     Ok(())
 }
 
-fn snapshot_digest(
-    files: &BTreeMap<String, String>,
-    manifests: &BTreeMap<String, String>,
-    artifacts: &BTreeMap<String, Vec<u8>>,
-    artifact_candidates: &BTreeMap<String, Vec<u8>>,
-    history: &History,
-    policy: &str,
-    resolved_selection: &[u8],
-) -> String {
+fn snapshot_digest(snapshot: &CapturedSnapshot, policy: &str, resolved_selection: &[u8]) -> String {
+    let CapturedSnapshot {
+        files,
+        manifests,
+        directory_links,
+        artifacts,
+        artifact_candidates,
+        history,
+        implementations: _,
+    } = snapshot;
     let mut parts = vec![
         policy.as_bytes(),
         b"resolved_policy_selection",
@@ -463,6 +498,11 @@ fn snapshot_digest(
         parts.push(b"runtime_manifest");
         parts.push(path.as_bytes());
         parts.push(source.as_bytes());
+    }
+    for (link, target) in directory_links {
+        parts.push(b"directory_link");
+        parts.push(link.as_bytes());
+        parts.push(target.as_bytes());
     }
     for (path, source) in files {
         parts.push(b"source");
@@ -684,9 +724,13 @@ fn working_snapshot(
     policy: &Policy,
     registry: &Registry,
 ) -> Result<CapturedSnapshot, String> {
-    let mut files = BTreeMap::new();
-    let mut manifests = BTreeMap::new();
-    walk(root, root, policy, registry, &mut files, &mut manifests)?;
+    let mut corpus = CapturedCorpus::default();
+    walk(root, root, policy, registry, &mut corpus)?;
+    let CapturedCorpus {
+        files,
+        manifests,
+        directory_links,
+    } = corpus;
     let history = captured_history(root, &files);
     let implementations = implementations(&files, &manifests);
     let artifact_index = crate::migration::migration_artifact_index(
@@ -716,6 +760,7 @@ fn working_snapshot(
     Ok(CapturedSnapshot {
         files,
         manifests,
+        directory_links,
         implementations,
         artifacts,
         artifact_candidates,
@@ -724,7 +769,6 @@ fn working_snapshot(
 }
 
 type IndexEntries = BTreeMap<String, (String, String)>;
-type CapturedCorpus = (BTreeMap<String, String>, BTreeMap<String, String>);
 
 fn validate_staged_policy_path(policy_path: &Path) -> Result<&str, String> {
     if policy_path
@@ -836,28 +880,87 @@ fn staged_corpus(
     registry: &Registry,
     policy: &Policy,
 ) -> Result<CapturedCorpus, String> {
-    let mut files = BTreeMap::new();
-    let mut manifests = BTreeMap::new();
+    let mut corpus = CapturedCorpus::default();
     for (name, (mode, oid)) in entries {
         let path = Path::new(name);
-        if excluded(path, policy)
-            || (!source_file(path, &registry.language) && !captured_manifest(path, registry))
-        {
+        if excluded(path, policy) {
+            continue;
+        }
+        if !source_file(path, &registry.language) && !captured_manifest(path, registry) {
+            if mode == "120000" {
+                capture_staged_link(root, name, oid, entries, &mut corpus)?;
+            }
             continue;
         }
         validate_staged_path(name, path)?;
         let is_manifest = captured_manifest(path, registry);
         let source = capture_staged_blob(root, name, mode, oid, is_manifest)?;
-        if is_manifest {
-            manifests.insert(name.clone(), source);
-        } else {
-            if files.len() >= policy.limits.maximum_files {
-                return Err("maximum_files budget exceeded".into());
+        record_staged_source(&mut corpus, name, source, is_manifest, policy)?;
+    }
+    Ok(corpus)
+}
+
+/// Adds a captured staged blob as a manifest or a source file, within the
+/// `maximum_files` budget.
+fn record_staged_source(
+    corpus: &mut CapturedCorpus,
+    name: &str,
+    source: String,
+    is_manifest: bool,
+    policy: &Policy,
+) -> Result<(), String> {
+    if is_manifest {
+        corpus.manifests.insert(name.to_string(), source);
+        return Ok(());
+    }
+    if corpus.files.len() >= policy.limits.maximum_files {
+        return Err("maximum_files budget exceeded".into());
+    }
+    corpus.files.insert(name.to_string(), source);
+    Ok(())
+}
+
+/// Records the staged symlink at `name` when it names a staged directory.
+fn capture_staged_link(
+    root: &Path,
+    name: &str,
+    oid: &str,
+    entries: &IndexEntries,
+    corpus: &mut CapturedCorpus,
+) -> Result<(), String> {
+    let target = text(git(root, &["cat-file", "blob", oid])?, name)?;
+    if let Some(target) = staged_directory_link(name, &target, entries) {
+        corpus.directory_links.insert(name.to_string(), target);
+    }
+    Ok(())
+}
+
+/// The repository-relative directory a staged symlink at `name` points to, or
+/// `None` when the target leaves the repository, is absolute, or names no
+/// directory of staged entries.
+fn staged_directory_link(name: &str, target: &str, entries: &IndexEntries) -> Option<String> {
+    let mut resolved: Vec<&str> = name.split('/').collect();
+    resolved.pop();
+    if target.starts_with('/') || target.contains('\\') {
+        return None;
+    }
+    for segment in target.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                resolved.pop()?;
             }
-            files.insert(name.clone(), source);
+            segment => resolved.push(segment),
         }
     }
-    Ok((files, manifests))
+    let target = resolved.join("/");
+    let prefix = format!("{target}/");
+    (!target.is_empty()
+        && entries
+            .range(prefix.clone()..)
+            .next()
+            .is_some_and(|(entry, _)| entry.starts_with(&prefix)))
+    .then_some(target)
 }
 
 fn staged_migration_artifacts(
@@ -983,6 +1086,7 @@ fn validate_stable_index(root: &Path, initial: &[u8]) -> Result<(), String> {
 struct CapturedSnapshot {
     files: BTreeMap<String, String>,
     manifests: BTreeMap<String, String>,
+    directory_links: BTreeMap<String, String>,
     implementations: Vec<Implementation>,
     artifacts: BTreeMap<String, Vec<u8>>,
     artifact_candidates: BTreeMap<String, Vec<u8>>,
@@ -997,9 +1101,15 @@ fn captured_input(
     mode: &'static str,
     corpus_label: &str,
 ) -> Result<CapturedInput, String> {
+    let snapshot_sha256 = snapshot_digest(
+        &snapshot,
+        policy_text,
+        &serde_json::to_vec(&policy.resolved).expect("resolved selection serializes"),
+    );
     let CapturedSnapshot {
         files,
         manifests,
+        directory_links,
         implementations,
         artifacts,
         artifact_candidates,
@@ -1021,16 +1131,9 @@ fn captured_input(
     Ok(CapturedInput {
         input: Input {
             policy_sha256: digest(&[policy_text.as_bytes()]),
-            digest: snapshot_digest(
-                &files,
-                &manifests,
-                &artifacts,
-                &artifact_candidates,
-                &history,
-                policy_text,
-                &serde_json::to_vec(&policy.resolved).expect("resolved selection serializes"),
-            ),
+            digest: snapshot_sha256,
             manifests,
+            directory_links,
             implementations,
             source_roles,
             history,
@@ -1090,7 +1193,11 @@ fn staged_capture(
 }
 
 fn staged_snapshot(capture: &StagedCapture) -> Result<CapturedSnapshot, String> {
-    let (files, manifests) = staged_corpus(
+    let CapturedCorpus {
+        files,
+        manifests,
+        directory_links,
+    } = staged_corpus(
         &capture.root,
         &capture.entries,
         &capture.registry,
@@ -1110,6 +1217,7 @@ fn staged_snapshot(capture: &StagedCapture) -> Result<CapturedSnapshot, String> 
     Ok(CapturedSnapshot {
         files,
         manifests,
+        directory_links,
         implementations,
         artifacts,
         artifact_candidates,
@@ -1235,7 +1343,11 @@ fn capture_reference_input(
 ) -> Result<Option<CapturedInput>, String> {
     let registry = crate::policy::registry_for_policy(candidate_policy_text)?;
     let policy = crate::policy::parse_with_selection(candidate_policy_text, &registry, selection)?;
-    let (files, manifests) = staged_corpus(root, entries, &registry, &policy)?;
+    let CapturedCorpus {
+        files,
+        manifests,
+        directory_links,
+    } = staged_corpus(root, entries, &registry, &policy)?;
     if files.is_empty() {
         return Ok(None);
     }
@@ -1253,6 +1365,7 @@ fn capture_reference_input(
     let snapshot = CapturedSnapshot {
         files,
         manifests,
+        directory_links,
         implementations,
         artifacts,
         artifact_candidates,
@@ -1323,6 +1436,46 @@ pub(crate) fn git_ref_for_working_tree_with_policy_text(
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn working_directory_links_must_name_a_directory_strictly_inside_the_root() {
+        let repository = TempRepository::new();
+        let root = fs::canonicalize(&repository.0).unwrap();
+        fs::create_dir(root.join("common")).unwrap();
+        fs::write(root.join("common/mod.rs"), "").unwrap();
+        let link = |name: &str, target: &Path| {
+            std::os::unix::fs::symlink(target, root.join(name)).unwrap();
+            in_root_directory_link(&root, &root.join(name))
+        };
+        assert_eq!(link("linked", Path::new("common")), Some("common".into()));
+        assert_eq!(link("itself", Path::new(".")), None);
+        assert_eq!(link("file", Path::new("common/mod.rs")), None);
+        assert_eq!(link("outside", &std::env::temp_dir()), None);
+        assert_eq!(link("dangling", Path::new("absent")), None);
+    }
+
+    #[test]
+    fn staged_directory_links_must_name_a_staged_directory_inside_the_repository() {
+        let entry = || ("100644".to_string(), "oid".to_string());
+        let entries = IndexEntries::from([
+            ("common/mod.rs".into(), entry()),
+            ("src/lib.rs".into(), entry()),
+        ]);
+        let link = |name, target| staged_directory_link(name, target, &entries);
+        assert_eq!(link("src/linked", "../common"), Some("common".into()));
+        assert_eq!(link("src/linked", "./../common/"), Some("common".into()));
+        assert_eq!(link("linked", "common"), Some("common".into()));
+        assert_eq!(link("src/linked", "../../common"), None);
+        assert_eq!(link("src/linked", "/common"), None);
+        assert_eq!(link("linked", "/common"), None);
+        assert_eq!(link("linked", "common\\"), None);
+        assert_eq!(link("src/linked", "..\\common"), None);
+        assert_eq!(link("src/linked", ".."), None);
+        assert_eq!(link("src/linked", "../comm"), None);
+        assert_eq!(link("src/linked", "../common/mod.rs"), None);
+        assert_eq!(link("src/linked", "../zzz"), None);
+    }
 
     #[test]
     fn shallow_boundary_only_truncates_a_partial_history_window() {
@@ -1540,15 +1693,16 @@ mod tests {
         ) {
             prop_assume!(first != second);
             let digest_for = |body: Vec<u8>| {
-                snapshot_digest(
-                    &BTreeMap::new(),
-                    &BTreeMap::new(),
-                    &BTreeMap::new(),
-                    &BTreeMap::from([("drizzle/0000_accounts.sql".into(), body)]),
-                    &History::default(),
-                    "policy",
-                    b"selection",
-                )
+                let snapshot = CapturedSnapshot {
+                    files: BTreeMap::new(),
+                    manifests: BTreeMap::new(),
+                    directory_links: BTreeMap::new(),
+                    implementations: vec![],
+                    artifacts: BTreeMap::new(),
+                    artifact_candidates: BTreeMap::from([("drizzle/0000_accounts.sql".into(), body)]),
+                    history: History::default(),
+                };
+                snapshot_digest(&snapshot, "policy", b"selection")
             };
             prop_assert_ne!(digest_for(first), digest_for(second));
         }
