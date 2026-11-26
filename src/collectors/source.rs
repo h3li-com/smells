@@ -524,6 +524,30 @@ fn public_underscore_member(language: &str, member: &str) -> bool {
     dunder || constant
 }
 
+/// Whether the innermost class around `offset`, the one that starts last, in `path` declares `member` as a
+/// field or method or uses it on its own receiver. Access to that member on
+/// another instance of the class, as in `other._key` inside `__eq__`, is the
+/// class's own.
+fn enclosing_class_member(model: &SourceModel, path: &str, offset: usize, member: &str) -> bool {
+    let Some(class) = model
+        .classes
+        .iter()
+        .filter(|class| class.location.path == path)
+        .filter(|class| class.range.0 <= offset && offset < class.range.1)
+        .max_by_key(|class| class.range.0)
+    else {
+        return false;
+    };
+    let receiver = Regex::new(&format!(
+        r"\b(?:self|this)\s*\.\s*{}\b",
+        regex::escape(member)
+    ))
+    .expect("escaped receiver member expression");
+    class.fields.iter().any(|field| field.name == member)
+        || class.methods.iter().any(|method| method.name == member)
+        || receiver.is_match(&class.source)
+}
+
 pub(super) fn dependency_contract(
     rule: &Rule,
     model: &SourceModel,
@@ -543,6 +567,11 @@ pub(super) fn dependency_contract(
             .captures_iter(code)
             .filter(|capture| !matches!(&capture[1], "self" | "cls" | "this" | "Self" | "super"))
             .filter(|capture| !public_underscore_member(language, &capture[2]))
+            .filter(|capture| !capture[2].starts_with('#'))
+            .filter(|capture| {
+                let start = capture.get(0).expect("private member match").start();
+                !enclosing_class_member(model, path, start, &capture[2])
+            })
             .collect::<Vec<_>>();
         let Some(first) = accesses.first() else {
             continue;
@@ -1091,6 +1120,99 @@ mod tests {
             );
             assert_eq!(observations[0].location.line, first_line, "{rule_id}");
         }
+    }
+
+    #[test]
+    fn dependency_contract_treats_enclosing_class_members_as_owned() {
+        let cases = [
+            (
+                "typescript.dependency_contract",
+                "typescript-v1",
+                "app.ts",
+                concat!(
+                    "export class App {\n",
+                    "  _basePath = '/'\n",
+                    "  #handler = 1\n",
+                    "  #clone(): App {\n",
+                    "    const clone = new App()\n",
+                    "    clone.#handler = this.#handler\n",
+                    "    clone._basePath = this._basePath\n",
+                    "    clone._route = 1\n",
+                    "    return clone\n",
+                    "  }\n",
+                    "}\n",
+                    "other._basePath\n",
+                ),
+                (2, 8),
+            ),
+            (
+                "python.dependency_contract",
+                "python-v1",
+                "key.py",
+                concat!(
+                    "class Key:\n",
+                    "    def __init__(self, value):\n",
+                    "        self._value = value\n",
+                    "    def _hash(self):\n",
+                    "        return 1\n",
+                    "    def __eq__(self, other):\n",
+                    "        return other._value == self._value and other._hash() and other._raw\n",
+                    "key._value\n",
+                ),
+                (2, 7),
+            ),
+        ];
+        for (rule_id, rule_pack, path, source, (expected, line)) in cases {
+            let input = input(rule_pack, &[(path, source)]);
+            let model = super::super::model::source_model(&rule(rule_id), &input).unwrap();
+            let observations = dependency_contract(&rule(rule_id), &model, &input).unwrap();
+            assert_eq!(
+                observations[0].measurements["forbidden_accesses"], expected,
+                "{rule_id}"
+            );
+            assert_eq!(observations[0].location.line, line, "{rule_id}");
+        }
+    }
+
+    #[test]
+    fn enclosing_class_members_come_from_the_innermost_class() {
+        let source = concat!(
+            "class Outer:\n",
+            "    _a = 1\n",
+            "    class Inner:\n",
+            "        def _m(self):\n",
+            "            return 1\n",
+            "    def run(self):\n",
+            "        return self._a\n",
+            "x = 1\n",
+        );
+        let model = super::super::model::source_model(
+            &rule("python.dependency_contract"),
+            &input("python-v1", &[("a.py", source)]),
+        )
+        .unwrap();
+        let inner = source.find("return 1").unwrap();
+        assert!(enclosing_class_member(&model, "a.py", inner, "_m"));
+        assert!(!enclosing_class_member(&model, "a.py", inner, "_a"));
+        assert!(!enclosing_class_member(&model, "a.py", inner, "_z"));
+        let outer = model
+            .classes
+            .iter()
+            .find(|class| class.name == "Outer")
+            .unwrap()
+            .range;
+        assert!(enclosing_class_member(&model, "a.py", outer.1 - 1, "_a"));
+        assert!(!enclosing_class_member(&model, "a.py", outer.1, "_a"));
+
+        let source = "class Box {\n  _a: number = 1\n  run() { return 2 }\n}\n";
+        let model = super::super::model::source_model(
+            &rule("typescript.dependency_contract"),
+            &input("typescript-v1", &[("a.ts", source)]),
+        )
+        .unwrap();
+        let body = source.find("return").unwrap();
+        assert!(enclosing_class_member(&model, "a.ts", body, "_a"));
+        assert!(!enclosing_class_member(&model, "a.ts", body, "_z"));
     }
 
     #[test]

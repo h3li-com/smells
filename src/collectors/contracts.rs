@@ -148,7 +148,7 @@ fn qualified_base_target(derived: &ClassFact, base: &str) -> Option<String> {
 /// Resolve a declared base by name. A same-file declaration wins; otherwise every
 /// same-named declaration elsewhere competes, so an unrelated namesake in another file
 /// makes the base ambiguous instead of resolving to the only interface among them.
-fn resolve_declared_base<'a>(
+pub(super) fn resolve_declared_base<'a>(
     model: &'a SourceModel,
     derived: &ClassFact,
     base: &str,
@@ -892,6 +892,40 @@ fn chain_root(code: &str, failure: &str, start: usize) -> bool {
     !before.ends_with(['.', ':', '|']) && !type_query
 }
 
+/// Attributes that authored Python classes declare as assignable: annotated class
+/// fields and `@name.setter` properties. Assigning one is ordinary use of an
+/// authored API, not a workaround for a library class that lacks it.
+fn authored_settable_attributes(model: &SourceModel) -> BTreeSet<String> {
+    static SETTER: OnceLock<Regex> = OnceLock::new();
+    let setter = SETTER.get_or_init(|| {
+        Regex::new(r"@\s*([A-Za-z_][A-Za-z0-9_]*)\s*\.\s*setter\b")
+            .expect("valid property setter expression")
+    });
+    let mut attributes = BTreeSet::new();
+    for class in &model.classes {
+        attributes.extend(class.fields.iter().map(|field| field.name.clone()));
+        attributes.extend(
+            setter
+                .captures_iter(&class.source)
+                .map(|captures| captures[1].to_string()),
+        );
+    }
+    attributes
+}
+
+/// Whether a dotted Python assignment `a.b.name =` sets an attribute an authored
+/// class declares as assignable.
+fn authored_attribute_assignment(matched: &str, authored: &BTreeSet<String>) -> bool {
+    if matched.starts_with("setattr") || matched.contains(".prototype.") {
+        return false;
+    }
+    let target = matched.split('=').next().unwrap_or_default().trim_end();
+    target
+        .rsplit('.')
+        .next()
+        .is_some_and(|attribute| authored.contains(attribute))
+}
+
 pub(super) fn library_capabilities(
     rule: &Rule,
     model: &SourceModel,
@@ -901,6 +935,11 @@ pub(super) fn library_capabilities(
         return Ok(rust_library_capabilities(model));
     }
     let typescript = rule_language(rule) == "typescript";
+    let authored = if typescript {
+        BTreeSet::new()
+    } else {
+        authored_settable_attributes(model)
+    };
     let workaround = workaround_expression();
     let mut observations = Vec::new();
     for (path, source) in &input.files {
@@ -917,6 +956,7 @@ pub(super) fn library_capabilities(
             .transpose()?;
         let failures = failures
             .filter(|failure| library_target(failure.as_str(), imported.as_ref()))
+            .filter(|failure| !authored_attribute_assignment(failure.as_str(), &authored))
             .collect::<Vec<_>>();
         if let Some(first) = failures.first() {
             observations.push(observation(
@@ -1587,6 +1627,44 @@ impl Wake for LocalWaker { fn wake(self) {} }
         assert_eq!(observations.len(), 1);
         assert_eq!(observations[0].measurements["failures"], 3);
         assert_eq!(observations[0].location.line, 5);
+    }
+
+    #[test]
+    fn python_assignments_through_authored_setters_and_fields_are_not_workarounds() {
+        let models = concat!(
+            "class Response:\n",
+            "    timeout: float\n",
+            "    @property\n",
+            "    def elapsed(self):\n",
+            "        return self._elapsed\n",
+            "    @elapsed.setter\n",
+            "    def elapsed(self, value):\n",
+            "        self._elapsed = value\n",
+        );
+        let client = concat!(
+            "def send(self):\n",
+            "    self._response.elapsed = 1\n",
+            "    self._response.config.timeout = 2\n",
+            "    requests.adapters.DEFAULT_RETRIES = 5\n",
+            "    setattr(requests.Response, 'elapsed', 3)\n",
+        );
+        let input = Input::fixture(
+            "python-v1",
+            BTreeMap::from([
+                ("src/models.py".to_string(), models.to_string()),
+                ("src/client.py".to_string(), client.to_string()),
+            ]),
+        );
+        let rule = rule("python.library_capabilities");
+        let model = super::super::model::source_model(&rule, &input).unwrap();
+        let observations = library_capabilities(&rule, &model, &input).unwrap();
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].measurements["failures"], 2);
+        assert_eq!(observations[0].location.line, 4);
+        assert!(!authored_attribute_assignment(
+            "a.prototype.elapsed = ",
+            &BTreeSet::from(["elapsed".to_string()])
+        ));
     }
 
     #[test]

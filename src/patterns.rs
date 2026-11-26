@@ -711,21 +711,50 @@ fn normalized_tokens(function: &Function) -> Vec<String> {
     tokens
 }
 
+/// The type spelled as `Self`: an owner's own unqualified name names the same
+/// type, so `Result<Separator>` in `impl Separator` and `Result<Self>` are one
+/// interface. A path such as `mio::net::Separator` names another type.
+fn owned_as_self(text: &str, owner: Option<&str>) -> String {
+    let Some(owner) = owner.filter(|owner| !owner.is_empty()) else {
+        return text.to_string();
+    };
+    let mut result = String::with_capacity(text.len());
+    let mut word = String::new();
+    for character in text.chars().chain([' ']) {
+        if character.is_alphanumeric() || character == '_' {
+            word.push(character);
+            continue;
+        }
+        let qualified = result.trim_end().ends_with("::");
+        result.push_str(if word == owner && !qualified {
+            "Self"
+        } else {
+            &word
+        });
+        word.clear();
+        result.push(character);
+    }
+    result.pop();
+    result
+}
+
 fn interface(function: &Function) -> String {
     let signature = &function.signature;
+    let owner = function.owner.as_deref().map(without_variants);
+    let owner = owner.as_deref().and_then(|owner| owner.rsplit("::").next());
     let types: Vec<_> = signature
         .inputs
         .iter()
         .map(|input| match input {
             FnArg::Receiver(receiver) => syntax(receiver),
-            FnArg::Typed(input) => syntax(&input.ty),
+            FnArg::Typed(input) => owned_as_self(&syntax(&input.ty), owner),
         })
         .collect();
     format!(
         "{}|{:?}|{}|{}|{}|{}|{}|{}|{}|{}",
         signature.ident,
         types,
-        syntax(&signature.output),
+        owned_as_self(&syntax(&signature.output), owner),
         syntax(&signature.generics),
         syntax(&signature.generics.where_clause),
         syntax(&signature.asyncness),
@@ -1091,6 +1120,75 @@ mod tests {
             "rust.alternative_interfaces",
             &canonical,
             &variant
+        ));
+    }
+
+    #[test]
+    fn owner_names_compare_as_self_in_interfaces() {
+        let alternative = "rust.alternative_interfaces";
+        let mut context =
+            method("fn new(raw: &OsStr) -> Result<ContextSeparator> { Ok(parse(raw, 1)) }");
+        context.symbol = "crate::ContextSeparator::new".into();
+        context.owner = Some("crate::ContextSeparator".into());
+        let mut field =
+            method("fn new(raw: &OsStr) -> Result<FieldSeparator> { Ok(parse(raw, 2)) }");
+        field.symbol = "crate::imp [cfg variant 2]::FieldSeparator::new".into();
+        field.owner = Some("crate::imp [cfg variant 2]::FieldSeparator".into());
+        assert!(!duplicate_rule_applies(
+            alternative,
+            alternative,
+            &context,
+            &field
+        ));
+        assert_eq!(
+            owned_as_self(
+                "Result < FieldSeparatorX , FieldSeparator >",
+                Some("FieldSeparator")
+            ),
+            "Result < FieldSeparatorX , Self >"
+        );
+        assert_eq!(
+            owned_as_self(
+                "mio :: net :: TcpStream , net::TcpStream , TcpStream",
+                Some("TcpStream")
+            ),
+            "mio :: net :: TcpStream , net::TcpStream , Self"
+        );
+        assert_eq!(owned_as_self("& Separator", None), "& Separator");
+        assert_eq!(owned_as_self("& Separator", Some("")), "& Separator");
+
+        let mut other = method("fn new(raw: &OsStr) -> Result<Other> { Ok(parse(raw, 3)) }");
+        other.symbol = "crate::Field::new".into();
+        other.owner = Some("crate::Field".into());
+        assert!(duplicate_rule_applies(
+            alternative,
+            alternative,
+            &context,
+            &other
+        ));
+        let mut taking = method("fn new(raw: ContextSeparator) -> Result<Self> { Ok(raw) }");
+        taking.symbol = "crate::Taking::new".into();
+        taking.owner = Some("crate::Taking".into());
+        let mut own = method("fn new(raw: Taking) -> Result<Self> { Ok(raw) }");
+        own.symbol = "crate::ContextSeparator::new".into();
+        own.owner = Some("crate::ContextSeparator".into());
+        assert!(duplicate_rule_applies(
+            alternative,
+            alternative,
+            &taking,
+            &own
+        ));
+        let mut tcp = method("fn wrap(io: mio::net::TcpStream) -> Self { Self::new(io, 1) }");
+        tcp.symbol = "crate::TcpStream::wrap".into();
+        tcp.owner = Some("crate::TcpStream".into());
+        let mut unix = method("fn wrap(io: mio::net::UnixStream) -> Self { Self::new(io, 2) }");
+        unix.symbol = "crate::UnixStream::wrap".into();
+        unix.owner = Some("crate::UnixStream".into());
+        assert!(duplicate_rule_applies(
+            alternative,
+            alternative,
+            &tcp,
+            &unix
         ));
     }
 

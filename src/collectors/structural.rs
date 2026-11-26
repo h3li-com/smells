@@ -1,5 +1,6 @@
 use super::{
     common::observation,
+    contracts,
     model::{self, ClassFact, CodeScope, FieldFact, FunctionFact, SourceModel},
 };
 use crate::{
@@ -137,17 +138,33 @@ fn language_special_method(name: &str) -> bool {
         || inner.strip_prefix(['r', 'i']).is_some_and(operator)
 }
 
+/// Each class's effective method-name interface: its own methods and those it
+/// inherits from authored bases, so subclasses that override different subsets of
+/// one base still expose that one interface.
 fn class_interfaces(model: &SourceModel) -> Vec<BTreeSet<&str>> {
     model
         .classes
         .iter()
         .map(|class| {
-            class
-                .methods
-                .iter()
-                .map(|method| method.name.as_str())
-                .filter(|name| !language_special_method(name))
-                .collect()
+            let mut names = BTreeSet::new();
+            let mut visited = BTreeSet::new();
+            let mut pending = vec![class];
+            while let Some(current) = pending.pop() {
+                if !visited.insert(current.symbol.as_str()) {
+                    continue;
+                }
+                names.extend(
+                    current
+                        .methods
+                        .iter()
+                        .map(|method| method.name.as_str())
+                        .filter(|name| !language_special_method(name)),
+                );
+                pending.extend(current.bases.iter().filter_map(|base| {
+                    contracts::resolve_declared_base(model, current, base, false)
+                }));
+            }
+            names
         })
         .collect()
 }
@@ -1020,6 +1037,39 @@ mod tests {
         assert_eq!(
             observations[0].measurements["intersection"],
             observations[0].measurements["union"]
+        );
+    }
+
+    #[test]
+    fn alternative_interfaces_compare_inherited_authored_methods() {
+        let body = "        total = 0\n        for item in self.items:\n            if item.ready:\n                total = total + item.amount\n        return total\n";
+        let source = format!(
+            "class Tag:\n    def check(self):\n        return 1\n    def convert(self):\n        return 2\n\
+             class TagTuple(Tag):\n    def check(self):\n{body}\n    def convert(self):\n        return 3\n\
+             class PassList(Tag):\n    def check(self):\n{body}\n\
+             class Loop(Cycle):\n    def funds(self):\n{body}\n\
+             class Cycle(Loop):\n    def other(self):\n        return 4\n"
+        );
+        let rule = portable_rule(
+            "python.alternative_interfaces",
+            &[
+                ("minimum_tokens", 20),
+                ("minimum_similarity_basis_points", 6000),
+            ],
+        );
+        let input = portable_input("python-v1", &[("src/tag.py", &source)]);
+        let observations = portable_observations(alternative_interfaces, &rule, &input);
+
+        let pairs = observations
+            .iter()
+            .map(|found| (found.symbol.as_str(), found.related_symbols[0].as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            pairs,
+            [
+                ("src/tag.py::PassList", "src/tag.py::Loop"),
+                ("src/tag.py::Loop", "src/tag.py::TagTuple"),
+            ]
         );
     }
 

@@ -10,6 +10,10 @@ use std::{
     process::Command,
 };
 
+mod suppression_edits;
+
+use suppression_edits::suppression_only_edits;
+
 /// Maximum number of commits captured for history-dependent rules.
 pub(crate) const HISTORY_WINDOW: usize = 200;
 
@@ -603,7 +607,22 @@ fn captured_history_at(
     let Ok(log) = String::from_utf8(output.stdout) else {
         return History::default();
     };
-    parse_history_log(&log, files, shallow)
+    let mut history = parse_history_log(&log, files, shallow);
+    if !history.commits.is_empty() {
+        let suppression_only = suppression_only_edits(root, revision, &limit, files);
+        without_suppression_edits(&mut history, &suppression_only);
+    }
+    history
+}
+
+/// Drops file changes that only edit suppressions, and commits left with none.
+fn without_suppression_edits(history: &mut History, suppression_only: &BTreeSet<(String, String)>) {
+    for commit in &mut history.commits {
+        commit
+            .files
+            .retain(|path| !suppression_only.contains(&(commit.id.clone(), path.clone())));
+    }
+    history.commits.retain(|commit| !commit.files.is_empty());
 }
 
 fn parse_history_log(log: &str, files: &BTreeMap<String, String>, shallow: bool) -> History {
@@ -1527,6 +1546,67 @@ mod tests {
         }
     }
 
+    fn run_git(root: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git {args:?} failed");
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
+
+    fn commit_file(root: &Path, contents: &str, message: &str) -> String {
+        fs::write(root.join("a.ts"), contents).unwrap();
+        run_git(root, &["add", "--", "a.ts"]);
+        run_git(root, &["commit", "-q", "-m", message]);
+        run_git(root, &["rev-parse", "HEAD"])
+    }
+
+    #[test]
+    fn history_drops_commits_that_only_edit_suppressions() {
+        let repository = TempRepository::new();
+        let root = repository.0.as_path();
+        let first = commit_file(root, "let x = 0;\n", "one");
+        let second = commit_file(root, "let x = 1;\n", "two");
+        let third = commit_file(root, "let x = 1; // @ts-expect-error why\n", "three");
+        let files = BTreeMap::from([("a.ts".to_string(), String::new())]);
+
+        assert_eq!(
+            suppression_only_edits(root, None, "200", &files),
+            BTreeSet::from([(third, "a.ts".to_string())])
+        );
+        let history = captured_history_at(root, None, &files);
+        let ids = history
+            .commits
+            .iter()
+            .map(|commit| commit.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec![second.as_str(), first.as_str()]);
+
+        // Git prints the newest patches and then fails on a missing blob. A
+        // failed log discounts nothing, even the suppression edit it printed.
+        let blob = run_git(root, &["rev-parse", &format!("{first}:a.ts")]);
+        let object = root.join(".git/objects").join(&blob[..2]).join(&blob[2..]);
+        let mut permissions = fs::metadata(&object).unwrap().permissions();
+        #[expect(
+            clippy::permissions_set_readonly_false,
+            reason = "test removes a loose object"
+        )]
+        permissions.set_readonly(false);
+        fs::set_permissions(&object, permissions).unwrap();
+        fs::remove_file(&object).unwrap();
+        assert!(suppression_only_edits(root, None, "200", &files).is_empty());
+    }
+
     #[test]
     fn migration_artifact_prefilter_and_recognizer_fail_closed_independently() {
         let registry = crate::policy::registry("rust-v1").unwrap();
@@ -1622,6 +1702,29 @@ mod tests {
         assert!(!parented.commits[0].root);
         assert_eq!(parented.commits[1].id, "root");
         assert!(parented.commits[1].root);
+    }
+
+    #[test]
+    fn suppression_only_changes_leave_their_commits() {
+        let commit = |id: &str, files: &[&str]| HistoryCommit {
+            id: id.into(),
+            root: false,
+            subject: String::new(),
+            files: files.iter().map(ToString::to_string).collect(),
+        };
+        let mut history = History {
+            available: true,
+            shallow: false,
+            commits: vec![commit("one", &["a.ts", "b.ts"]), commit("two", &["a.ts"])],
+        };
+        let suppression_only = BTreeSet::from([
+            ("one".to_string(), "b.ts".to_string()),
+            ("two".to_string(), "a.ts".to_string()),
+        ]);
+        without_suppression_edits(&mut history, &suppression_only);
+        assert_eq!(history.commits.len(), 1);
+        assert_eq!(history.commits[0].id, "one");
+        assert_eq!(history.commits[0].files, vec!["a.ts"]);
     }
 
     #[test]

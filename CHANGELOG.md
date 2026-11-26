@@ -204,6 +204,26 @@ All notable changes to Smells are recorded here. Release tags use `vMAJOR.MINOR.
     `python.unused_code`, `typescript.primitive_slots` and
     `typescript.temporary_fields` move to `2`; `rust.unused_code` moves to
     `3`.
+- Fix the remaining calibration false positives without changing any rule
+  version, threshold or policy mode. All 316 sampled findings the final scan
+  still reports are true positives or defensible:
+  - The history rules (`divergent_change`, `shotgun_surgery`) do not count a
+    file change whose only edit adds, removes or moves lint, formatter,
+    type-checker or coverage suppressions (`eslint-disable`, `@ts-expect-error`,
+    `noqa`, `type: ignore`, Rust `#[allow]`/`#[expect]` lines). Patches are read
+    without fetching missing objects; in a blobless partial clone every changed
+    file still counts.
+  - `rust.alternative_interfaces` reads the owner's own unqualified type name
+    as `Self`, so constructors returning `Result<Owner>` in different owners share one
+    interface.
+  - Python and TypeScript `alternative_interfaces` compare effective method
+    sets that include methods inherited from authored bases.
+  - Python and TypeScript `dependency_contract` treat members the enclosing
+    class declares or uses on its own receiver as owned; TypeScript `#private`
+    members never count.
+  - `python.library_capabilities` does not count assignments to an attribute an
+    authored class declares as assignable (an annotated field or an
+    `@name.setter` property).
 - Resolve `mod` declarations in Cargo target roots other than `lib.rs` and
   `main.rs` (files directly in `tests/`, `examples/` and `benches/`,
   `src/bin/*.rs` and `build.rs`) next to the root file. Before, the scan exited
