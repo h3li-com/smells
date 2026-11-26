@@ -97,7 +97,8 @@ All notable changes to Smells are recorded here. Release tags use `vMAJOR.MINOR.
 - Add `test_suite` support to `source_roles` (`pytest`, `unittest`, `vitest`,
   `jest`, `playwright`, and `cargo_test`): canonical test cases and test blocks
   exceeding `function_lines` are surfaced as auditable `reported_by_role` review
-  signals while test helpers and other rules retain normal enforcement.
+  signals. Test helpers and other rules' findings in test code are non-blocking
+  indicators (see the calibration entry below).
 - Fix `--base` so diverging one copy of a Duplicate Code pair no longer counts
   as a regression. A duplicate pair's burden is now its shared token count
   (`intersection`) instead of `intersection + union`. Enable
@@ -145,6 +146,39 @@ All notable changes to Smells are recorded here. Release tags use `vMAJOR.MINOR.
 - Key the portable fact cache on the TypeScript compatibility parser as well.
   Before this, a change to which files parse could still serve a cached parse
   error from an earlier build for files whose content had not changed.
+- Calibrate against twelve production codebases (axum, ripgrep, tokio, serde,
+  httpx, rich, flask, fastapi, zod, hono, vite and typescript-eslint). Rule
+  versions are unchanged:
+  - Test code never blocks. A finding whose every location is test code (a
+    conventional test path, a Cargo `tests`, `examples` or `benches` target root,
+    a Rust `#[cfg(test)]` module, or a `#[test]` or `#[rstest]` function) is an
+    `indicator` whose explanation says so. `unused_code` reports test
+    declarations as a separate `<path>::unused-test-declarations` finding, so a
+    production declaration in the same file still blocks.
+  - `duplicate_functions` joins passing pairs into connected families and
+    reports one finding per family, with the other members as related symbols.
+    Rust bodies with the same qualified symbol, which are mutually exclusive cfg
+    alternatives such as `#[cfg(unix)]` and `#[cfg(windows)]` versions of one
+    function, are not compared.
+  - `unused_code` treats Rust `_` names, items under `#[allow]` or `#[expect]`
+    naming `dead_code` or `unused`, exported TypeScript `_` declarations and
+    single-underscore Python protocol hooks such as `_missing_` as reachable.
+  - `python.function_arguments` no longer counts keyword-only parameters that
+    have a default. Keyword-only parameters without a default still count.
+  - `data_clumps` counts each distinct slot population once, so repeated
+    identical signatures no longer exhaust `maximum_group_combinations`.
+- Resolve `mod` declarations in Cargo target roots other than `lib.rs` and
+  `main.rs` (files directly in `tests/`, `examples/` and `benches/`,
+  `src/bin/*.rs` and `build.rs`) next to the root file. Before, the scan exited
+  `2` with a missing module source.
+- Accept two imports that bind one name, such as axum's `FromRef` trait and
+  derive macro, unless a path resolves through that name.
+- Name the line and column in every parse error:
+  `parse error in <path>:<line>:<column>: <reason>`.
+- Parse TypeScript overloaded call signatures, `export type * from`, and
+  members named `abstract`, which tree-sitter-typescript 0.23.2 rejects.
+- Grade a `smells doctor` scan with errors as `Incomplete` instead of a score,
+  because the skipped code cannot be vouched for.
 
 ## 0.6.0 - 2026-10-14
 

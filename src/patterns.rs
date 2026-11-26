@@ -3,7 +3,7 @@ use crate::{
     policy::Policy,
     report::{FindingRelations, Report},
     scan::{Facts, Function, syntax},
-    similarity::exact_jaccard_pairs,
+    similarity::{DuplicateFamily, SimilarPair, duplicate_families, exact_jaccard_pairs},
 };
 use proc_macro2::{TokenStream, TokenTree};
 use quote::ToTokens;
@@ -496,12 +496,29 @@ pub(crate) fn closed_slot_groups(
     minimum: u64,
     remaining: &mut usize,
 ) -> Result<BTreeMap<Vec<Slot>, BTreeSet<usize>>, String> {
-    let mut supports: BTreeMap<Vec<Slot>, BTreeSet<usize>> = BTreeMap::new();
+    // A group can only reach `minimum` supporters through slots that do, so rarer
+    // slots are dropped before enumerating; wide declarations stay within budget.
+    let mut frequency: BTreeMap<&Slot, u64> = BTreeMap::new();
+    for slot in populations.iter().flat_map(|(_, slots)| slots) {
+        *frequency.entry(slot).or_default() += 1;
+    }
+    // Declarations with the same frequent slots, such as overloads or the HTTP
+    // method shortcuts of a router, enumerate their groups once.
+    let mut by_slots: BTreeMap<Vec<Slot>, Vec<usize>> = BTreeMap::new();
     for (index, slots) in populations {
+        let frequent: Vec<Slot> = slots
+            .iter()
+            .filter(|slot| frequency[slot] >= minimum)
+            .cloned()
+            .collect();
+        by_slots.entry(frequent).or_default().push(*index);
+    }
+    let mut supports: BTreeMap<Vec<Slot>, BTreeSet<usize>> = BTreeMap::new();
+    for (frequent, indices) in by_slots {
         let mut groups = Vec::new();
-        combinations(slots, size, 0, &mut Vec::new(), &mut groups, remaining)?;
+        combinations(&frequent, size, 0, &mut Vec::new(), &mut groups, remaining)?;
         for group in groups {
-            supports.entry(group).or_default().insert(*index);
+            supports.entry(group).or_default().extend(&indices);
         }
     }
     let slots_by_index: BTreeMap<_, BTreeSet<_>> = populations
@@ -757,84 +774,57 @@ fn duplicate_thresholds(policy: &Policy) -> Option<(u64, u64)> {
         .reduce(|left, right| (left.0.min(right.0), left.1.min(right.1)))
 }
 
-fn ordered_pair<'a>(
-    first: &'a Function,
-    second: &'a Function,
-    first_size: usize,
-    second_size: usize,
-) -> (&'a Function, &'a Function, [usize; 2]) {
-    if first.symbol <= second.symbol {
-        (first, second, [first_size, second_size])
-    } else {
-        (second, first, [second_size, first_size])
-    }
-}
-
+/// Declarations sharing one qualified symbol are mutually exclusive cfg
+/// alternatives, so only one of them is ever compiled.
 fn duplicate_rule_applies(
     id: &str,
     alternative: &str,
     first: &Function,
     second: &Function,
 ) -> bool {
-    id != alternative
-        || (first.owner.is_some()
-            && second.owner.is_some()
-            && first.owner != second.owner
-            && interface(first) != interface(second))
+    first.symbol != second.symbol
+        && (id != alternative
+            || (first.owner.is_some()
+                && second.owner.is_some()
+                && first.owner != second.owner
+                && interface(first) != interface(second)))
 }
 
-struct DuplicateEvidence {
-    token_counts: [usize; 2],
-    intersection: usize,
-    union: usize,
-}
-
-fn report_duplicate(
-    policy: &Policy,
-    id: &str,
-    first: &Function,
-    second: &Function,
-    evidence: &DuplicateEvidence,
-    report: &mut Report,
-) {
+fn pair_meets_rule(policy: &Policy, id: &str, tokens: [usize; 2], pair: &SimilarPair) -> bool {
     let minimum = parameter(policy, id, "minimum_tokens");
     let similarity = parameter(policy, id, "minimum_similarity_basis_points");
-    if evidence.token_counts[0] as u64 >= minimum
-        && evidence.token_counts[1] as u64 >= minimum
-        && evidence.intersection as u128 * 10_000 >= u128::from(similarity) * evidence.union as u128
-    {
-        report.finding_with_relations(policy,id,&first.symbol,&first.location,"normalized 4-token multiset Jaccard",json!({"intersection":evidence.intersection,"union":evidence.union}),">=",
-            json!({"minimum_similarity_basis_points":similarity,"minimum_tokens":minimum}),true,
-            FindingRelations {
-                evidence: json!({"token_counts":evidence.token_counts,"other_location":second.location,"normalization":"syntax_tokens_v1_not_semantic_equivalence"}),
-                symbols: vec![second.symbol.clone()],
-                locations: vec![second.location.clone()],
-            });
-    }
+    tokens[0] as u64 >= minimum
+        && tokens[1] as u64 >= minimum
+        && pair.intersection as u128 * 10_000 >= u128::from(similarity) * pair.union as u128
 }
 
-fn compare_duplicates(
-    first: &Function,
-    second: &Function,
-    tokens: [usize; 2],
-    intersection: usize,
-    union: usize,
+fn report_duplicate_family(
     policy: &Policy,
+    id: &str,
+    functions: &[&Function],
+    token_lists: &[Vec<String>],
+    family: &DuplicateFamily,
     report: &mut Report,
 ) {
-    let (first, second, token_counts) = ordered_pair(first, second, tokens[0], tokens[1]);
-    let evidence = DuplicateEvidence {
-        token_counts,
-        intersection,
-        union,
+    let mut members = family.members.clone();
+    members.sort_by(|left, right| functions[*left].symbol.cmp(&functions[*right].symbol));
+    let anchor = functions[members[0]];
+    let others = &members[1..];
+    let test_code = members.iter().all(|index| functions[*index].test);
+    let evaluation = crate::evidence_evaluators::Evaluation {
+        metric: "normalized 4-token multiset Jaccard",
+        observed: json!({"intersection":family.intersection,"union":family.union}),
+        comparison: ">=",
+        threshold: json!({"minimum_similarity_basis_points":parameter(policy, id, "minimum_similarity_basis_points"),"minimum_tokens":parameter(policy, id, "minimum_tokens")}),
+        matched: true,
     };
-    for id in ["rust.duplicate_functions", "rust.alternative_interfaces"] {
-        if policy.enabled(id)
-            && duplicate_rule_applies(id, "rust.alternative_interfaces", first, second)
-        {
-            report_duplicate(policy, id, first, second, &evidence, report);
-        }
-    }
+    report.evaluated_finding(policy, id, (&anchor.symbol, &anchor.location), evaluation,
+        FindingRelations {
+            evidence: json!({"family_size":members.len(),"pairs":family.pairs,"token_counts":members.iter().map(|index| token_lists[*index].len()).collect::<Vec<_>>(),"test_code":test_code,"normalization":"syntax_tokens_v1_not_semantic_equivalence"}),
+            symbols: others.iter().map(|index| functions[*index].symbol.clone()).collect(),
+            locations: others.iter().map(|index| functions[*index].location.clone()).collect(),
+        },
+        test_code.then_some(crate::core::test_suite::TEST_CODE_ADVISORY));
 }
 
 fn duplicates(facts: &Facts, policy: &Policy, report: &mut Report) {
@@ -868,16 +858,23 @@ fn duplicates(facts: &Facts, policy: &Policy, report: &mut Report) {
             return;
         }
     };
-    for pair in pairs {
-        compare_duplicates(
-            functions[pair.left],
-            functions[pair.right],
-            [token_lists[pair.left].len(), token_lists[pair.right].len()],
-            pair.intersection,
-            pair.union,
-            policy,
-            report,
-        );
+    for id in ["rust.duplicate_functions", "rust.alternative_interfaces"] {
+        if !policy.enabled(id) {
+            continue;
+        }
+        let passing = pairs.iter().filter(|pair| {
+            let (left, right) = (functions[pair.left], functions[pair.right]);
+            duplicate_rule_applies(id, "rust.alternative_interfaces", left, right)
+                && pair_meets_rule(
+                    policy,
+                    id,
+                    [token_lists[pair.left].len(), token_lists[pair.right].len()],
+                    pair,
+                )
+        });
+        for family in duplicate_families(passing) {
+            report_duplicate_family(policy, id, &functions, &token_lists, &family, report);
+        }
     }
 }
 
@@ -1029,7 +1026,35 @@ mod tests {
             owner: Some("Service".into()),
             lines: 1,
             comments: 0,
+            test: false,
         }
+    }
+
+    #[test]
+    fn cfg_alternatives_with_one_symbol_are_not_duplicates() {
+        let unix = method("fn hidden(&self) -> bool { true }");
+        let windows = method("fn hidden(&self) -> bool { true }");
+        let mut other = method("fn shown(&self) -> bool { true }");
+        let id = "rust.duplicate_functions";
+        assert!(!duplicate_rule_applies(
+            id,
+            "rust.alternative_interfaces",
+            &unix,
+            &windows
+        ));
+        assert!(duplicate_rule_applies(
+            id,
+            "rust.alternative_interfaces",
+            &unix,
+            &other
+        ));
+        other.owner = Some("Other".into());
+        assert!(duplicate_rule_applies(
+            "rust.alternative_interfaces",
+            "rust.alternative_interfaces",
+            &unix,
+            &other
+        ));
     }
 
     #[test]
@@ -1082,14 +1107,18 @@ mod tests {
                 ),
             ]
         );
-        assert_eq!(remaining, 100 - 3 * 10 - 4);
+        assert_eq!(
+            remaining,
+            100 - 10 - 1,
+            "identical declarations enumerate once and the unshared slot z is pruned"
+        );
         let mut remaining = 100;
         assert!(
             closed_slot_groups(&populations, 3, 5, &mut remaining)
                 .unwrap()
                 .is_empty()
         );
-        let mut remaining = 33;
+        let mut remaining = 10;
         assert_eq!(
             closed_slot_groups(&populations, 3, 3, &mut remaining).unwrap_err(),
             "maximum_group_combinations budget exceeded"

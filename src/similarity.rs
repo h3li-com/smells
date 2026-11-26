@@ -16,6 +16,69 @@ pub(crate) struct SimilarPair {
     pub union: usize,
 }
 
+/// Connected functions whose every reported pair met the similarity threshold. The
+/// summed `intersection` and `union` keep the threshold ratio, because a mediant of
+/// passing ratios also passes.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct DuplicateFamily {
+    pub members: Vec<usize>,
+    pub pairs: usize,
+    pub intersection: usize,
+    pub union: usize,
+}
+
+fn family_root(parents: &mut BTreeMap<usize, usize>, member: usize) -> usize {
+    let mut root = member;
+    // A parent chain visits each member at most once, which also bounds the walk.
+    for _ in 0..=parents.len() {
+        let Some(&parent) = parents.get(&root) else {
+            break;
+        };
+        // Roots point at themselves once compressed; stop there instead of spinning.
+        if parent == root {
+            break;
+        }
+        root = parent;
+    }
+    parents.insert(member, root);
+    root
+}
+
+/// Groups passing pairs into connected families, ordered by their smallest member.
+pub(crate) fn duplicate_families<'a>(
+    pairs: impl IntoIterator<Item = &'a SimilarPair>,
+) -> Vec<DuplicateFamily> {
+    let pairs: Vec<&SimilarPair> = pairs.into_iter().collect();
+    let mut parents = BTreeMap::new();
+    for pair in &pairs {
+        let left = family_root(&mut parents, pair.left);
+        let right = family_root(&mut parents, pair.right);
+        parents.insert(left.max(right), left.min(right));
+    }
+    let mut families: BTreeMap<usize, DuplicateFamily> = BTreeMap::new();
+    for pair in pairs {
+        let root = family_root(&mut parents, pair.left);
+        let family = families.entry(root).or_insert_with(|| DuplicateFamily {
+            members: Vec::new(),
+            pairs: 0,
+            intersection: 0,
+            union: 0,
+        });
+        family.members.extend([pair.left, pair.right]);
+        family.pairs += 1;
+        family.intersection += pair.intersection;
+        family.union += pair.union;
+    }
+    families
+        .into_values()
+        .map(|mut family| {
+            family.members.sort_unstable();
+            family.members.dedup();
+            family
+        })
+        .collect()
+}
+
 #[cfg(test)]
 fn reference_jaccard_pairs(
     token_lists: &[Vec<String>],
@@ -486,6 +549,41 @@ mod tests {
     };
 
     static NEXT_WORKSPACE: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn duplicate_families_join_transitive_pairs_and_sum_their_tokens() {
+        let pair = |left, right, intersection, union| SimilarPair {
+            left,
+            right,
+            intersection,
+            union,
+        };
+        let pairs = [
+            pair(4, 2, 8, 10),
+            pair(7, 9, 5, 6),
+            pair(2, 0, 9, 10),
+            pair(9, 4, 7, 8),
+            pair(1, 3, 3, 4),
+        ];
+        assert_eq!(
+            duplicate_families(&pairs),
+            vec![
+                DuplicateFamily {
+                    members: vec![0, 2, 4, 7, 9],
+                    pairs: 4,
+                    intersection: 29,
+                    union: 34,
+                },
+                DuplicateFamily {
+                    members: vec![1, 3],
+                    pairs: 1,
+                    intersection: 3,
+                    union: 4,
+                },
+            ]
+        );
+        assert!(duplicate_families(&[]).is_empty());
+    }
 
     struct ReportWorkspace {
         root: PathBuf,

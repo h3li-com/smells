@@ -82,6 +82,25 @@ fn variance_annotation() -> &'static Regex {
     })
 }
 
+fn export_type_star() -> &'static Regex {
+    static EXPORT_TYPE_STAR: OnceLock<Regex> = OnceLock::new();
+    EXPORT_TYPE_STAR.get_or_init(|| {
+        Regex::new(r"\bexport\s+(?P<type>type)\s*\*")
+            .expect("fixed TypeScript export-type compatibility regex")
+    })
+}
+
+/// A member named `abstract`, as in `interface Node { abstract: boolean }`.
+/// Tree-sitter reads the name as the `abstract` modifier and fails on the `:`,
+/// `?`, `!` or `(` after it.
+fn abstract_member_name() -> &'static Regex {
+    static ABSTRACT_MEMBER_NAME: OnceLock<Regex> = OnceLock::new();
+    ABSTRACT_MEMBER_NAME.get_or_init(|| {
+        Regex::new(r"[{;,\n](?:[ \t]|(?:readonly|public|private|protected|static|declare)\s)*(?P<name>abstract)\s*[?!]?\s*[:(]")
+            .expect("fixed TypeScript abstract-member compatibility regex")
+    })
+}
+
 /// Same-length repairs found on the first, failed parse tree.
 #[derive(Default)]
 struct TreeRepairs {
@@ -89,6 +108,8 @@ struct TreeRepairs {
     template_escapes: Vec<usize>,
     /// `in` and `out` variance annotations on type parameters.
     variance_annotations: Vec<Range<usize>>,
+    /// Indentation bytes before a generic call signature that needs a `;`.
+    call_signature_separators: Vec<usize>,
 }
 
 const TEMPLATE_TAGS: [&str; 6] = [
@@ -178,9 +199,60 @@ fn skip_substitution(bytes: impl Iterator<Item = (usize, u8)>) -> Option<()> {
     None
 }
 
+/// The last character of the closest earlier line that holds code, skipping
+/// blank and comment lines.
+fn previous_code_end(source: &str, line_start: usize) -> Option<char> {
+    source[..line_start]
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| {
+            !line.is_empty()
+                && !line.starts_with("//")
+                && !line.starts_with("/*")
+                && !line.starts_with('*')
+        })
+        .and_then(|line| line.chars().last())
+}
+
+/// Overloaded generic call signatures written one per line, as in
+/// `interface Get { <K>(k: K): A\n  <K>(k: K): B }`. TypeScript separates type
+/// members by newlines, but tree-sitter reads the second `<` as type arguments
+/// of the first signature's return type. Each result is the indentation byte
+/// right before such a `<` inside `range`, which can hold a `;`.
+fn call_signature_separators(source: &str, range: Range<usize>) -> Vec<usize> {
+    let line_starts = std::iter::once(0).chain(
+        source
+            .get(..range.end)
+            .unwrap_or(source)
+            .match_indices('\n')
+            .map(|(index, _)| index + 1),
+    );
+    line_starts
+        .filter_map(|start| {
+            let indent = source[start..].find(|character| character != ' ' && character != '\t')?;
+            let first = start + indent;
+            (indent > 0 && range.contains(&first) && source[first..].starts_with('<'))
+                .then_some(first)
+        })
+        .filter(|first| {
+            !source[..*first].trim_end().ends_with("=>")
+                && previous_code_end(source, *first).is_some_and(|end| {
+                    matches!(end, ')' | ']' | '>' | '}') || end.is_alphanumeric() || end == '_'
+                })
+        })
+        .map(|first| first - 1)
+        .collect()
+}
+
 fn tree_repairs(node: Node<'_>, source: &str, repairs: &mut TreeRepairs) {
     if !node.has_error() {
         return;
+    }
+    if node.is_error() {
+        repairs
+            .call_signature_separators
+            .extend(call_signature_separators(source, node.byte_range()));
     }
     if is_tagged_template(node, source) {
         repairs
@@ -214,15 +286,41 @@ fn blank(bytes: &mut [u8]) {
 
 fn compatibility_source(source: &str, repairs: &TreeRepairs) -> Option<String> {
     let mut bytes = source.as_bytes().to_vec();
-    let mut changed = false;
+    repair_tree_errors(&mut bytes, repairs);
+    repair_keywords(&mut bytes, source);
+    repair_import_types(&mut bytes, source);
+    // Every repair rewrites a byte to a different one, so equal bytes mean no repair.
+    (bytes != source.as_bytes()).then(|| String::from_utf8(bytes).expect("spaces preserve UTF-8"))
+}
+
+/// Repairs located from the failed parse tree.
+fn repair_tree_errors(bytes: &mut [u8], repairs: &TreeRepairs) {
     for &escape in &repairs.template_escapes {
         bytes[escape] = b'q';
-        changed = true;
     }
     for range in repairs.variance_annotations.iter().cloned() {
         blank(&mut bytes[range]);
-        changed = true;
     }
+    for &separator in &repairs.call_signature_separators {
+        bytes[separator] = b';';
+    }
+}
+
+/// Members named `abstract` and `export type *` re-exports.
+fn repair_keywords(bytes: &mut [u8], source: &str) {
+    for captures in abstract_member_name().captures_iter(source) {
+        if let Some(name) = captures.name("name") {
+            bytes[name.end() - 1] = b'$';
+        }
+    }
+    for captures in export_type_star().captures_iter(source) {
+        if let Some(keyword) = captures.name("type") {
+            blank(&mut bytes[keyword.range()]);
+        }
+    }
+}
+
+fn repair_import_types(bytes: &mut [u8], source: &str) {
     let argument_ranges = import_type_argument_ranges(source);
     for range in argument_ranges.iter().cloned() {
         blank(&mut bytes[range.clone()]);
@@ -234,7 +332,6 @@ fn compatibility_source(source: &str, repairs: &TreeRepairs) -> Option<String> {
         {
             *type_byte = b'T';
         }
-        changed = true;
     }
     for range in import_type_ranges(source) {
         if argument_ranges
@@ -245,9 +342,7 @@ fn compatibility_source(source: &str, repairs: &TreeRepairs) -> Option<String> {
         }
         blank(&mut bytes[range.start + "import".len()..range.end]);
         bytes[range.start] = b'I';
-        changed = true;
     }
-    changed.then(|| String::from_utf8(bytes).expect("spaces preserve UTF-8"))
 }
 
 fn parsed_tree(parser: &mut Parser, source: &str, path: &str) -> Result<Tree, String> {
@@ -276,10 +371,29 @@ pub(crate) fn has_syntax_error(tree: &Tree) -> bool {
     first_syntax_error(tree.root_node()).is_some()
 }
 
+/// The one-based line and column of the first syntax error, or of the start of
+/// the file when the tree has none.
+pub(crate) fn syntax_error_position(tree: &Tree) -> (usize, usize) {
+    let point = first_syntax_error(tree.root_node()).map_or_else(
+        || tree.root_node().start_position(),
+        |node| node.start_position(),
+    );
+    (point.row + 1, point.column + 1)
+}
+
+/// `parse error in <path>:<line>:<column>`, shared by every scanner seam so one
+/// broken file reports one message.
+pub(crate) fn parse_error_message(path: &str, tree: &Tree) -> String {
+    let (line, column) = syntax_error_position(tree);
+    format!("parse error in {path}:{line}:{column}")
+}
+
 /// Parse TypeScript with the same byte-preserving compatibility treatment at
 /// every scanner seam. Tree-sitter currently rejects `typeof import(...)` in a
 /// generic call argument, some other import types, invalid escapes in tagged
-/// templates, and variance annotations, all of which TypeScript accepts.
+/// templates, variance annotations, overloaded generic call signatures on
+/// separate lines, `export type *`, and members named `abstract`, all of which
+/// TypeScript accepts.
 pub(crate) fn parse(parser: &mut Parser, source: &str, path: &str) -> Result<Tree, String> {
     let tree = parsed_tree(parser, source, path)?;
     if !has_syntax_error(&tree) {
@@ -296,8 +410,8 @@ pub(crate) fn parse(parser: &mut Parser, source: &str, path: &str) -> Result<Tre
 #[cfg(test)]
 mod tests {
     use super::{
-        TreeRepairs, compatibility_source, has_syntax_error, import_type_argument_ranges,
-        import_type_ranges, parse, tree_repairs,
+        TreeRepairs, call_signature_separators, compatibility_source, has_syntax_error,
+        import_type_argument_ranges, import_type_ranges, parse, tree_repairs,
     };
     use tree_sitter::Parser;
 
@@ -476,5 +590,84 @@ mod tests {
             let tree = parse(&mut parser, source, "broken.ts").unwrap();
             assert!(has_syntax_error(&tree), "{source}");
         }
+    }
+
+    #[test]
+    fn overloaded_call_signatures_reparse_without_hiding_other_errors() {
+        let mut parser = typescript_parser();
+        let source = "interface Get<E> {\n  <K extends keyof E>(key: K): E[K]\n  // other\n  <K>(key: K): K\n}";
+        let repairs = first_repairs(&mut parser, source);
+        assert_eq!(repairs.call_signature_separators, vec![67]);
+        assert_eq!(
+            compatibility_source(source, &repairs).unwrap(),
+            "interface Get<E> {\n  <K extends keyof E>(key: K): E[K]\n  // other\n ;<K>(key: K): K\n}"
+        );
+        for source in [
+            "type U = {\n  <T>(s: T): [T, F<T>]\n  <T = undefined>(): [T | undefined]\n}",
+            "interface F {\n  (h: H): [H]\n  <\n    I extends Input = {},\n  >(h: H): [H, I]\n}",
+            "interface M {\n  <E>(p: (c: C<E>) => P): M<E>\n  <E>(p: P): M<E>\n  name: string\n}",
+        ] {
+            let tree = parse(&mut parser, source, "signatures.ts").unwrap();
+            assert!(!has_syntax_error(&tree), "{source}");
+        }
+        for source in [
+            "interface G {\n  <K>(key: K): K\n<K>(key: K): K\n}",
+            "interface G {\n  <K>(key: K): K\n  <K>(key: K: K\n}",
+            "const f = (a: A) =>\n  <T>(b: T) => b\nf(a;",
+        ] {
+            let tree = parse(&mut parser, source, "broken.ts").unwrap();
+            assert!(has_syntax_error(&tree), "{source}");
+        }
+        assert!(call_signature_separators("a\n  <b", 0..1).is_empty());
+        assert!(call_signature_separators("{\n  <b", 0..6).is_empty());
+        assert!(call_signature_separators("x =>\n  <b", 0..9).is_empty());
+        assert_eq!(call_signature_separators("x)\n\t<b", 0..7), vec![3]);
+        assert_eq!(call_signature_separators("x_\n <b", 0..6), vec![3]);
+        assert_eq!(call_signature_separators("K\n <b", 0..5), vec![2]);
+        // A `<` at column zero has no indentation byte to hold a separator.
+        assert!(call_signature_separators("x)\n<b", 0..5).is_empty());
+    }
+
+    #[test]
+    fn export_type_star_reparses() {
+        let mut parser = typescript_parser();
+        for source in [
+            "export type * from './types'",
+            "export type * as types from './types'\nexport * from './x'",
+        ] {
+            let tree = parse(&mut parser, source, "index.ts").unwrap();
+            assert!(!has_syntax_error(&tree), "{source}");
+        }
+        assert_eq!(
+            compatibility_source("export type * from './t'", &TreeRepairs::default()).unwrap(),
+            "export      * from './t'"
+        );
+        let tree = parse(&mut parser, "export type * from './t'\nf(a;", "broken.ts").unwrap();
+        assert!(has_syntax_error(&tree));
+    }
+
+    #[test]
+    fn members_named_abstract_reparse() {
+        let mut parser = typescript_parser();
+        for source in [
+            "interface A {\n  abstract: boolean;\n}",
+            "interface A {\n  readonly abstract?: false;\n  abstract(): void;\n}",
+            "type A = { abstract: boolean };",
+            "class A {\n  abstract!: boolean;\n  static abstract = 1;\n}",
+            "abstract class B {\n  abstract run(): void;\n}\ninterface A { x: 1, abstract: 2 }",
+        ] {
+            let tree = parse(&mut parser, source, "index.ts").unwrap();
+            assert!(!has_syntax_error(&tree), "{source}");
+        }
+        assert_eq!(
+            compatibility_source(
+                "abstract class B { abstract run(): void }\ntype A = { abstract: 1 }",
+                &TreeRepairs::default()
+            )
+            .unwrap(),
+            "abstract class B { abstract run(): void }\ntype A = { abstrac$: 1 }"
+        );
+        let tree = parse(&mut parser, "type A = { abstract: 1 }\nf(a;", "broken.ts").unwrap();
+        assert!(has_syntax_error(&tree));
     }
 }

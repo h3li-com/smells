@@ -56,7 +56,7 @@ Count ordinary Tree-sitter comment rows in the callable minus rows also occupied
 <a id="typescript-duplicate-functions"></a>
 ### `typescript.duplicate_functions@1`
 
-Normalize Tree-sitter leaf tokens in each body: identifier spellings become `identifier`, literal values become literal-kind tags, comments are removed, and keywords/operators/delimiters retain grammar kinds. Build a multiset of consecutive four-token windows. Both bodies must have at least `minimum_tokens` (default 20); multiset Jaccard must be at least `minimum_similarity_basis_points` (default 8200). Overlapping nested bodies in one file are not compared. Expand multiset occurrences into globally document-frequency-ordered features, then apply exact Jaccard prefix, size-ratio, and positional-overlap filters. These are necessary conditions, so they cannot remove a threshold-matching pair. `maximum_pairs` counts the remaining unique pairs whose full multiset intersection/union is evaluated; exhaustion errors rather than returning a truncated success.
+Normalize Tree-sitter leaf tokens in each body: identifier spellings become `identifier`, literal values become literal-kind tags, comments are removed, and keywords/operators/delimiters retain grammar kinds. Build a multiset of consecutive four-token windows. Both bodies must have at least `minimum_tokens` (default 20); multiset Jaccard must be at least `minimum_similarity_basis_points` (default 8200). Overlapping nested bodies in one file are not compared. Expand multiset occurrences into globally document-frequency-ordered features, then apply exact Jaccard prefix, size-ratio, and positional-overlap filters. These are necessary conditions, so they cannot remove a threshold-matching pair. `maximum_pairs` counts the remaining unique pairs whose full multiset intersection/union is evaluated; exhaustion errors rather than returning a truncated success. Passing pairs join into connected families, and each family is one finding (see `docs/report-interface.md`).
 
 <a id="typescript-data-class"></a>
 ### `typescript.data_class@1`
@@ -98,7 +98,7 @@ Calculate cyclomatic complexity on the syntax tree and a conservative zero-cover
 
 <a id="typescript-unused-code"></a>
 ### `typescript.unused_code@1` — built in
-Count single-underscore private function/class declarations with no second identifier occurrence in the captured corpus. Match findings greater than `maximum_findings`; exported and dynamic reachability are outside the built-in scope.
+Count single-underscore private function/class declarations with no second identifier occurrence in the captured corpus. Match findings greater than `maximum_findings`; exported and dynamic reachability are outside the built-in scope. An exported `_` declaration (`export function _union`) is public. Declarations under a conventional test path are grouped as `<path>::unused-test-declarations` and are a non-blocking indicator.
 
 <a id="typescript-unused-type-parameters"></a>
 ### `typescript.unused_type_parameters@1` — built in

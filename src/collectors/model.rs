@@ -14,6 +14,21 @@ use std::{
 use syn::{ImplItem, TraitItem, spanned::Spanned, visit::Visit};
 use tree_sitter::{Language, Node, Parser, Tree};
 
+/// Whether a declaration is production code or test code: a conventional test path or
+/// a `#[cfg(test)]` module.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum CodeScope {
+    #[default]
+    Production,
+    Test,
+}
+
+impl CodeScope {
+    pub(super) fn of(test: bool) -> Self {
+        if test { Self::Test } else { Self::Production }
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct FunctionFact {
     pub(super) name: String,
@@ -34,6 +49,7 @@ pub(super) struct FunctionFact {
     pub(super) receiver: bool,
     /// Invoked by a harness or runtime rather than by authored code.
     pub(super) entry_point: bool,
+    pub(super) scope: CodeScope,
 }
 
 #[derive(Clone)]
@@ -57,6 +73,7 @@ pub(super) struct ClassFact {
     pub(super) fields: Vec<FieldFact>,
     pub(super) methods: Vec<FunctionFact>,
     pub(super) range: (usize, usize),
+    pub(super) scope: CodeScope,
 }
 
 #[derive(Default)]
@@ -479,8 +496,35 @@ fn rust_function(
         private,
         receiver: signature.receiver().is_some(),
         entry_point: false,
+        scope: CodeScope::Production,
         name,
     }
+}
+
+/// Whether `#[allow]` or `#[expect]` names `dead_code` or `unused`: the author has
+/// already declared the item intentionally unreferenced.
+fn rust_allows_unused(attributes: &[syn::Attribute]) -> bool {
+    attributes.iter().any(|attribute| {
+        let syn::Meta::List(list) = &attribute.meta else {
+            return false;
+        };
+        (list.path.is_ident("allow") || list.path.is_ident("expect"))
+            && list.tokens.clone().into_iter().any(|token| {
+                matches!(token, proc_macro2::TokenTree::Ident(ident) if ident == "dead_code" || ident == "unused")
+            })
+    })
+}
+
+/// Private to the unused-code check: an inherited visibility, no `_` prefix (which
+/// rustc treats as intentionally unused), and no `dead_code` allowance.
+fn rust_private(
+    visibility: &syn::Visibility,
+    name: &syn::Ident,
+    attributes: &[syn::Attribute],
+) -> bool {
+    matches!(visibility, syn::Visibility::Inherited)
+        && !name.to_string().starts_with('_')
+        && !rust_allows_unused(attributes)
 }
 
 /// Test and benchmark functions run under the harness, and a crate-level
@@ -546,6 +590,7 @@ fn ensure_rust_class<'a>(
         fields: Vec::new(),
         methods: Vec::new(),
         range: (0, 0),
+        scope: CodeScope::Production,
     })
 }
 
@@ -576,6 +621,8 @@ fn rust_type_parameters(generics: &syn::Generics) -> Vec<String> {
 struct RustModelVisitor<'model> {
     path: String,
     module_path: Vec<String>,
+    /// Inside a conventional test path or a `#[cfg(test)]` module.
+    test: bool,
     model: &'model mut SourceModel,
     classes: &'model mut BTreeMap<String, ClassFact>,
 }
@@ -598,6 +645,7 @@ impl RustModelVisitor<'_> {
             let mut fact =
                 rust_function(&self.path, None, &function.sig, Some(&function.block), true);
             fact.symbol.clone_from(&symbol);
+            fact.scope = CodeScope::of(self.test);
             self.model.functions.push(fact);
             self.record_nested_functions(&symbol, &function.block);
         }
@@ -640,9 +688,11 @@ impl<'ast> Visit<'ast> for RustModelVisitor<'_> {
             None,
             &function.sig,
             Some(&function.block),
-            matches!(function.vis, syn::Visibility::Inherited),
+            rust_private(&function.vis, &function.sig.ident, &function.attrs),
         );
         fact.entry_point = rust_entry_point(function, &self.module_path);
+        fact.scope =
+            CodeScope::of(self.test || crate::core::test_suite::rust_cfg_test(&function.attrs));
         let module = self.module();
         if !module.is_empty() {
             fact.symbol = format!("{}::{module}::{}", self.path, function.sig.ident);
@@ -666,7 +716,8 @@ impl<'ast> Visit<'ast> for RustModelVisitor<'_> {
             .expect("Rust type token masking cannot fail")
             .into();
         class.type_parameters = rust_type_parameters(&structure.generics);
-        class.private = matches!(structure.vis, syn::Visibility::Inherited);
+        class.private = rust_private(&structure.vis, &structure.ident, &structure.attrs);
+        class.scope = CodeScope::of(self.test);
         class.fields = structure
             .fields
             .iter()
@@ -689,7 +740,8 @@ impl<'ast> Visit<'ast> for RustModelVisitor<'_> {
             .expect("Rust type token masking cannot fail")
             .into();
         class.type_parameters = rust_type_parameters(&enumeration.generics);
-        class.private = matches!(enumeration.vis, syn::Visibility::Inherited);
+        class.private = rust_private(&enumeration.vis, &enumeration.ident, &enumeration.attrs);
+        class.scope = CodeScope::of(self.test);
     }
 
     fn visit_item_trait(&mut self, trait_item: &'ast syn::ItemTrait) {
@@ -700,13 +752,17 @@ impl<'ast> Visit<'ast> for RustModelVisitor<'_> {
             .items
             .iter()
             .filter_map(|method| match method {
-                TraitItem::Fn(method) => Some(rust_function(
-                    &self.path,
-                    Some(&owner),
-                    &method.sig,
-                    method.default.as_ref(),
-                    false,
-                )),
+                TraitItem::Fn(method) => {
+                    let mut fact = rust_function(
+                        &self.path,
+                        Some(&owner),
+                        &method.sig,
+                        method.default.as_ref(),
+                        false,
+                    );
+                    fact.scope = CodeScope::of(self.test);
+                    Some(fact)
+                }
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -741,18 +797,24 @@ impl<'ast> Visit<'ast> for RustModelVisitor<'_> {
         };
         let module = self.module();
         let owner = rust_owner(&module, &name);
-        let private = implementation.trait_.is_none();
+        let inherent =
+            implementation.trait_.is_none() && !rust_allows_unused(&implementation.attrs);
+        let test = self.test || crate::core::test_suite::rust_cfg_test(&implementation.attrs);
         let functions = implementation
             .items
             .iter()
             .filter_map(|method| match method {
-                ImplItem::Fn(method) => Some(rust_function(
-                    &self.path,
-                    Some(&owner),
-                    &method.sig,
-                    Some(&method.block),
-                    private && matches!(method.vis, syn::Visibility::Inherited),
-                )),
+                ImplItem::Fn(method) => {
+                    let mut fact = rust_function(
+                        &self.path,
+                        Some(&owner),
+                        &method.sig,
+                        Some(&method.block),
+                        inherent && rust_private(&method.vis, &method.sig.ident, &method.attrs),
+                    );
+                    fact.scope = CodeScope::of(test);
+                    Some(fact)
+                }
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -786,11 +848,14 @@ impl<'ast> Visit<'ast> for RustModelVisitor<'_> {
         let Some((_, items)) = &module.content else {
             return;
         };
+        let enclosing_test = self.test;
+        self.test |= crate::core::test_suite::rust_cfg_test(&module.attrs);
         self.module_path.push(module.ident.to_string());
         for item in items {
             self.visit_item(item);
         }
         self.module_path.pop();
+        self.test = enclosing_test;
     }
 }
 
@@ -802,13 +867,14 @@ fn rust_source_model(input: &Input) -> Result<SourceModel, String> {
             .code_by_path
             .insert(path.clone(), code_only(path, source)?.into());
         let file = syn::parse_file(source)
-            .map_err(|error| format!("collector parse error in {path}: {error}"))?;
+            .map_err(|error| crate::scan::parse_error_message(path, &error))?;
         let mut references = AttributeReferences::default();
         references.visit_file(&file);
         model.attribute_references.extend(references.0);
         RustModelVisitor {
             path: path.clone(),
             module_path: Vec::new(),
+            test: crate::core::test_suite::conventional_test_path(path),
             model: &mut model,
             classes: &mut classes,
         }
@@ -840,7 +906,7 @@ pub(super) fn parse_portable_tree(
             .ok_or_else(|| format!("collector parser cancelled for {path}"))?
     };
     if crate::typescript_compat::has_syntax_error(&tree) {
-        return Err(format!("collector parse error in {path}"));
+        return Err(crate::typescript_compat::parse_error_message(path, &tree));
     }
     Ok(tree)
 }
@@ -882,9 +948,10 @@ fn portable_class(
         interface: node.kind() == "interface_declaration"
             || header.contains("Protocol")
             || header.contains("ABC"),
-        private: name.starts_with('_'),
+        private: portable_private(node, &name, ""),
         fields: class_fields(node, source, authored_code, language),
         methods: Vec::new(),
+        scope: CodeScope::of(crate::core::test_suite::conventional_test_path(path)),
         name,
         range: (node.start_byte(), node.end_byte()),
     }
@@ -902,6 +969,22 @@ fn portable_receiver(signature: &str, language: &str) -> bool {
     } else {
         !signature.split_whitespace().any(|word| word == "static")
     }
+}
+
+/// Private to the unused-code check: a `_` name or `private` modifier, unless the
+/// declaration is exported (`export function _union`) or is a single-underscore
+/// protocol hook such as `_repr_markdown_` or `_missing_`, which a framework calls.
+fn portable_private(node: Node<'_>, name: &str, signature: &str) -> bool {
+    let mut ancestor = node.parent();
+    while let Some(parent) = ancestor
+        .filter(|parent| matches!(parent.kind(), "variable_declarator" | "lexical_declaration"))
+    {
+        ancestor = parent.parent();
+    }
+    let exported = ancestor.is_some_and(|parent| parent.kind() == "export_statement");
+    let hook =
+        name != "_" && name.starts_with('_') && name.ends_with('_') && !name.starts_with("__");
+    !exported && !hook && (name.starts_with('_') || signature.contains("private "))
 }
 
 fn portable_function(
@@ -941,9 +1024,10 @@ fn portable_function(
         source: text_of(node, authored_code).into(),
         body,
         complexity: body_node.map(|body| super::complexity::portable(node, body, language)),
-        private: name.starts_with('_') || signature.contains("private "),
+        private: portable_private(node, &name, &signature),
         receiver: owner.is_some() && portable_receiver(&signature, language),
         entry_point: false,
+        scope: CodeScope::of(crate::core::test_suite::conventional_test_path(path)),
         name,
     };
     (function, owner_index)
@@ -1414,6 +1498,113 @@ mod tests {
         assert_eq!(
             model.attribute_references,
             BTreeSet::from(["codec".into(), "port".into()])
+        );
+    }
+
+    #[test]
+    fn rust_model_exempts_declared_unused_items_and_marks_test_code() {
+        let source = concat!(
+            "fn plain() {}\n",
+            "fn _ignored() {}\n",
+            "#[allow(dead_code)] fn allowed() {}\n",
+            "#[allow(clippy::too_many_lines)] fn linted() {}\n",
+            "#[expect(unused, reason = \"fixture\")] struct Expected;\n",
+            "#[cfg(not(test))] mod live { fn kept() {} }\n",
+            "#[cfg(test)] mod tests { fn helper() {} struct Fixture; impl Fixture { fn build() {} } }\n",
+            "#[cfg(test)] fn gated() {}\n",
+            "#[allow(dead_code)] impl Holder { fn method() {} }\n",
+        );
+        let model = source_model(
+            &rule("rust.unused_code"),
+            &input(
+                "rust-v1",
+                &[("src/lib.rs", source), ("tests/cli.rs", "fn shared() {}\n")],
+            ),
+        )
+        .unwrap();
+        let function = |symbol: &str| {
+            model
+                .functions
+                .iter()
+                .find(|function| function.symbol == symbol)
+                .unwrap_or_else(|| panic!("missing {symbol}"))
+        };
+        let flags = |symbol: &str| {
+            (
+                function(symbol).private,
+                function(symbol).scope == CodeScope::Test,
+            )
+        };
+        assert_eq!(flags("src/lib.rs::plain"), (true, false));
+        assert_eq!(flags("src/lib.rs::_ignored"), (false, false));
+        assert_eq!(flags("src/lib.rs::allowed"), (false, false));
+        assert_eq!(flags("src/lib.rs::linted"), (true, false));
+        assert_eq!(flags("src/lib.rs::live::kept"), (true, false));
+        assert_eq!(flags("src/lib.rs::tests::helper"), (true, true));
+        assert_eq!(flags("src/lib.rs::tests::Fixture.build"), (true, true));
+        assert_eq!(flags("src/lib.rs::gated"), (true, true));
+        assert_eq!(flags("src/lib.rs::Holder.method"), (false, false));
+        assert_eq!(flags("tests/cli.rs::shared"), (true, true));
+        let class = |name: &str| {
+            model
+                .classes
+                .iter()
+                .find(|class| class.name == name)
+                .map(|class| (class.private, class.scope == CodeScope::Test))
+        };
+        assert_eq!(class("Expected"), Some((false, false)));
+        assert_eq!(class("Fixture"), Some((true, true)));
+    }
+
+    #[test]
+    fn portable_privacy_exempts_exports_and_protocol_hooks() {
+        let typescript = source_model(
+            &rule("typescript.unused_code"),
+            &input(
+                "typescript-v1",
+                &[(
+                    "src/a.spec.ts",
+                    "export function _a() {}\nexport const _b = () => 1;\nfunction _c() {}\nclass K { private d() {} }\n",
+                )],
+            ),
+        )
+        .unwrap();
+        let private = typescript
+            .functions
+            .iter()
+            .filter(|function| function.private)
+            .map(|function| (function.name.as_str(), function.scope == CodeScope::Test))
+            .collect::<Vec<_>>();
+        assert_eq!(private, [("_c", true), ("d", true)]);
+        let python = source_model(
+            &rule("python.unused_code"),
+            &input(
+                "python-v1",
+                &[(
+                    "app.py",
+                    "class Thing:\n    def _repr_markdown_(self): pass\n    def __eq__(self, o): pass\n    def _helper(self): pass\n",
+                )],
+            ),
+        )
+        .unwrap();
+        let private = python
+            .functions
+            .iter()
+            .map(|function| {
+                (
+                    function.name.as_str(),
+                    function.private,
+                    function.scope == CodeScope::Test,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            private,
+            [
+                ("_repr_markdown_", false, false),
+                ("__eq__", true, false),
+                ("_helper", true, false)
+            ]
         );
     }
 }

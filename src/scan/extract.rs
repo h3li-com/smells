@@ -1,7 +1,7 @@
 use super::{
     BTreeSet, Block, Expr, Facts, Fields, FnArg, Function, ImplItem, Input, Item, ItemEnum, ItemFn,
     ItemImpl, ItemStruct, ItemTrait, ItemType, Module, Pat, Policy, Report, Result, Signature,
-    Slots, Span, TraitItem, TypeFacts, Visit, location, syntax, visit,
+    Slots, Span, TraitItem, Type, TypeFacts, Visit, location, syntax, visit,
 };
 
 fn body_counts(source: &str, body: &Block) -> Result<(usize, usize), String> {
@@ -69,6 +69,19 @@ fn insert_type(
     }
 }
 
+/// The location of a declaration in `module`, recorded as test code when the module is.
+fn declared_at(
+    module: &Module,
+    span: proc_macro2::Span,
+    report: &mut Report,
+) -> crate::report::Location {
+    let declared = location(&module.path, span);
+    if module.test {
+        report.test_code.insert(declared.clone());
+    }
+    declared
+}
+
 fn struct_declaration(
     facts: &mut Facts,
     module: &Module,
@@ -77,7 +90,7 @@ fn struct_declaration(
     report: &mut Report,
 ) -> Result<(), String> {
     let key = format!("{}::{}", module.key, item.ident);
-    let loc = location(&module.path, item.ident.span());
+    let loc = declared_at(module, item.ident.span(), report);
     report.maximum(
         policy,
         "rust.type_fields",
@@ -130,7 +143,7 @@ fn enum_declaration(
     report: &mut Report,
 ) -> Result<(), String> {
     let key = format!("{}::{}", module.key, item.ident);
-    let loc = location(&module.path, item.ident.span());
+    let loc = declared_at(module, item.ident.span(), report);
     report.maximum(
         policy,
         "rust.enum_variants",
@@ -141,7 +154,7 @@ fn enum_declaration(
     );
     for variant in &item.variants {
         let name = format!("{key}::{}", variant.ident);
-        let variant_location = location(&module.path, variant.ident.span());
+        let variant_location = declared_at(module, variant.ident.span(), report);
         report.maximum(
             policy,
             "rust.type_fields",
@@ -196,7 +209,7 @@ fn type_alias(facts: &mut Facts, module: &Module, item: &ItemType) -> Result<(),
 
 fn trait_declaration(module: &Module, item: &ItemTrait, policy: &Policy, report: &mut Report) {
     let key = format!("{}::{}", module.key, item.ident);
-    let loc = location(&module.path, item.ident.span());
+    let loc = declared_at(module, item.ident.span(), report);
     report.maximum(
         policy,
         "rust.trait_functions",
@@ -225,6 +238,17 @@ fn declaration(
             trait_declaration(module, item, policy, report);
             Ok(())
         }
+        Item::Macro(item) => {
+            // Item macros such as `pin_project!` wrap ordinary declarations; other
+            // macro bodies, including `macro_rules!` rules, stay opaque.
+            let Ok(file) = syn::parse2::<syn::File>(item.mac.tokens.clone()) else {
+                return Ok(());
+            };
+            file.items
+                .iter()
+                .filter(|item| matches!(item, Item::Struct(_) | Item::Enum(_) | Item::Type(_)))
+                .try_for_each(|item| declaration(facts, module, item, policy, report))
+        }
         Item::Verbatim(_) => Err(format!("unsupported item syntax in {}", module.path)),
         _ => Ok(()),
     }
@@ -244,27 +268,24 @@ pub(super) fn declarations(
     Ok(())
 }
 
+/// Named functions declared inside a body, including methods of local `impl` and
+/// `trait` items. Local types own no module-level metrics, so their methods are
+/// measured as functions without an owner.
 struct Nested<'a> {
-    items: Vec<&'a ItemFn>,
+    items: Vec<(&'a Signature, &'a Block)>,
     unsupported: bool,
 }
 impl<'ast> Visit<'ast> for Nested<'ast> {
     fn visit_item_fn(&mut self, node: &'ast ItemFn) {
-        self.items.push(node);
+        self.items.push((&node.sig, &node.block));
     }
-    fn visit_item(&mut self, node: &'ast Item) {
-        if matches!(
-            node,
-            Item::Struct(_)
-                | Item::Enum(_)
-                | Item::Impl(_)
-                | Item::Type(_)
-                | Item::Mod(_)
-                | Item::Trait(_)
-        ) {
-            self.unsupported = true;
+    fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+        self.items.push((&node.sig, &node.block));
+    }
+    fn visit_trait_item_fn(&mut self, node: &'ast syn::TraitItemFn) {
+        if let Some(block) = &node.default {
+            self.items.push((&node.sig, block));
         }
-        visit::visit_item(self, node);
     }
     fn visit_expr(&mut self, node: &'ast Expr) {
         if matches!(node, Expr::Verbatim(_)) {
@@ -307,7 +328,7 @@ fn function(
     input: &Input,
     report: &mut Report,
 ) {
-    let loc = location(&module.path, signature.ident.span());
+    let loc = declared_at(module, signature.ident.span(), report);
     let Some((lines, comments)) = function_counts(module, body, input, report) else {
         return;
     };
@@ -380,6 +401,7 @@ fn function(
         owner: owner.clone(),
         lines,
         comments,
+        test: module.test,
     });
     if let Some(owner) = owner {
         facts
@@ -396,24 +418,22 @@ fn function(
         };
         nested.visit_block(block);
         if nested.unsupported {
-            report.error(format!(
-                "unsupported local declaration/verbatim syntax in {symbol}"
-            ));
+            report.error(format!("unsupported verbatim syntax in {symbol}"));
         }
         // Recursing one named function at a time avoids counting descendants twice.
-        for nested in nested.items {
+        for (sig, block) in nested.items {
             let nested_symbol = format!(
                 "{symbol}::{}@{}:{}",
-                nested.sig.ident,
-                nested.sig.ident.span().start().line,
-                nested.sig.ident.span().start().column
+                sig.ident,
+                sig.ident.span().start().line,
+                sig.ident.span().start().column
             );
             function(
                 facts,
                 module,
                 &nested_symbol,
-                &nested.sig,
-                Some(&nested.block),
+                sig,
+                Some(block),
                 None,
                 input,
                 report,
@@ -429,6 +449,14 @@ fn free_function(
     input: &Input,
     report: &mut Report,
 ) {
+    let test = crate::core::test_suite::rust_test_item(&item.attrs);
+    if test {
+        // Recorded first, so the function's own findings already see it as test code.
+        report
+            .test_code
+            .insert(location(&module.path, item.sig.ident.span()));
+    }
+    let recorded = facts.functions.len();
     function(
         facts,
         module,
@@ -439,6 +467,10 @@ fn free_function(
         input,
         report,
     );
+    // `function` records nothing when the body cannot be counted.
+    if let Some(function) = facts.functions.get_mut(recorded) {
+        function.test |= test;
+    }
 }
 
 fn trait_functions(
@@ -464,6 +496,19 @@ fn trait_functions(
     }
 }
 
+/// `impl<T> Trait for T` implements for every type, so it has no local owner.
+fn generic_parameter(item: &ItemImpl) -> bool {
+    let Type::Path(path) = &*item.self_ty else {
+        return false;
+    };
+    path.qself.is_none()
+        && path.path.segments.len() == 1
+        && item
+            .generics
+            .type_params()
+            .any(|param| param.ident == path.path.segments[0].ident)
+}
+
 fn impl_functions(
     facts: &mut Facts,
     module: &Module,
@@ -471,11 +516,15 @@ fn impl_functions(
     input: &Input,
     report: &mut Report,
 ) {
-    let owner = match facts.owner(&item.self_ty, &module.key) {
-        Ok(owner) => owner,
-        Err(error) => {
-            report.error(error);
-            None
+    let owner = if generic_parameter(item) {
+        None
+    } else {
+        match facts.owner(&item.self_ty, &module.key) {
+            Ok(owner) => owner,
+            Err(error) => {
+                report.error(error);
+                None
+            }
         }
     };
     let target = owner
@@ -598,6 +647,7 @@ mod tests {
             path: "src/lib.rs".into(),
             items: Vec::new(),
             imports: BTreeMap::new(),
+            test: false,
         };
         let unsupported = syn::Item::Verbatim("unsupported syntax".parse().unwrap());
 
@@ -608,7 +658,7 @@ mod tests {
     }
 
     #[test]
-    fn nested_visitor_marks_verbatim_expressions_and_local_types_as_unsupported() {
+    fn nested_visitor_marks_verbatim_expressions_and_measures_local_methods() {
         let expression = syn::Expr::Verbatim("unsupported expression".parse().unwrap());
         let mut nested = Nested {
             items: Vec::new(),
@@ -617,15 +667,30 @@ mod tests {
         nested.visit_expr(&expression);
         assert!(nested.unsupported);
 
-        let local_type: syn::Item = syn::parse_quote!(
+        let local_types: syn::Block = syn::parse_quote!({
             struct Local;
-        );
+            impl Local {
+                fn method(&self) {}
+            }
+            trait Shape {
+                fn area(&self) -> u8 {
+                    0
+                }
+                fn sides(&self) -> u8;
+            }
+        });
         let mut nested = Nested {
             items: Vec::new(),
             unsupported: false,
         };
-        nested.visit_item(&local_type);
-        assert!(nested.unsupported);
+        nested.visit_block(&local_types);
+        assert!(!nested.unsupported);
+        let names: Vec<_> = nested
+            .items
+            .iter()
+            .map(|(sig, _)| sig.ident.to_string())
+            .collect();
+        assert_eq!(names, ["method", "area"]);
 
         let local_function: syn::Item = syn::parse_quote!(
             fn local() {}

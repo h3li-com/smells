@@ -860,8 +860,8 @@ fn default_rust_scan_detects_compiler_and_type_shape_signals_without_evidence() 
 #[test]
 fn built_in_rust_model_uses_authored_tokens_not_literal_or_comment_text() {
     let workspace = Workspace::new(
-        "fn _unused<T>() -> &'static str { \"T if while case catch && || => _unused\" }\n\
-         // _unused and T are prose, not references\n",
+        "fn unused<T>() -> &'static str { \"T if while case catch && || => unused\" }\n\
+         // unused and T are prose, not references\n",
     );
     workspace.git(&["init", "-q"]);
     let output = workspace.command(&[
@@ -875,7 +875,7 @@ fn built_in_rust_model_uses_authored_tokens_not_literal_or_comment_text() {
     ]);
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     let data = report(&output);
-    let crap = finding(&data, "rust.function_crap", "src/lib.rs::_unused");
+    let crap = finding(&data, "rust.function_crap", "src/lib.rs::unused");
     assert_eq!(
         crap["evaluation"]["observed"],
         json!({"numerator": 2, "denominator": 1})
@@ -1197,7 +1197,25 @@ fn shared_modules_do_not_invent_distinct_clumps_or_duplicate_bodies() {
         .filter(|f| f["rule_id"] == "rust.duplicate_functions")
         .collect();
     assert_eq!(pairs.len(), 1);
-    assert_ne!(pairs[0]["location"], pairs[0]["evidence"]["other_location"]);
+    assert_ne!(pairs[0]["location"], pairs[0]["related_locations"][0]);
+}
+
+#[test]
+fn duplicate_test_functions_outside_test_modules_are_test_code() {
+    let workspace = Workspace::new(
+        "#[test] fn a(){let x=1;let p=x+1;let q=p*2;let r=q-3;assert_eq!(r,1);}\n#[test] fn b(){let x=1;let p=x+2;let q=p*2;let r=q-3;assert_eq!(r,3);}",
+    );
+    workspace.modify(
+        "/rules/rust.duplicate_functions/parameters/minimum_tokens",
+        json!(20),
+    );
+    let output = workspace.check();
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let data = report(&output);
+    let duplicate = finding(&data, "rust.duplicate_functions", "::a");
+    let measurement = finding_measurement(&data, duplicate);
+    assert_eq!(measurement["evidence"]["test_code"], true, "{measurement}");
+    assert_eq!(duplicate["blocking"], false);
 }
 
 #[test]
@@ -2255,14 +2273,52 @@ fn parser_unresolved_owner_and_missing_module_fail_closed() {
         "type A=B;type B=A;impl A{fn f(){}}",
         "mod a{pub use crate::b::*;}mod b{pub use crate::a::*;}impl a::Unknown{fn f(){}}",
         "mod a{pub struct A;}mod b{pub struct A;}mod facade{pub use crate::a::*;pub use crate::b::*;}mod consumer{use crate::facade::*;impl A{fn f(){}}}",
-        "fn f(){struct Local;}",
         "#[cfg(test)]struct A;#[cfg(not(test))]struct A;",
         "#[cfg(test)]mod a{}#[cfg(not(test))]mod a{}",
-        "#[cfg(test)]use external::A;#[cfg(not(test))]use another::A;",
+        "#[cfg(test)]use external::A;#[cfg(not(test))]use another::A;impl A{fn f(){}}",
     ] {
         let workspace = Workspace::new(source);
         assert_eq!(workspace.check().status.code(), Some(2), "{source}");
     }
+}
+
+#[test]
+fn cargo_target_roots_and_unused_same_name_imports_scan_cleanly() {
+    let workspace = Workspace::new(
+        "pub mod extract { pub trait FromRef<T> { fn from_ref(input: &T) -> Self; } }\n\
+         pub mod macros { #[macro_export] macro_rules! from_ref { () => {}; } pub use from_ref as FromRef; }\n\
+         pub use extract::FromRef;\n\
+         pub use macros::FromRef;\n",
+    );
+    workspace.source(
+        "tests/cli.rs",
+        "mod util;\n#[test]\nfn works() { util::helper(); }\n",
+    );
+    workspace.source("tests/util.rs", "pub fn helper() {}\n");
+    workspace.source(
+        "examples/demo/main.rs",
+        "mod args;\nfn main() { args::parse(); }\n",
+    );
+    workspace.source("examples/demo/args.rs", "pub fn parse() {}\n");
+    let output = workspace.check();
+    assert_eq!(report(&output)["errors"], json!([]));
+}
+
+#[test]
+fn foreign_generic_macro_and_local_impl_targets_scan_cleanly() {
+    let workspace = Workspace::new(
+        "pub trait Describe { fn describe(&self) -> u8; }\n\
+         impl<T> Describe for Box<T> { fn describe(&self) -> u8 { 1 } }\n\
+         impl<T, E> Describe for Result<T, E> { fn describe(&self) -> u8 { 2 } }\n\
+         impl<T: Clone> Describe for T { fn describe(&self) -> u8 { 3 } }\n\
+         pin_project! { pub struct Pinned<F> { #[pin] future: F } }\n\
+         impl<F> Pinned<F> { pub fn new(future: F) -> Self { Self { future } } }\n\
+         pub mod cookies { pub use cookie::Key; }\n\
+         pub mod tests { use crate::cookies::*; impl crate::Describe for Key { fn describe(&self) -> u8 { 4 } } }\n\
+         pub fn local() -> u8 { struct Local; impl Local { fn value(&self) -> u8 { 5 } } Local.value() }\n",
+    );
+    let output = workspace.check();
+    assert_eq!(report(&output)["errors"], json!([]));
 }
 
 #[test]
@@ -2297,7 +2353,28 @@ fn analysis_budget_exhaustion_cannot_return_success() {
         if pointer.ends_with("maximum_files") {
             workspace.source("src/other.rs", "fn other(){}");
         }
-        assert_eq!(workspace.check().status.code(), Some(2), "{pointer}");
+        if pointer.ends_with("maximum_group_combinations") {
+            // Identical field sets are enumerated once, so the budget needs two
+            // distinct populations to run out.
+            workspace.source(
+                "src/lib.rs",
+                &format!(
+                    "{}{}",
+                    include_str!("fixtures/catalog/lib.rs"),
+                    "pub struct D { pub w: i32, pub x: i32, pub y: i32, pub z: i32 }\n\
+                 pub struct E { pub w: i32, pub x: i32, pub y: i32, pub z: i32 }\n\
+                 pub struct F { pub w: i32, pub x: i32, pub y: i32, pub z: i32 }\n",
+                ),
+            );
+        }
+        let output = workspace.check();
+        assert_eq!(output.status.code(), Some(2), "{pointer}");
+        if pointer.ends_with("maximum_group_combinations") {
+            assert!(
+                String::from_utf8_lossy(&output.stdout)
+                    .contains("maximum_group_combinations budget exceeded")
+            );
+        }
     }
 }
 
@@ -2306,9 +2383,14 @@ fn all_authored_cfg_branches_are_explicitly_the_scan_scope() {
     let workspace = Workspace::new(
         "#[cfg(test)] fn test_only(a:i32,b:i32,c:i32,d:i32,e:i32,f:i32,g:i32,h:i32){}",
     );
+    // Inactive cfg branches are scanned; test-only code is reported but never blocks.
     let output = workspace.check();
-    assert_eq!(output.status.code(), Some(1));
-    assert_eq!(report(&output)["scope"], "authored_all_cfg");
+    assert_eq!(output.status.code(), Some(0));
+    let data = report(&output);
+    assert_eq!(data["scope"], "authored_all_cfg");
+    let test_only = finding(&data, "rust.function_arguments", "test_only");
+    assert_eq!(test_only["status"], "indicator");
+    assert_eq!(test_only["blocking"], false);
 }
 
 #[cfg(unix)]
@@ -3152,7 +3234,7 @@ fn git_reference_ratchet_gates_duplicate_code_by_shared_token_mass() {
     assert_eq!(grown["ratchet"]["regressed_blockers"], 1);
     assert_eq!(grown["attestation"]["exit_code"], 1);
 
-    // A newly pasted copy is a new blocker even though the legacy pair is unchanged.
+    // A newly pasted copy joins the family and raises its shared mass.
     let pasted = staged_ratchet_against_head(
         &workspace.path,
         &format!(
@@ -3160,9 +3242,11 @@ fn git_reference_ratchet_gates_duplicate_code_by_shared_token_mass() {
             duplicate_pair("", "")
         ),
     );
+    let family = finding(&pasted, "rust.duplicate_functions", "alpha");
+    assert_eq!(family["related_symbols"].as_array().unwrap().len(), 2);
     assert_eq!(pasted["ratchet"]["reference_blockers"], 1);
-    assert_eq!(pasted["ratchet"]["candidate_blockers"], 3);
-    assert_eq!(pasted["ratchet"]["regressed_blockers"], 2);
+    assert_eq!(pasted["ratchet"]["candidate_blockers"], 1);
+    assert_eq!(pasted["ratchet"]["regressed_blockers"], 1);
     assert_eq!(pasted["attestation"]["exit_code"], 1);
 }
 
@@ -3474,7 +3558,7 @@ fn git_reference_ratchet_preserves_existing_suppressions_and_fails_closed_on_ref
 }
 
 #[test]
-fn rust_test_suite_source_role_reports_test_functions_by_role_and_keeps_helpers_blocking() {
+fn rust_test_suite_source_role_reports_test_functions_by_role_and_helpers_as_test_code() {
     let long_body = "    let x = 1;\n".repeat(12);
     let test_file = format!(
         "#[test]\nfn long_integration_case() {{\n{long_body}}}\n\nfn long_helper() {{\n{long_body}}}\n"
@@ -3493,7 +3577,7 @@ fn rust_test_suite_source_role_reports_test_functions_by_role_and_keeps_helpers_
     );
 
     let output = workspace.check();
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.status.code(), Some(0));
     let data = report(&output);
     let test_finding = finding(&data, "rust.function_lines", "long_integration_case");
     assert_eq!(test_finding["status"], "reported_by_role");
@@ -3505,10 +3589,17 @@ fn rust_test_suite_source_role_reports_test_functions_by_role_and_keeps_helpers_
     );
     assert_eq!(test_finding["role_context"]["framework"], "cargo_test");
 
+    // A helper is not a test case, but it is still test code, so it never blocks.
     let helper_finding = finding(&data, "rust.function_lines", "long_helper");
-    assert_eq!(helper_finding["status"], "violation");
-    assert_eq!(helper_finding["blocking"], true);
+    assert_eq!(helper_finding["status"], "indicator");
+    assert_eq!(helper_finding["blocking"], false);
     assert!(helper_finding["role_context"].is_null());
+    assert!(
+        helper_finding["diagnostic"]["explanation"]
+            .as_str()
+            .unwrap()
+            .contains("test code")
+    );
 }
 
 fn doctor(workspace: &Workspace, extra: &[&str]) -> (Option<i32>, Value) {
@@ -3779,6 +3870,7 @@ fn doctor_reports_compact_smell_diagnostics_and_fails_closed_on_scan_errors() {
     assert_eq!(code, Some(2), "{data}");
     assert_eq!(data["status"], "unhealthy");
     assert_eq!(doctor_check(&data, "scan")["status"], "error");
+    assert_eq!(data["diagnostics"]["grade"], "Incomplete", "{data}");
 
     // A base commit with a parser error also fails closed with exit 2.
     git_stage_and_commit(&workspace.path, "broken base");

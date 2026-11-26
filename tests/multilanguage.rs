@@ -4972,12 +4972,10 @@ function broken( {
     .unwrap();
     let output = workspace.check_path();
     assert_eq!(output.status.code(), Some(2));
-    assert!(
-        report(&output)["errors"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|error| error == "parse error in broken.ts")
+    // One broken file is one located error, not one per incomplete rule.
+    assert_eq!(
+        report(&output)["errors"],
+        serde_json::json!(["parse error in broken.ts:4:1"])
     );
 
     let output = Command::new(env!("CARGO_BIN_EXE_smells"))
@@ -5039,7 +5037,9 @@ export function names(limit: number) {
             .as_array()
             .unwrap()
             .iter()
-            .any(|error| error == "parse error in broken.ts")
+            .any(|error| error
+                .as_str()
+                .is_some_and(|error| error.starts_with("parse error in broken.ts:")))
     );
 }
 
@@ -5079,7 +5079,9 @@ export async function lazy(): Promise<Rows> {
             .as_array()
             .unwrap()
             .iter()
-            .any(|error| error == "parse error in broken.ts")
+            .any(|error| error
+                .as_str()
+                .is_some_and(|error| error.starts_with("parse error in broken.ts:")))
     );
 }
 
@@ -5114,7 +5116,9 @@ export const surrogates = "x" + String.raw`\u-10179?\u-8576? After}`;
             .as_array()
             .unwrap()
             .iter()
-            .any(|error| error == "parse error in broken.ts")
+            .any(|error| error
+                .as_str()
+                .is_some_and(|error| error.starts_with("parse error in broken.ts:")))
     );
 }
 
@@ -5146,7 +5150,9 @@ fn typescript_variance_annotations_parse_without_hiding_other_errors() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|error| error == "parse error in broken.ts")
+            .any(|error| error
+                .as_str()
+                .is_some_and(|error| error.starts_with("parse error in broken.ts:")))
     );
 }
 
@@ -5730,7 +5736,7 @@ fn staged_provider_evidence_cannot_be_replaced_by_unstaged_bytes() {
 }
 
 #[test]
-fn python_test_suite_source_role_reports_test_cases_by_role_and_keeps_helpers_blocking() {
+fn python_test_suite_source_role_reports_test_cases_by_role_and_helpers_as_test_code() {
     let mut policy: Value =
         serde_json::from_str(include_str!("../examples/python-quality-policy.json")).unwrap();
     policy["rules"]["python.function_lines"]["parameters"]["maximum"] = json!(5);
@@ -5749,7 +5755,7 @@ fn python_test_suite_source_role_reports_test_cases_by_role_and_keeps_helpers_bl
     workspace.commit("initial");
 
     let output = workspace.check_path();
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.status.code(), Some(0));
     let data = report(&output);
     let findings = data["findings"].as_array().unwrap();
     let test_case = findings
@@ -5766,14 +5772,20 @@ fn python_test_suite_source_role_reports_test_cases_by_role_and_keeps_helpers_bl
         .iter()
         .find(|f| f["rule_id"] == "python.function_lines" && f["symbol"] == "build_fixture")
         .expect("build_fixture finding");
-    assert_eq!(helper["status"], "violation");
-    assert_eq!(helper["blocking"], true);
+    // A helper is not a test case, but it is still test code, so it never blocks.
+    assert_eq!(helper["status"], "indicator");
+    assert_eq!(helper["blocking"], false);
     assert!(helper["role_context"].is_null());
+    assert!(
+        helper["diagnostic"]["explanation"]
+            .as_str()
+            .unwrap()
+            .contains("test code")
+    );
 }
 
 #[test]
-fn typescript_test_suite_source_role_reports_describe_and_it_callbacks_and_keeps_helpers_blocking()
-{
+fn typescript_test_suite_source_role_reports_describe_and_it_callbacks_and_helpers_as_test_code() {
     let mut policy: Value =
         serde_json::from_str(include_str!("../examples/typescript-quality-policy.json")).unwrap();
     policy["rules"]["typescript.function_lines"]["parameters"]["maximum"] = json!(5);
@@ -5792,7 +5804,7 @@ fn typescript_test_suite_source_role_reports_describe_and_it_callbacks_and_keeps
     workspace.commit("initial");
 
     let output = workspace.check_path();
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.status.code(), Some(0));
     let data = report(&output);
     let findings: Vec<&Value> = data["findings"]
         .as_array()
@@ -5825,7 +5837,108 @@ fn typescript_test_suite_source_role_reports_describe_and_it_callbacks_and_keeps
         .iter()
         .find(|f| f["symbol"] == "renderSidebar")
         .expect("renderSidebar helper finding");
-    assert_eq!(helper["status"], "violation");
-    assert_eq!(helper["blocking"], true);
+    // A helper is not a test case, but it is still test code, so it never blocks.
+    assert_eq!(helper["status"], "indicator");
+    assert_eq!(helper["blocking"], false);
     assert!(helper["role_context"].is_null());
+    assert!(
+        helper["diagnostic"]["explanation"]
+            .as_str()
+            .unwrap()
+            .contains("test code")
+    );
+}
+
+#[test]
+fn python_keyword_only_defaults_do_not_count_as_arguments() {
+    let workspace = Workspace::new(
+        "app.py",
+        concat!(
+            "def configure(a, b, *, c=1, d=2, e=3):\n    return a\n\n",
+            "def spread(a, *args, b=1, c, d=2):\n    return a\n\n",
+            "def required(a, b, *, c, d):\n    return a\n\n",
+            "def positional(a, b=1, *, c=2):\n    return a\n",
+        ),
+        &portable_policy("python"),
+    );
+    let data = report(&workspace.check_path());
+    let observed = |name: &str| {
+        measurements(&data)
+            .find(|measurement| {
+                measurement["rule_id"] == "python.function_arguments"
+                    && measurement["symbol"] == name
+            })
+            .unwrap_or_else(|| panic!("missing {name}"))["evaluation"]["observed"]
+            .clone()
+    };
+    assert_eq!(observed("configure"), 2);
+    assert_eq!(observed("spread"), 3);
+    assert_eq!(observed("required"), 4);
+    // A positional default before `*` still counts.
+    assert_eq!(observed("positional"), 2);
+}
+
+#[test]
+fn unused_test_declarations_and_test_only_duplicates_never_block() {
+    let policy: Value =
+        serde_json::from_str(include_str!("../examples/python-quality-policy.json")).unwrap();
+    let body = "    total = 0\n    for item in items:\n        if item > limit and item % 3 == 0:\n            total += item * 2 + offset\n        elif item < -limit:\n            total -= item * 3 - offset\n        else:\n            total = max(total, item) + min(limit, offset)\n    return total + offset * limit\n";
+    let workspace = Workspace::new("app.py", "def _orphan():\n    return 1\n", &policy);
+    workspace.source(
+        "tests/test_app.py",
+        &format!(
+            "def _fixture():\n    return 1\n\nclass Thing:\n    def _repr_markdown_(self):\n        return ''\n\ndef first(items, limit, offset):\n{body}\ndef second(items, limit, offset):\n{body}"
+        ),
+    );
+    workspace.initialize_git();
+    let data = report(&workspace.check_path());
+    let unused = |path: &str| {
+        data["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|finding| {
+                finding["rule_id"] == "python.unused_code"
+                    && finding["location"]["path"] == path
+                    && finding["evaluation"]["matched"] == true
+            })
+            .unwrap_or_else(|| panic!("missing unused_code in {path}: {data}"))
+    };
+    assert_eq!(unused("app.py")["blocking"], true);
+    let test = unused("tests/test_app.py");
+    assert_eq!(test["blocking"], false, "{test}");
+    assert_eq!(test["status"], "indicator");
+    let symbols =
+        finding_measurement(&data, test)["evidence"]["provider_evidence"]["symbols"].clone();
+    assert_eq!(symbols, json!(["tests/test_app.py::_fixture"]), "{test}");
+    let duplicate = data["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| {
+            finding["rule_id"] == "python.duplicate_functions"
+                && finding["evaluation"]["matched"] == true
+        })
+        .unwrap_or_else(|| panic!("missing duplicate: {data}"));
+    assert_eq!(duplicate["blocking"], false, "{duplicate}");
+    assert_eq!(duplicate["status"], "indicator");
+}
+
+#[test]
+fn exported_underscore_typescript_declarations_are_public() {
+    let policy: Value =
+        serde_json::from_str(include_str!("../examples/typescript-quality-policy.json")).unwrap();
+    let workspace = Workspace::new(
+        "src/index.ts",
+        "export function _union(): number { return 1; }\nexport const _pick = (): number => 2;\nfunction _orphan(): number { return 3; }\n",
+        &policy,
+    );
+    workspace.initialize_git();
+    let data = report(&workspace.check_path());
+    let finding = matched_rule(&data, "typescript.unused_code");
+    assert_eq!(
+        finding_measurement(&data, finding)["evidence"]["provider_evidence"]["symbols"],
+        json!(["src/index.ts::_orphan"]),
+        "{finding}"
+    );
 }

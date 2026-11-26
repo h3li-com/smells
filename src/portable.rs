@@ -47,6 +47,8 @@ struct FunctionFact {
     owner: Option<String>,
     location: Location,
     parameters: Vec<(String, String)>,
+    /// Python keyword-only parameters with defaults, excluded from `function_arguments`.
+    keyword_defaults: usize,
     lines: usize,
     comments: usize,
     tokens: Vec<String>,
@@ -190,16 +192,13 @@ fn parse_source(
             .ok_or_else(|| at_start(format!("parser cancelled for {path}")))?
     };
     if crate::typescript_compat::has_syntax_error(&tree) {
-        let point = crate::typescript_compat::first_syntax_error(tree.root_node()).map_or_else(
-            || tree.root_node().start_position(),
-            |node| node.start_position(),
-        );
+        let (line, column) = crate::typescript_compat::syntax_error_position(&tree);
         return Err(SourceError {
-            message: format!("parse error in {path}"),
+            message: crate::typescript_compat::parse_error_message(path, &tree),
             location: Location {
                 path: path.to_string(),
-                line: point.row + 1,
-                column: point.column + 1,
+                line,
+                column,
             },
         });
     }
@@ -278,7 +277,7 @@ mod tests {
 
         let broken = "export const ok = 1;\nexport function broken( {";
         let error = parse_source("broken.ts", broken, &registry, &mut parsers).unwrap_err();
-        assert_eq!(error.message, "parse error in broken.ts");
+        assert_eq!(error.message, "parse error in broken.ts:2:1");
         assert_eq!(error.location.path, "broken.ts");
         assert_eq!(error.location.line, 2);
         assert_eq!(error.location.column, 1);

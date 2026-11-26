@@ -1,6 +1,6 @@
 use super::{
     common::observation,
-    model::{FunctionFact, SourceModel},
+    model::{CodeScope, FunctionFact, SourceModel},
 };
 use crate::{
     core::model::Input, coverage::LineCoverage, evidence::Observation, policy::Rule,
@@ -492,31 +492,36 @@ pub(super) fn unused_code(model: &SourceModel) -> Vec<Observation> {
         .iter()
         .filter(|function| !function.entry_point)
         .filter(|function| unreferenced(model, function.private, &function.name))
-        .map(|function| (&function.location, &function.symbol));
+        .map(|function| (&function.location, &function.symbol, function.scope));
     let classes = model
         .classes
         .iter()
         .filter(|class| unreferenced(model, class.private, &class.name))
-        .map(|class| (&class.location, &class.symbol));
-    let mut by_file: BTreeMap<String, (Location, Vec<String>)> = BTreeMap::new();
-    for (location, symbol) in functions.chain(classes) {
+        .map(|class| (&class.location, &class.symbol, class.scope));
+    // Test declarations group apart from production ones, so a file that mixes both
+    // (an inline `#[cfg(test)]` module) keeps a blocking production finding.
+    let mut by_file: BTreeMap<(String, CodeScope), (Location, Vec<String>)> = BTreeMap::new();
+    for (location, symbol, scope) in functions.chain(classes) {
         by_file
-            .entry(location.path.clone())
+            .entry((location.path.clone(), scope))
             .or_insert_with(|| (location.clone(), Vec::new()))
             .1
             .push(symbol.clone());
     }
     by_file
         .into_iter()
-        .map(|(path, (location, symbols))| {
+        .map(|((path, scope), (location, symbols))| {
+            let test_code = scope == CodeScope::Test;
+            let kind = if test_code { "test" } else { "private" };
             observation(
-                format!("{path}::unused-private-declarations"),
+                format!("{path}::unused-{kind}-declarations"),
                 location,
                 [("findings", symbols.len() as u64)],
                 json!({
                     "collector": "authored_private_declaration_references_v2",
                     "symbols": symbols,
-                    "scope": "private declarations with no corpus, attribute-path, or harness reference",
+                    "test_code": test_code,
+                    "scope": "private declarations with no corpus, attribute-path, or harness reference; Rust `_` names, dead_code allowances, exports, and protocol hooks are not private",
                 }),
             )
         })
@@ -607,6 +612,7 @@ mod tests {
             private: false,
             receiver: false,
             entry_point: false,
+            scope: CodeScope::Production,
         }
     }
 
@@ -623,6 +629,7 @@ mod tests {
             fields: Vec::new(),
             methods,
             range: (0, 0),
+            scope: CodeScope::Production,
         }
     }
 

@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use crate::report::Location;
 
 /// Contract version string for supported `test_suite` frameworks.
@@ -123,6 +125,79 @@ fn line_has_rust_test_attr(line: &str) -> bool {
         || line.contains("#[rstest(")
 }
 
+/// Appended to a finding whose every declaration is test code; such findings never block.
+pub(crate) const TEST_CODE_ADVISORY: &str = "Every declaration involved is test code, so this is reported as an indicator and does not block.";
+
+/// Whether a path follows a common test-code layout: a `tests`, `test`, `__tests__`,
+/// or `benches` directory, a pytest module (`test_*.py`, `*_test.py`, `conftest.py`),
+/// or a JavaScript test file (`*.test.*`, `*.spec.*`). Path conventions only; a test
+/// helper outside these layouts stays production code.
+pub(crate) fn conventional_test_path(path: &str) -> bool {
+    let path = Path::new(path);
+    let in_test_directory = path.parent().is_some_and(|parent| {
+        parent.components().any(|component| {
+            matches!(
+                component.as_os_str().to_str(),
+                Some("tests" | "test" | "__tests__" | "benches")
+            )
+        })
+    });
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    let stem = name.split('.').next().unwrap_or_default();
+    in_test_directory
+        || name == "conftest.py"
+        || (path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("py"))
+            && (stem.starts_with("test_") || stem.ends_with("_test")))
+        || name.contains(".test.")
+        || name.contains(".spec.")
+}
+
+/// Whether Rust attributes make an item test code: a test-only `cfg`, or a test
+/// attribute such as `#[test]`, `#[tokio::test]` or `#[rstest]`.
+pub(crate) fn rust_test_item(attributes: &[syn::Attribute]) -> bool {
+    rust_cfg_test(attributes)
+        || attributes.iter().any(|attribute| {
+            attribute
+                .path()
+                .segments
+                .last()
+                .is_some_and(|segment| segment.ident == "test" || segment.ident == "rstest")
+        })
+}
+
+/// Whether Rust attributes compile an item only for tests: `#[cfg(test)]` or a `cfg`
+/// conjunction that names `test` without negating it.
+pub(crate) fn rust_cfg_test(attributes: &[syn::Attribute]) -> bool {
+    attributes.iter().any(|attribute| {
+        let syn::Meta::List(list) = &attribute.meta else {
+            return false;
+        };
+        if !list.path.is_ident("cfg") {
+            return false;
+        }
+        let words = list
+            .tokens
+            .clone()
+            .into_iter()
+            .flat_map(|token| match token {
+                proc_macro2::TokenTree::Group(group) => group.stream().into_iter().collect(),
+                token => vec![token],
+            })
+            .filter_map(|token| match token {
+                proc_macro2::TokenTree::Ident(ident) => Some(ident.to_string()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        words.iter().any(|word| word == "test")
+            && !words.iter().any(|word| word == "not" || word == "any")
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -132,6 +207,73 @@ mod tests {
             path: "test_file".into(),
             line,
             column: 1,
+        }
+    }
+
+    #[test]
+    fn conventional_test_paths_cover_each_language_layout() {
+        for path in [
+            "tests/cli.rs",
+            "crates/core/benches/speed.rs",
+            "src/__tests__/a.ts",
+            "pkg/test/helpers.py",
+            "test_api.py",
+            "pkg/api_test.py",
+            "pkg/conftest.py",
+            "src/a.test.ts",
+            "src/a.spec.tsx",
+        ] {
+            assert!(conventional_test_path(path), "{path} is test code");
+        }
+        for path in [
+            "src/lib.rs",
+            "src/testing.py",
+            "src/latest.ts",
+            "contest.py",
+            "src/attest_x.py",
+        ] {
+            assert!(!conventional_test_path(path), "{path} is production code");
+        }
+    }
+
+    #[test]
+    fn rust_cfg_test_accepts_test_only_cfgs() {
+        let attributes = |source: &str| {
+            syn::parse_str::<syn::ItemMod>(source)
+                .expect("module")
+                .attrs
+        };
+        assert!(rust_cfg_test(&attributes("#[cfg(test)] mod m {}")));
+        assert!(rust_cfg_test(&attributes(
+            "#[cfg(all(test, feature = \"x\"))] mod m {}"
+        )));
+        assert!(!rust_cfg_test(&attributes("#[cfg(not(test))] mod m {}")));
+        assert!(!rust_cfg_test(&attributes(
+            "#[cfg(any(test, feature = \"x\"))] mod m {}"
+        )));
+        assert!(!rust_cfg_test(&attributes(
+            "#[cfg(feature = \"test\")] mod m {}"
+        )));
+        assert!(!rust_cfg_test(&attributes("#[allow(test)] mod m {}")));
+    }
+
+    #[test]
+    fn rust_test_item_accepts_test_attributes() {
+        let attributes = |source: &str| syn::parse_str::<syn::ItemFn>(source).expect("fn").attrs;
+        for source in [
+            "#[test] fn t() {}",
+            "#[tokio::test] async fn t() {}",
+            "#[rstest] fn t() {}",
+            "#[cfg(test)] fn t() {}",
+        ] {
+            assert!(rust_test_item(&attributes(source)), "{source}");
+        }
+        for source in [
+            "fn t() {}",
+            "#[inline] fn t() {}",
+            "#[cfg(not(test))] fn t() {}",
+        ] {
+            assert!(!rust_test_item(&attributes(source)), "{source}");
         }
     }
 

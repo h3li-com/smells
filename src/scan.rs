@@ -28,6 +28,8 @@ pub(crate) struct Module {
     pub path: String,
     pub items: Vec<Item>,
     pub imports: BTreeMap<String, Vec<String>>,
+    /// Compiled only for tests: a test target root or a `#[cfg(test)]` module chain.
+    pub test: bool,
 }
 
 pub(crate) struct TypeFacts {
@@ -49,6 +51,8 @@ pub(crate) struct Function {
     pub owner: Option<String>,
     pub lines: usize,
     pub comments: usize,
+    /// Declared in a test module.
+    pub test: bool,
 }
 
 pub(crate) struct Slots {
@@ -72,6 +76,13 @@ pub(crate) fn location(path: &str, span: Span) -> Location {
         line: span.start().line,
         column: span.start().column + 1,
     }
+}
+
+/// `parse error in <path>:<line>:<column>: <reason>`, shared by every Rust
+/// scanner seam so one broken file reports one message.
+pub(crate) fn parse_error_message(path: &str, error: &syn::Error) -> String {
+    let at = location(path, error.span());
+    format!("parse error in {path}:{}:{}: {error}", at.line, at.column)
 }
 
 pub(crate) fn syntax<T: ToTokens>(value: &T) -> String {

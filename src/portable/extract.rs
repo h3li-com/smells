@@ -143,6 +143,28 @@ fn parameters(node: Node<'_>, source: &str) -> Vec<(String, String)> {
     result
 }
 
+/// Python keyword-only parameters with defaults: those after a bare `*` or `*args`.
+/// They are named at every call site and optional, so they are configuration rather
+/// than positional burden, and `function_arguments` does not count them.
+fn keyword_defaults(node: Node<'_>) -> usize {
+    let Some(parameters) = node.child_by_field_name("parameters") else {
+        return 0;
+    };
+    let mut cursor = parameters.walk();
+    parameters
+        .named_children(&mut cursor)
+        .skip_while(|parameter| {
+            !matches!(parameter.kind(), "keyword_separator" | "list_splat_pattern")
+        })
+        .filter(|parameter| {
+            matches!(
+                parameter.kind(),
+                "default_parameter" | "typed_default_parameter"
+            )
+        })
+        .count()
+}
+
 fn receiver_field(node: Node<'_>, source: &str, language: &str) -> bool {
     let kind = if language == "python" {
         "attribute"
@@ -304,6 +326,7 @@ struct ActiveFunction {
     symbol: String,
     location: Location,
     parameters: Vec<(String, String)>,
+    keyword_defaults: usize,
     body_range: Option<(usize, usize)>,
     metrics: FunctionBodyMetrics,
     metric_needs: RuleNeeds,
@@ -421,6 +444,11 @@ fn active_function(
         symbol,
         location: location(path, node),
         parameters: declared_parameters,
+        keyword_defaults: if metric_needs.parameters {
+            keyword_defaults(node)
+        } else {
+            0
+        },
         body_range,
         metrics: FunctionBodyMetrics::default(),
         metric_needs,
@@ -803,6 +831,7 @@ fn exit_node(node: Node<'_>, state: &mut ExtractionState) {
                     owner: function.owner,
                     location: function.location,
                     parameters: function.parameters,
+                    keyword_defaults: function.keyword_defaults,
                     lines,
                     comments,
                     tokens: function.metrics.tokens,

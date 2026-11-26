@@ -24,7 +24,7 @@ An exact zero-argument Alembic `upgrade` or `downgrade` Declaration Role in a hi
 <a id="python-function-arguments"></a>
 ### `python.function_arguments@1`
 
-Match when declared parameter nodes are greater than `maximum` (default 7). A method receiver is a declared parameter and counts once.
+Match when declared parameter nodes are greater than `maximum` (default 7). A method receiver is a declared parameter and counts once. Keyword-only parameters that have a default (after `*` or `*args`) are not counted: callers must name them and may omit them, so they do not lengthen a call. Keyword-only parameters without a default still count.
 
 <a id="python-class-fields"></a>
 ### `python.class_fields@1`
@@ -54,7 +54,7 @@ Count ordinary Tree-sitter comment rows in the function minus rows also occupied
 <a id="python-duplicate-functions"></a>
 ### `python.duplicate_functions@1`
 
-Normalize Tree-sitter leaf tokens in each body: identifier spellings become `identifier`, literal values become literal-kind tags, comments are removed, and keywords/operators/delimiters retain grammar kinds. Build a multiset of consecutive four-token windows. Both bodies must have at least `minimum_tokens` (default 20); multiset Jaccard must be at least `minimum_similarity_basis_points` (default 8200). Overlapping nested bodies in one file are not compared. Expand multiset occurrences into globally document-frequency-ordered features, then apply exact Jaccard prefix, size-ratio, and positional-overlap filters. These are necessary conditions, so they cannot remove a threshold-matching pair. `maximum_pairs` counts the remaining unique pairs whose full multiset intersection/union is evaluated; exhaustion errors rather than returning a truncated success.
+Normalize Tree-sitter leaf tokens in each body: identifier spellings become `identifier`, literal values become literal-kind tags, comments are removed, and keywords/operators/delimiters retain grammar kinds. Build a multiset of consecutive four-token windows. Both bodies must have at least `minimum_tokens` (default 20); multiset Jaccard must be at least `minimum_similarity_basis_points` (default 8200). Overlapping nested bodies in one file are not compared. Expand multiset occurrences into globally document-frequency-ordered features, then apply exact Jaccard prefix, size-ratio, and positional-overlap filters. These are necessary conditions, so they cannot remove a threshold-matching pair. `maximum_pairs` counts the remaining unique pairs whose full multiset intersection/union is evaluated; exhaustion errors rather than returning a truncated success. Passing pairs join into connected families, and each family is one finding (see `docs/report-interface.md`).
 
 <a id="python-data-class"></a>
 ### `python.data_class@1`
@@ -96,7 +96,7 @@ Calculate cyclomatic complexity on the syntax tree and a conservative zero-cover
 
 <a id="python-unused-code"></a>
 ### `python.unused_code@1` — built in
-Count single-underscore private function/class declarations with no second identifier occurrence in the captured corpus. Match findings greater than `maximum_findings`; public and dynamic reachability are outside the built-in scope.
+Count single-underscore private function/class declarations with no second identifier occurrence in the captured corpus. Match findings greater than `maximum_findings`; public and dynamic reachability are outside the built-in scope. Single-underscore protocol hooks such as `_missing_` or `_repr_markdown_` are called by a framework and are not private. Declarations under a conventional test path are grouped as `<path>::unused-test-declarations` and are a non-blocking indicator.
 
 <a id="python-unused-type-parameters"></a>
 ### `python.unused_type_parameters@1` — built in

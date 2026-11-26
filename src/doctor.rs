@@ -161,6 +161,9 @@ pub(crate) fn health_score(
     100u8.saturating_sub(u8::try_from(blocking_penalty + review_penalty).unwrap_or(u8::MAX))
 }
 
+/// The grade of a scan that reported errors, whatever its score.
+pub(crate) const INCOMPLETE_GRADE: &str = "Incomplete";
+
 pub(crate) fn health_grade(score: u8) -> &'static str {
     if score >= 75 {
         "Great"
@@ -667,7 +670,12 @@ pub(crate) fn diagnostics_from_report(report: &Report, view: CrapView) -> Diagno
     let score = health_score(scanned_files, blocking_findings, review_signals);
     Diagnostics {
         score,
-        grade: health_grade(score),
+        // A scan with errors skipped code, so no score can vouch for the whole tree.
+        grade: if report.errors.is_empty() {
+            health_grade(score)
+        } else {
+            INCOMPLETE_GRADE
+        },
         scanned_files,
         blocking_findings,
         ignored_findings,

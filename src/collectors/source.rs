@@ -394,7 +394,7 @@ pub(super) fn primitive_slots(rule: &Rule, model: &SourceModel) -> Vec<Observati
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::collectors::model::{ClassFact, FieldFact};
+    use crate::collectors::model::{ClassFact, CodeScope, FieldFact};
     use std::sync::Arc;
 
     fn rule(id: &str) -> Rule {
@@ -597,6 +597,7 @@ mod tests {
             bases: Vec::new(),
             interface: false,
             private: false,
+            scope: CodeScope::Production,
             fields: vec![
                 FieldFact {
                     name: "secret".into(),

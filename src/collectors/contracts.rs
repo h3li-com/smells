@@ -371,7 +371,7 @@ pub(super) fn library_capabilities(
 mod tests {
     use super::*;
     use crate::{
-        collectors::model::{FieldFact, FunctionFact},
+        collectors::model::{CodeScope, FieldFact, FunctionFact},
         core::model::Input,
         report::Location,
     };
@@ -399,6 +399,7 @@ mod tests {
             private: false,
             receiver: false,
             entry_point: false,
+            scope: CodeScope::Production,
         }
     }
 
@@ -415,6 +416,7 @@ mod tests {
             fields: Vec::new(),
             methods: Vec::new(),
             range: (0, 0),
+            scope: CodeScope::Production,
         }
     }
 

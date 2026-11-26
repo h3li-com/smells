@@ -101,6 +101,44 @@ fn module_file(
     }
 }
 
+/// Whether `path` is a Cargo target root that is not named `lib.rs` or
+/// `main.rs`: a file directly in a package's `tests`, `examples` or `benches`
+/// directory, in `src/bin`, or a package's `build.rs`. Each is its own crate,
+/// so its `mod` declarations resolve next to it.
+fn cargo_target_root(path: &str) -> bool {
+    let path = Path::new(path);
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    let ancestors_outside_src = || {
+        parent
+            .components()
+            .all(|component| component.as_os_str() != "src")
+    };
+    match (
+        path.file_name().and_then(|name| name.to_str()),
+        parent.file_name().and_then(|name| name.to_str()),
+    ) {
+        (Some("build.rs"), _) | (_, Some("tests" | "examples" | "benches")) => {
+            ancestors_outside_src()
+        }
+        (_, Some("bin")) => parent
+            .parent()
+            .and_then(Path::file_name)
+            .is_some_and(|name| name == "src"),
+        _ => false,
+    }
+}
+
+/// The directory that holds the modules a crate root declares.
+fn root_base(path: &str) -> PathBuf {
+    if cargo_target_root(path) {
+        Path::new(path).parent().unwrap_or(Path::new("")).into()
+    } else {
+        file_base(path)
+    }
+}
+
 fn file_base(path: &str) -> PathBuf {
     let path = Path::new(path);
     let parent = path.parent().unwrap_or(Path::new(""));
@@ -151,7 +189,10 @@ fn imports(
         }
         UseTree::Group(group) => import_group(group, prefix, result),
         UseTree::Name(name) => import_name(name, prefix, result),
-        UseTree::Rename(rename) => import_rename(rename, prefix, result),
+        UseTree::Rename(rename) => {
+            import_rename(rename, prefix, result);
+            Ok(())
+        }
         UseTree::Glob(_) => {
             result.insert(format!("*{}", result.len()), prefix.to_vec());
             Ok(())
@@ -170,17 +211,43 @@ fn import_group(
         .try_for_each(|tree| imports(tree, prefix, result))
 }
 
-fn insert_import(
-    alias: String,
-    path: Vec<String>,
-    result: &mut BTreeMap<String, Vec<String>>,
-) -> Result<(), String> {
+/// The binding recorded for a name that two imports bring in, such as
+/// `pub use self::from_ref::FromRef;` and `pub use axum_macros::FromRef;`.
+/// Rust allows that when the items live in different namespaces (a trait and a
+/// derive macro), which this scan cannot tell apart, so only resolving
+/// through the name is an error.
+const AMBIGUOUS_IMPORT: &str = "\0ambiguous";
+const EXTERNAL_CRATE: &str = "\0extern";
+
+fn insert_import(alias: String, mut path: Vec<String>, result: &mut BTreeMap<String, Vec<String>>) {
+    // `pub use http;` re-exports an external crate under its own name. Rooting it
+    // outside the crate keeps `http::…` and `crate::http::…` external instead of
+    // resolving the binding to itself.
+    if path.len() == 1 && path[0] == alias {
+        path.insert(0, EXTERNAL_CRATE.into());
+    }
     match result.entry(alias) {
-        Entry::Occupied(entry) => Err(format!("ambiguous import binding: {}", entry.key())),
+        Entry::Occupied(mut entry) => {
+            if *entry.get() != path {
+                entry.insert(vec![AMBIGUOUS_IMPORT.into()]);
+            }
+        }
         Entry::Vacant(entry) => {
             entry.insert(path);
-            Ok(())
         }
+    }
+}
+
+/// The path an import binds `name` to, or an error when two imports bind it.
+fn imported_path<'a>(
+    imports: &'a BTreeMap<String, Vec<String>>,
+    name: &str,
+) -> Result<Option<&'a Vec<String>>, String> {
+    match imports.get(name) {
+        Some(path) if path.first().is_some_and(|first| first == AMBIGUOUS_IMPORT) => {
+            Err(format!("ambiguous import binding: {name}"))
+        }
+        path => Ok(path),
     }
 }
 
@@ -197,23 +264,22 @@ fn import_name(
         path.push(name.clone());
         name
     };
-    insert_import(alias, path, result)
+    insert_import(alias, path, result);
+    Ok(())
 }
 
 fn import_rename(
     rename: &UseRename,
     prefix: &[String],
     result: &mut BTreeMap<String, Vec<String>>,
-) -> Result<(), String> {
+) {
     let mut path = prefix.to_vec();
     if rename.ident != "self" {
         path.push(rename.ident.to_string());
     }
     let alias = rename.rename.to_string();
-    if alias == "_" {
-        Ok(())
-    } else {
-        insert_import(alias, path, result)
+    if alias != "_" {
+        insert_import(alias, path, result);
     }
 }
 
@@ -222,6 +288,8 @@ struct ModuleWalker<'a> {
     parsed: &'a BTreeMap<String, syn::File>,
     stack: Vec<String>,
     result: &'a mut BTreeMap<String, Module>,
+    /// Inside a test target root or a `#[cfg(test)]` module.
+    test: bool,
 }
 
 impl ModuleWalker<'_> {
@@ -242,6 +310,7 @@ impl ModuleWalker<'_> {
             path: path.into(),
             items: items.to_vec(),
             imports: Self::bindings(items)?,
+            test: self.test,
         };
         if self.result.insert(key.into(), module).is_some() {
             Err(format!(
@@ -253,6 +322,21 @@ impl ModuleWalker<'_> {
     }
 
     fn visit_child(
+        &mut self,
+        module: &ItemMod,
+        path: &str,
+        key: &str,
+        base: &Path,
+        attribute_base: &Path,
+    ) -> Result<(), String> {
+        let enclosing_test = self.test;
+        self.test |= crate::core::test_suite::rust_cfg_test(&module.attrs);
+        let result = self.visit_child_items(module, path, key, base, attribute_base);
+        self.test = enclosing_test;
+        result
+    }
+
+    fn visit_child_items(
         &mut self,
         module: &ItemMod,
         path: &str,
@@ -384,7 +468,7 @@ impl Facts {
             "self" => (module.to_string(), 1),
             "super" => Self::super_prefix(path, module, &context.root)?,
             _ => {
-                if let Some(import) = context.imports.get(first) {
+                if let Some(import) = imported_path(&context.imports, first)? {
                     let mut next = import.clone();
                     next.extend_from_slice(&path[1..]);
                     return self
@@ -439,7 +523,12 @@ impl Facts {
     ) -> Result<(OwnerLookup, String), String> {
         let mut parent = prefix.to_string();
         for (index, part) in remaining.iter().enumerate() {
-            if let Some(import) = self.modules.get(&parent).and_then(|m| m.imports.get(part)) {
+            let imports = self.modules.get(&parent).map(|module| &module.imports);
+            if let Some(import) = imports
+                .map(|imports| imported_path(imports, part))
+                .transpose()?
+                .flatten()
+            {
                 let mut next = import.clone();
                 next.extend_from_slice(&remaining[index + 1..]);
                 let owner = self.resolve_bounded(&next, &parent, depth + 1, visits)?;
@@ -460,9 +549,11 @@ impl Facts {
         original: &[String],
         depth: usize,
         visits: &mut usize,
-    ) -> Result<Option<String>, String> {
+    ) -> Result<OwnerLookup, String> {
         let leaf = remaining.last().ok_or("empty resolved type path")?;
-        let mut matches = self.glob_matches(parent, leaf, depth, visits)?;
+        let candidates = self.glob_matches(parent, leaf, depth, visits)?;
+        let external = candidates.iter().any(Option::is_none);
+        let mut matches: Vec<String> = candidates.into_iter().flatten().collect();
         matches.sort();
         matches.dedup();
         if matches.len() > 1 {
@@ -471,7 +562,12 @@ impl Facts {
                 original.join("::")
             ));
         }
-        Ok(matches.pop())
+        // A glob that only reaches a foreign path binds a type this scan cannot see.
+        Ok(match matches.pop() {
+            Some(owner) => OwnerLookup::Resolved(Some(owner)),
+            None if external => OwnerLookup::Resolved(None),
+            None => OwnerLookup::Missing,
+        })
     }
 
     fn glob_matches(
@@ -480,38 +576,38 @@ impl Facts {
         leaf: &str,
         depth: usize,
         visits: &mut usize,
-    ) -> Result<Vec<String>, String> {
+    ) -> Result<Vec<Option<String>>, String> {
         let mut matches = vec![];
         let Some(context) = self.modules.get(parent) else {
             return Ok(matches);
         };
         for (name, import) in &context.imports {
-            if name.starts_with('*')
-                && let Some(owner) = self.glob_match(import, leaf, parent, depth, visits)?
-            {
-                matches.push(owner);
+            if name.starts_with('*') {
+                self.glob_match(import, leaf, (parent, depth), visits, &mut matches)?;
             }
         }
         Ok(matches)
     }
 
+    /// Pushes the owner `leaf` resolves to through one glob import, if it resolves.
     fn glob_match(
         &self,
         import: &[String],
         leaf: &str,
-        parent: &str,
-        depth: usize,
+        (parent, depth): (&str, usize),
         visits: &mut usize,
-    ) -> Result<Option<String>, String> {
+        matches: &mut Vec<Option<String>>,
+    ) -> Result<(), String> {
         let mut candidate = import.to_vec();
         candidate.push(leaf.to_string());
         match self.resolve_bounded(&candidate, parent, depth + 1, visits) {
-            Ok(owner) => Ok(owner),
+            Ok(owner) => matches.push(owner),
             Err(error) if error.contains("cycle/budget") || error.starts_with("ambiguous") => {
-                Err(error)
+                return Err(error);
             }
-            Err(_) => Ok(None),
+            Err(_) => {}
         }
+        Ok(())
     }
 
     fn unresolved_owner(
@@ -540,11 +636,14 @@ impl Facts {
                 | "f32"
                 | "f64"
         );
+        // The standard prelude names these without an import.
+        let prelude =
+            path.len() == 1 && matches!(first, "Box" | "Option" | "Result" | "String" | "Vec");
         let external = matches!(first, "std" | "core" | "alloc")
             || (path.len() > 1
                 && !self.modules.contains_key(&format!("{module}::{first}"))
                 && !matches!(first, "crate" | "self" | "super"));
-        if primitive || external {
+        if primitive || prelude || external {
             Ok(None)
         } else {
             Err(format!(
@@ -571,12 +670,7 @@ impl Facts {
         if let OwnerLookup::Resolved(owner) = imported {
             return Ok(OwnerLookup::Resolved(owner));
         }
-        Ok(
-            match self.glob_owner(&parent, remaining, module, original, depth, visits)? {
-                Some(owner) => OwnerLookup::Resolved(Some(owner)),
-                None => OwnerLookup::Missing,
-            },
-        )
+        self.glob_owner(&parent, remaining, module, original, depth, visits)
     }
 
     fn resolve_bounded(
@@ -632,30 +726,57 @@ pub(super) fn parse_sources(input: &Input, report: &mut Report) -> BTreeMap<Stri
                 parsed.insert(path.clone(), file);
             }
             Err(error) => {
-                let error_location = location(path, error.span());
-                report.error_at(format!("parse error in {path}: {error}"), error_location);
+                report.error_at(
+                    super::parse_error_message(path, &error),
+                    location(path, error.span()),
+                );
             }
         }
     }
     parsed
 }
 
+fn file_references(
+    path: &str,
+    file: &syn::File,
+    base: &Path,
+    parsed: &BTreeMap<String, syn::File>,
+) -> Result<BTreeSet<String>, String> {
+    let mut found = BTreeSet::new();
+    let attribute_base = Path::new(path).parent().unwrap_or(Path::new(""));
+    references(&file.items, base, attribute_base, parsed, &mut found, 0)?;
+    Ok(found)
+}
+
 pub(super) fn referenced_sources(
     parsed: &BTreeMap<String, syn::File>,
     report: &mut Report,
 ) -> BTreeSet<String> {
-    let mut referenced = BTreeSet::new();
+    // A Cargo target root such as `tests/cli.rs` resolves its modules next to
+    // itself, unless another file declares it as a module after all.
+    let mut found: BTreeMap<&str, Result<BTreeSet<String>, String>> = parsed
+        .iter()
+        .map(|(path, file)| {
+            let references = file_references(path, file, &root_base(path), parsed);
+            (path.as_str(), references)
+        })
+        .collect();
+    let referenced: BTreeSet<String> = found
+        .values()
+        .filter_map(|references| references.as_ref().ok())
+        .flatten()
+        .cloned()
+        .collect();
     for (path, file) in parsed {
-        let attribute_base = Path::new(path).parent().unwrap_or(Path::new(""));
-        if let Err(error) = references(
-            &file.items,
-            &file_base(path),
-            attribute_base,
-            parsed,
-            &mut referenced,
-            0,
-        ) {
-            report.error(format!("{path}: {error}"));
+        if cargo_target_root(path) && referenced.contains(path) {
+            found.insert(path, file_references(path, file, &file_base(path), parsed));
+        }
+    }
+    let mut referenced = BTreeSet::new();
+    for (path, references) in found {
+        match references {
+            Ok(paths) => referenced.extend(paths),
+            Err(error) => report.error(format!("{path}: {error}")),
         }
     }
     referenced
@@ -684,12 +805,13 @@ pub(super) fn collect_modules(
             parsed,
             stack: vec![root.clone()],
             result: &mut modules,
+            test: crate::core::test_suite::conventional_test_path(&root),
         };
         if let Err(error) = walker.visit(
             &root,
             &root,
             &parsed[&root].items,
-            &file_base(&root),
+            &root_base(&root),
             Path::new(&root).parent().unwrap_or(Path::new("")),
         ) {
             report.error(error);
@@ -713,8 +835,9 @@ pub(super) fn validate_module_coverage(
 #[cfg(test)]
 mod tests {
     use super::{
-        Facts, Module, ModuleWalker, clean_path, conditional_path_attribute,
-        consume_resolution_budget, path_attribute, references, validate_module_coverage,
+        Facts, Module, ModuleWalker, cargo_target_root, clean_path, conditional_path_attribute,
+        consume_resolution_budget, imported_path, imports, path_attribute, references, root_base,
+        validate_module_coverage,
     };
     use crate::{report::Location, scan::TypeFacts};
     use std::{
@@ -861,6 +984,7 @@ mod tests {
             parsed: &parsed,
             stack: vec!["path".into(); 129],
             result: &mut result,
+            test: false,
         };
         assert_eq!(
             walker
@@ -881,6 +1005,7 @@ mod tests {
             parsed: &parsed,
             stack: Vec::new(),
             result: &mut result,
+            test: false,
         };
         let deep_key = format!("crate{}", "::nested".repeat(129));
         assert_eq!(
@@ -902,6 +1027,7 @@ mod tests {
             parsed: &parsed,
             stack: vec!["path".into(); 128],
             result: &mut result,
+            test: false,
         };
         let boundary_key = format!("crate{}", "::nested".repeat(128));
         assert!(
@@ -975,6 +1101,7 @@ mod tests {
                     root: "crate".into(),
                     path: "src/domain.rs".into(),
                     items: Vec::new(),
+                    test: false,
                     imports: BTreeMap::from([(
                         "AccountAlias".into(),
                         vec!["crate".into(), "model".into(), "Account".into()],
@@ -1021,6 +1148,7 @@ mod tests {
                     path: "src/lib.rs".into(),
                     items: Vec::new(),
                     imports: BTreeMap::new(),
+                    test: false,
                 },
             )]),
             types: BTreeMap::from([(
@@ -1056,6 +1184,7 @@ mod tests {
                     path: "src/lib.rs".into(),
                     items: Vec::new(),
                     imports: BTreeMap::from([("Alias".into(), vec!["Alias".into()])]),
+                    test: false,
                 },
             )]),
             types: BTreeMap::new(),
@@ -1081,6 +1210,7 @@ mod tests {
             path: "src/lib.rs".into(),
             items: Vec::new(),
             imports: BTreeMap::new(),
+            test: false,
         };
         let aliases = Facts {
             modules: BTreeMap::from([("crate".into(), module.clone())]),
@@ -1134,6 +1264,7 @@ mod tests {
             path: "src/lib.rs".into(),
             items: Vec::new(),
             imports,
+            test: false,
         };
         let empty = Facts {
             modules: BTreeMap::from([("crate".into(), module(BTreeMap::new()))]),
@@ -1142,12 +1273,11 @@ mod tests {
             slots: Vec::new(),
             aliases: BTreeMap::new(),
         };
-        assert_eq!(
-            empty
-                .glob_match(&[], "Missing", "crate", 0, &mut 0)
-                .unwrap(),
-            None
-        );
+        let mut missing = Vec::new();
+        empty
+            .glob_match(&[], "Missing", ("crate", 0), &mut 0, &mut missing)
+            .unwrap();
+        assert!(missing.is_empty());
 
         let cyclic = Facts {
             modules: BTreeMap::from([(
@@ -1162,7 +1292,13 @@ mod tests {
         let mut cyclic_visits = 0;
         assert!(
             cyclic
-                .glob_match(&[], "Alias", "crate", 63, &mut cyclic_visits)
+                .glob_match(
+                    &[],
+                    "Alias",
+                    ("crate", 63),
+                    &mut cyclic_visits,
+                    &mut Vec::new()
+                )
                 .unwrap_err()
                 .contains("cycle/budget")
         );
@@ -1199,7 +1335,7 @@ mod tests {
         };
         assert!(
             ambiguous
-                .glob_match(&[], "Thing", "crate", 0, &mut 0)
+                .glob_match(&[], "Thing", ("crate", 0), &mut 0, &mut Vec::new())
                 .unwrap_err()
                 .starts_with("ambiguous")
         );
@@ -1213,6 +1349,7 @@ mod tests {
             path: "src/lib.rs".into(),
             items: Vec::new(),
             imports: BTreeMap::new(),
+            test: false,
         };
         let facts = Facts {
             modules: BTreeMap::from([
@@ -1290,6 +1427,7 @@ mod tests {
             path: path.into(),
             items: Vec::new(),
             imports: BTreeMap::new(),
+            test: false,
         };
         let incomplete = BTreeMap::from([("crate".into(), module("crate", "src/lib.rs"))]);
         assert_eq!(
@@ -1305,5 +1443,110 @@ mod tests {
             ),
         ]);
         validate_module_coverage(&complete, &parsed).unwrap();
+    }
+
+    #[test]
+    fn cargo_target_roots_hold_their_own_module_declarations() {
+        for root in [
+            "tests/cli.rs",
+            "examples/demo.rs",
+            "benches/speed.rs",
+            "build.rs",
+            "crates/core/tests/cli.rs",
+            "crates/core/build.rs",
+            "src/bin/tool.rs",
+        ] {
+            assert!(cargo_target_root(root), "{root} is a target root");
+        }
+        for module in [
+            "src/tests/cli.rs",
+            "src/build.rs",
+            "tests/common/mod.rs",
+            "src/lib.rs",
+        ] {
+            assert!(!cargo_target_root(module), "{module} is a module");
+        }
+        assert_eq!(root_base("tests/cli.rs"), Path::new("tests"));
+        assert_eq!(root_base("src/bin/tool.rs"), Path::new("src/bin"));
+        assert_eq!(root_base("src/graph.rs"), Path::new("src/graph"));
+    }
+
+    #[test]
+    fn duplicate_import_bindings_are_ambiguous_only_when_resolved() {
+        let file = syn::parse_file(
+            "use crate::extract::FromRef; use crate::macros::FromRef; use http; \
+             use crate::Router; use crate::Router; use crate::Other as _; use crate::Skip as _; \
+             use parse::parse; use serde as json;",
+        )
+        .unwrap();
+        let mut bindings = BTreeMap::new();
+        for item in &file.items {
+            if let syn::Item::Use(item) = item {
+                imports(&item.tree, &[], &mut bindings).unwrap();
+            }
+        }
+        assert_eq!(
+            imported_path(&bindings, "FromRef").unwrap_err(),
+            "ambiguous import binding: FromRef"
+        );
+        assert_eq!(
+            imported_path(&bindings, "Router").unwrap().unwrap(),
+            &vec!["crate".to_owned(), "Router".to_owned()]
+        );
+        assert!(imported_path(&bindings, "_").unwrap().is_none());
+        assert!(imported_path(&bindings, "Missing").unwrap().is_none());
+        assert_eq!(
+            imported_path(&bindings, "http").unwrap().unwrap(),
+            &vec!["\0extern".to_owned(), "http".to_owned()]
+        );
+        assert_eq!(
+            imported_path(&bindings, "parse").unwrap().unwrap(),
+            &vec!["parse".to_owned(), "parse".to_owned()]
+        );
+        assert_eq!(
+            imported_path(&bindings, "json").unwrap().unwrap(),
+            &vec!["serde".to_owned()]
+        );
+    }
+
+    #[test]
+    fn modules_nested_in_cfg_test_modules_stay_test_code() {
+        let parsed = BTreeMap::new();
+        let mut result = BTreeMap::new();
+        let mut walker = ModuleWalker {
+            root: "crate",
+            parsed: &parsed,
+            stack: Vec::new(),
+            result: &mut result,
+            test: false,
+        };
+        let file = syn::parse_file("#[cfg(test)] mod tests { mod inner {} } mod live {}").unwrap();
+        walker
+            .visit(
+                "src/lib.rs",
+                "crate",
+                &file.items,
+                Path::new("src"),
+                Path::new("src"),
+            )
+            .unwrap();
+        let test = |key: &str| result[key].test;
+        assert!(!test("crate"));
+        assert!(test("crate::tests"));
+        assert!(test("crate::tests::inner"));
+        assert!(!test("crate::live"));
+    }
+
+    #[test]
+    fn rust_parse_errors_name_the_file_line_and_column() {
+        let Err(error) = syn::parse_file("fn ok() {}\nfn broken( {}\n") else {
+            panic!("an unclosed parameter list must not parse");
+        };
+        let message = super::super::parse_error_message("src/lib.rs", &error);
+        assert!(
+            message.starts_with("parse error in src/lib.rs:2:"),
+            "{message}"
+        );
+        assert!(message.ends_with(&format!(": {error}")), "{message}");
     }
 }

@@ -62,8 +62,13 @@ pub(crate) fn advisory(
     evidence: &Value,
     policy: &Policy,
 ) -> Option<&'static str> {
-    if !matches!(RuleKind::from_id(id), Ok(RuleKind::FunctionCrap)) {
-        return None;
+    match RuleKind::from_id(id) {
+        Ok(RuleKind::FunctionCrap) => {}
+        Ok(RuleKind::UnusedCode) => {
+            return (evidence.get("test_code") == Some(&json!(true)))
+                .then_some(crate::core::test_suite::TEST_CODE_ADVISORY);
+        }
+        _ => return None,
     }
     if evidence.get("coverage_assumption_percent") == Some(&json!(0)) {
         return Some(ESTIMATED_CRAP);
@@ -718,6 +723,19 @@ mod tests {
             advisory("python.function_lines", &crap(21, 2), &estimated, &policy),
             None
         );
+        let unused = |test_code: bool| {
+            advisory(
+                "python.unused_code",
+                &measured(&[("findings", 1)]),
+                &json!({ "test_code": test_code }),
+                &policy,
+            )
+        };
+        assert_eq!(
+            unused(true),
+            Some(crate::core::test_suite::TEST_CODE_ADVISORY)
+        );
+        assert_eq!(unused(false), None);
 
         let mut inverted = self::policy();
         let parameters = &mut inverted

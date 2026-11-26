@@ -3,7 +3,9 @@ use super::{
     BTreeSet, Facts, FindingRelations, FunctionFact, Input, Policy, Registry, Report,
     exact_jaccard_pairs, json,
 };
+use crate::core::test_suite::{TEST_CODE_ADVISORY, conventional_test_path};
 use crate::patterns::closed_slot_groups;
+use crate::similarity::{DuplicateFamily, duplicate_families};
 
 fn data_class_match(fields: usize, operations: usize, minimum: u64, maximum: u64) -> bool {
     fields as u64 >= minimum && operations as u64 <= maximum
@@ -178,17 +180,12 @@ fn overlapping_functions(first: &FunctionFact, second: &FunctionFact) -> bool {
         && second.body_range.0 < first.body_range.1
 }
 
-fn ordered_functions<'a>(
-    first: &'a FunctionFact,
-    second: &'a FunctionFact,
-) -> (&'a FunctionFact, &'a FunctionFact) {
-    if (&first.symbol, &first.location.path, first.location.line)
-        <= (&second.symbol, &second.location.path, second.location.line)
-    {
-        (first, second)
-    } else {
-        (second, first)
-    }
+fn function_order(function: &FunctionFact) -> (&str, &str, usize) {
+    (
+        &function.symbol,
+        &function.location.path,
+        function.location.line,
+    )
 }
 
 struct DuplicateRule<'a> {
@@ -198,30 +195,40 @@ struct DuplicateRule<'a> {
     similarity: u64,
 }
 
-fn report_duplicate_pair(
-    first: &FunctionFact,
-    second: &FunctionFact,
-    intersection: usize,
-    union: usize,
+fn report_duplicate_family(
+    functions: &[FunctionFact],
+    family: &DuplicateFamily,
     rule: &DuplicateRule<'_>,
     report: &mut Report,
 ) {
-    let (first, second) = ordered_functions(first, second);
-    report.finding_with_relations(
+    let mut members: Vec<&FunctionFact> = family
+        .members
+        .iter()
+        .map(|index| &functions[*index])
+        .collect();
+    members.sort_by(|left, right| function_order(left).cmp(&function_order(right)));
+    let (anchor, others) = (members[0], &members[1..]);
+    let test_code = members
+        .iter()
+        .all(|member| conventional_test_path(&member.location.path));
+    let evaluation = crate::evidence_evaluators::Evaluation {
+        metric: "normalized 4-token multiset Jaccard",
+        observed: json!({"intersection":family.intersection,"union":family.union}),
+        comparison: ">=",
+        threshold: json!({"minimum_similarity_basis_points":rule.similarity,"minimum_tokens":rule.minimum}),
+        matched: true,
+    };
+    report.evaluated_finding(
         rule.policy,
         rule.id,
-        &first.symbol,
-        &first.location,
-        "normalized 4-token multiset Jaccard",
-        json!({"intersection":intersection,"union":union}),
-        ">=",
-        json!({"minimum_similarity_basis_points":rule.similarity,"minimum_tokens":rule.minimum}),
-        true,
+        (&anchor.symbol, &anchor.location),
+        evaluation,
         FindingRelations {
-            evidence: json!({"token_counts":[first.tokens.len(),second.tokens.len()],"other_location":second.location,"normalization":"tree_sitter_tokens_v1_not_semantic_equivalence"}),
-            symbols: vec![second.symbol.clone()],
-            locations: vec![second.location.clone()],
+            evidence: json!({"family_size":members.len(),"pairs":family.pairs,"token_counts":members.iter().map(|member| member.tokens.len()).collect::<Vec<_>>(),"test_code":test_code,"normalization":"tree_sitter_tokens_v1_not_semantic_equivalence"}),
+            symbols: others.iter().map(|member| member.symbol.clone()).collect(),
+            locations: others.iter().map(|member| member.location.clone()).collect(),
         },
+        test_code.then_some(TEST_CODE_ADVISORY),
     );
 }
 
@@ -257,15 +264,8 @@ fn duplicates(facts: &Facts, policy: &Policy, language: &str, report: &mut Repor
             return;
         }
     };
-    for pair in pairs {
-        report_duplicate_pair(
-            &facts.functions[pair.left],
-            &facts.functions[pair.right],
-            pair.intersection,
-            pair.union,
-            &rule,
-            report,
-        );
+    for family in duplicate_families(&pairs) {
+        report_duplicate_family(&facts.functions, &family, &rule, report);
     }
 }
 
@@ -288,8 +288,8 @@ pub(super) fn source_metrics(
             &format!("{}.function_arguments", registry.language),
             &function.symbol,
             &function.location,
-            function.parameters.len(),
-            "declared parameters",
+            function.parameters.len() - function.keyword_defaults,
+            "declared parameters excluding keyword-only defaults",
         );
         report.maximum_with_role(
             &input.policy,
@@ -329,7 +329,7 @@ pub(super) fn source_metrics(
 mod tests {
     use super::{
         FunctionFact, body_line_total, comment_share_match, data_class_match, enough_clump_slots,
-        lazy_class_match, ordered_functions, overlapping_functions,
+        function_order, lazy_class_match, overlapping_functions,
     };
     use crate::patterns::combinations;
     use crate::report::Location;
@@ -344,6 +344,7 @@ mod tests {
                 column: 1,
             },
             parameters: Vec::new(),
+            keyword_defaults: 0,
             lines: 1,
             comments: 0,
             tokens: vec!["identifier".into()],
@@ -438,11 +439,9 @@ mod tests {
         assert!(!overlapping_functions(&first, &touching_before));
         assert!(!overlapping_functions(&first, &other_file));
 
-        let (ordered_first, ordered_second) = ordered_functions(&first, &overlapping);
-        assert_eq!(ordered_first.symbol, "alpha");
-        assert_eq!(ordered_second.symbol, "zeta");
-        let (ordered_first, ordered_second) = ordered_functions(&overlapping, &first);
-        assert_eq!(ordered_first.symbol, "alpha");
-        assert_eq!(ordered_second.symbol, "zeta");
+        assert!(function_order(&overlapping) < function_order(&first));
+        let same_symbol = function("zeta", "same.py", 30, (30, 40));
+        assert!(function_order(&first) < function_order(&same_symbol));
+        assert!(function_order(&other_file) < function_order(&same_symbol));
     }
 }

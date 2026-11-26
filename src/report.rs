@@ -188,6 +188,10 @@ pub(crate) struct Report {
     has_global_error: bool,
     #[serde(skip)]
     incomplete_rule_ids: BTreeSet<String>,
+    /// Declarations the scanner knows are test code, beyond conventional test paths:
+    /// Rust `#[cfg(test)]` modules and `#[test]` functions inside production files.
+    #[serde(skip)]
+    pub(crate) test_code: BTreeSet<Location>,
     #[serde(skip)]
     pub(crate) implementation_scopes: Vec<Implementation>,
     #[serde(skip)]
@@ -406,6 +410,7 @@ impl Report {
             policy_sha256: String::new(),
             has_global_error: false,
             incomplete_rule_ids: BTreeSet::new(),
+            test_code: BTreeSet::new(),
             implementation_scopes: implementations.to_vec(),
             rule_metadata,
         }
@@ -413,6 +418,15 @@ impl Report {
 
     pub(crate) fn rule_error(&mut self, rule_id: &str, error: &str) {
         self.incomplete_rule_ids.insert(rule_id.to_string());
+        // A file that fails to parse already has its own scan error, so the rules
+        // it leaves incomplete do not repeat the message.
+        if self
+            .errors
+            .iter()
+            .any(|existing| existing.rule_id.is_none() && existing.message == error)
+        {
+            return;
+        }
         self.errors.push(ReportError {
             message: format!("rule {rule_id}: {error}"),
             rule_id: Some(rule_id.to_string()),
@@ -662,6 +676,17 @@ impl Report {
         let reported_by_role = role_context
             .as_ref()
             .is_some_and(|role| role.disposition == "reported_by_role");
+        // Test code never blocks: a finding located only in test code is an indicator,
+        // whatever rule produced it.
+        let advisory = advisory.or_else(|| {
+            std::iter::once(location)
+                .chain(&related_locations)
+                .all(|location| {
+                    self.test_code.contains(location)
+                        || crate::core::test_suite::conventional_test_path(&location.path)
+                })
+                .then_some(crate::core::test_suite::TEST_CODE_ADVISORY)
+        });
         let blocking = policy.required(id) && !reported_by_role && advisory.is_none();
         let status = if reported_by_role {
             "reported_by_role"
@@ -1520,7 +1545,6 @@ mod tests {
                 commits: Vec::new(),
             },
         );
-        report.rule_error("rust.function_arguments", "z failure");
         report.error_at(
             "a failure",
             Location {
@@ -1529,6 +1553,10 @@ mod tests {
                 column: 2,
             },
         );
+        // The parse error already names the failure the rule repeats; another
+        // rule's distinct failure is still reported.
+        report.rule_error("rust.function_lines", "a failure");
+        report.rule_error("rust.function_arguments", "z failure");
         report.finish();
 
         let serialized = serde_json::to_value(&report).unwrap();
