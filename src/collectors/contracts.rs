@@ -750,8 +750,10 @@ fn parallel_observation(
 pub(super) fn parallel_inheritance(model: &SourceModel) -> Vec<Observation> {
     let families = inheritance_families(model);
     let mut observations = Vec::new();
-    for (index, first) in families.iter().enumerate() {
-        for second in families.iter().skip(index + 1) {
+    let mut rest = families.as_slice();
+    while let [first, tail @ ..] = rest {
+        rest = tail;
+        for second in tail {
             let twin = first.twin_of(second);
             if !first.comparable(second, twin) {
                 continue;
@@ -882,8 +884,8 @@ fn chain_root(code: &str, failure: &str, start: usize) -> bool {
     if failure.starts_with("setattr") || failure.contains(".prototype.") {
         return true;
     }
-    let line_start = code[..start].rfind('\n').map_or(0, |newline| newline + 1);
-    let before = code[line_start..start].trim_end();
+    let line = code[..start].rsplit('\n').next().unwrap_or_default();
+    let before = line.trim_end();
     let type_query = before
         .strip_suffix("typeof")
         .is_some_and(|rest| !rest.ends_with(|c: char| c.is_alphanumeric() || c == '_'));
@@ -1287,6 +1289,92 @@ mod tests {
         assert_eq!(observations.len(), 1);
         assert_eq!(observations[0].symbol, "src/file.rs::File");
         assert_eq!(observations[0].measurements["failures"], 1);
+    }
+
+    #[test]
+    fn rust_macro_implementations_read_only_files_with_trait_implementations() {
+        let mut supertrait = class("src/port.rs", "Port", "Port");
+        supertrait.interface = true;
+        supertrait.bases = vec!["Base".into()];
+        let plain = class("src/plain.rs", "Plain", "Plain");
+        let mut implementation = class("src/imp.rs", "Imp", "Imp");
+        implementation.bases = vec!["Port".into()];
+        let model = SourceModel {
+            classes: vec![supertrait, plain, implementation],
+            ..SourceModel::default()
+        };
+        let body = "impl Port for Imp { forward!(); }\n".to_string();
+        let files = ["src/port.rs", "src/plain.rs", "src/imp.rs"]
+            .map(|path| (path.to_string(), body.clone()))
+            .into();
+        let found = rust_macro_implementations(&model, &input(files)).unwrap();
+        let paths: Vec<&str> = found.iter().map(|(path, _, _)| path.as_str()).collect();
+        assert_eq!(paths, ["src/imp.rs"]);
+    }
+
+    #[test]
+    fn depth_zero_header_ignores_arrows_inside_brackets() {
+        assert_eq!(
+            depth_zero_header("<T extends () => X> implements E {"),
+            " implements E "
+        );
+        assert_eq!(depth_zero_header("implements E { x } y"), "implements E ");
+    }
+
+    #[test]
+    fn standard_imports_keep_names_under_std_roots_only() {
+        let file = syn::parse_file(
+            "use crate::io::{Read, Write as Out};\nuse std::fmt::{Display, Write as W};\nuse core::Wake;\n",
+        )
+        .unwrap();
+        let mut imports = StandardImports::default();
+        imports.visit_file(&file);
+        assert_eq!(
+            imports.0.into_iter().collect::<Vec<_>>(),
+            ["Display", "W", "Wake"]
+        );
+    }
+
+    #[test]
+    fn typescript_interfaces_need_the_language_flag_and_keyword() {
+        let mut shape = class("src/a.ts", "Shape", "Shape");
+        shape.interface = true;
+        shape.source = Arc::from("interface Shape { x: number }");
+        assert!(typescript_interface("typescript", &shape));
+        assert!(!typescript_interface("python", &shape));
+        shape.interface = false;
+        assert!(!typescript_interface("typescript", &shape));
+    }
+
+    #[test]
+    fn declared_bases_prefer_the_same_file() {
+        let local = class("src/a.py", "Base", "Base");
+        let other = class("src/b.py", "Base", "Base");
+        let mut derived = class("src/a.py", "Child", "Child");
+        derived.bases = vec!["Base".into()];
+        let model = SourceModel {
+            classes: vec![other, local, derived.clone()],
+            ..SourceModel::default()
+        };
+        let resolved = resolve_declared_base(&model, &derived, "Base", false).expect("resolves");
+        assert_eq!(resolved.location.path, "src/a.py");
+    }
+
+    #[test]
+    fn chain_root_reads_typeof_only_as_a_whole_word() {
+        for code in ["typeof a.b = 1", "x: a.b = 1"] {
+            assert!(!chain_root(code, "a.b", code.find("a.b").expect("chain")));
+        }
+        for code in ["my_typeof a.b = 1", "xtypeof a.b = 1", "a.b = 1"] {
+            assert!(chain_root(code, "a.b", code.find("a.b").expect("chain")));
+        }
+    }
+
+    #[test]
+    fn typescript_imported_names_keep_identifier_bindings_only() {
+        let source = "import './side.css';\nimport D, { a as b, type C } from 'm';\nimport * as ns from 'n';\n";
+        let names = typescript_imported_names("a.ts", source, source).unwrap();
+        assert_eq!(names.into_iter().collect::<Vec<_>>(), ["C", "D", "b", "ns"]);
     }
 
     #[test]

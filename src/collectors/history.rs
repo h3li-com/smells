@@ -583,6 +583,7 @@ mod tests {
             "doc: fix typos",
             "modern typing",
             "ws",
+            "- build: package wheel",
         ] {
             assert!(mechanical_subject(subject), "{subject} is a sweep");
         }

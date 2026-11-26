@@ -1691,6 +1691,8 @@ mod tests {
             "    @field_validator(\"data\")\n",
             "    @classmethod\n",
             "    def _strip(cls, value): return value\n",
+            "    @field_serializer(\"data\")\n",
+            "    def _dump(self, value): return value\n",
         );
         let model = source_model(
             &rule("python.unused_code"),
@@ -1703,7 +1705,10 @@ mod tests {
             .filter(|function| function.entry_point)
             .map(|function| function.name.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(entry_points, ["_environment", "_app", "_check", "_strip"]);
+        assert_eq!(
+            entry_points,
+            ["_environment", "_app", "_check", "_strip", "_dump"]
+        );
     }
 
     #[test]

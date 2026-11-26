@@ -829,6 +829,78 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
+    #[test]
+    fn class_nodes_by_range_finds_only_requested_classes() {
+        let source = "class A { x?: number }\nclass B { y?: number }\n";
+        let tree = model::parse_portable_tree("typescript", "a.ts", source).expect("parses");
+        let b = (source.find("class B").expect("class B"), source.len() - 1);
+        let mut found = BTreeMap::new();
+        class_nodes_by_range(tree.root_node(), &BTreeSet::from([b]), &mut found);
+        assert_eq!(found.keys().copied().collect::<Vec<_>>(), [b]);
+    }
+
+    #[test]
+    fn field_uses_count_each_method_that_reads_the_field() {
+        let field = FieldFact {
+            name: "cache".into(),
+            authored_type: "dict".into(),
+            temporary: true,
+            private: false,
+        };
+        let reads = function("reads", Some("return self.cache"));
+        let writes = function("writes", Some("self.cache = {}"));
+        let other = function("other", Some("return self.cached"));
+        assert_eq!(field_uses("self", &field, &[&reads, &writes, &other]), 2);
+        assert_eq!(field_uses("self", &field, &[&other]), 0);
+    }
+
+    #[test]
+    fn python_case_labels_come_from_case_patterns() {
+        let source = "def f(x):\n    match x:\n        case 1:\n            pass\n        case \"a\" | \"b\":\n            pass\n";
+        let tree = model::parse_portable_tree("python", "a.py", source).expect("parses");
+        let mut sites = Vec::new();
+        dispatch_sites(tree.root_node(), source, "python", None, &mut sites);
+        assert_eq!(sites.len(), 1);
+        assert_eq!(sites[0].1, ["\"a\"|\"b\"", "1"]);
+    }
+
+    #[test]
+    fn dispatch_nodes_are_language_specific() {
+        assert!(dispatch_node("match_statement", "python"));
+        assert!(dispatch_node("switch_statement", "typescript"));
+        assert!(!dispatch_node("if_statement", "python"));
+        assert!(!dispatch_node("if_statement", "typescript"));
+        assert!(!dispatch_node("switch_statement", "rust"));
+    }
+
+    #[test]
+    fn typescript_own_fields_take_constructor_parameters_only() {
+        let source =
+            "class A {\n  x = 1;\n  constructor(private a: number) {}\n  m(b: number) {}\n}\n";
+        let tree = model::parse_portable_tree("typescript", "a.ts", source).expect("parses");
+        let class = tree.root_node().named_child(0).expect("class");
+        let names = typescript_own_field_names(class, source);
+        assert_eq!(names.into_iter().collect::<Vec<_>>(), ["a", "x"]);
+    }
+
+    #[test]
+    fn class_token_lists_separate_method_bodies() {
+        let model = SourceModel {
+            classes: vec![class(
+                "A",
+                vec![function("a", Some("one")), function("b", Some("two"))],
+            )],
+            ..SourceModel::default()
+        };
+        let tokens = class_token_lists(&model).remove(0);
+        let boundaries = tokens
+            .iter()
+            .filter(|token| *token == "method-boundary")
+            .count();
+        assert_eq!(boundaries, 1);
+        assert_ne!(tokens[0], "method-boundary");
+    }
+
     fn location(line: usize) -> Location {
         Location {
             path: "src/domain.rs".into(),

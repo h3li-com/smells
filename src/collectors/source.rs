@@ -612,6 +612,64 @@ mod tests {
     use crate::collectors::model::{ClassFact, CodeScope, FieldFact};
     use std::sync::Arc;
 
+    #[test]
+    fn pattern_bindings_skip_paths_labels_and_guards() {
+        assert_eq!(pattern_bindings("state::Ready(ref mut x) if x.ok"), ["x"]);
+        assert_eq!(pattern_bindings("Point { x: px, y, .. }"), ["px", "y"]);
+    }
+
+    #[test]
+    fn match_arm_patterns_resume_after_nested_block_arms() {
+        let body = "match s { A => { if y { z } } B(b) => b, }";
+        let start = body.find('{').expect("match body") + 1;
+        let arms: Vec<&str> = match_arm_patterns(body, start)
+            .into_iter()
+            .map(str::trim)
+            .collect();
+        assert_eq!(arms, ["A", "B(b)"]);
+    }
+
+    #[test]
+    fn match_arm_patterns_split_on_top_level_commas_and_arrows_only() {
+        let body = "match s { A => 1, B(b, c) => b, x if x == 1 => x, }";
+        let start = body.find('{').expect("match body") + 1;
+        let arms: Vec<&str> = match_arm_patterns(body, start)
+            .into_iter()
+            .map(str::trim)
+            .collect();
+        assert_eq!(arms, ["A", "B(b, c)", "x if x == 1"]);
+    }
+
+    #[test]
+    fn public_underscore_members_need_a_name_inside_the_dunder() {
+        assert!(public_underscore_member("python", "__html__"));
+        assert!(public_underscore_member("python", "__a__"));
+        assert!(!public_underscore_member("python", "____"));
+        assert!(public_underscore_member("typescript", "__STATIC_CONTENT"));
+        assert!(!public_underscore_member("typescript", "__1A"));
+        assert!(!public_underscore_member("typescript", "__Ab"));
+    }
+
+    #[test]
+    fn continues_chain_follows_names_but_not_calls() {
+        let chain = "this._def.innerType._parse";
+        assert!(continues_chain(
+            chain,
+            chain.find("innerType").expect("member")
+        ));
+        assert!(continues_chain(
+            chain,
+            chain.find("_parse").expect("member")
+        ));
+        let optional = "this._def?.innerType";
+        assert!(continues_chain(
+            optional,
+            optional.find("innerType").expect("member")
+        ));
+        let call = "make().value";
+        assert!(!continues_chain(call, call.find("value").expect("member")));
+    }
+
     fn rule(id: &str) -> Rule {
         Rule {
             id: id.into(),
