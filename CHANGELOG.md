@@ -4,6 +4,16 @@ All notable changes to Smells are recorded here. Release tags use `vMAJOR.MINOR.
 
 ## 0.7.0 - 2026-11-23
 
+- Scan every Rust configuration variant instead of exiting `2` on conditional
+  alternatives. Same-named `cfg` modules, `#[cfg_attr(…, path = "…")]` children
+  and repeated type declarations each become a variant reported at its own file
+  and line, so crates such as tokio and serde now scan. A name resolves when any
+  variant defines it. Item macros whose body parses as items (`cfg_rt! { … }`,
+  `pin_project! { … }`) are expanded. A `mod` path that crosses a directory
+  symlink whose target stays inside the scanned root resolves to the captured
+  target file, which is scanned once; links that leave the root still exit `2`.
+  `impl` blocks for `dyn Trait` and `!` have no owner. A file loaded by several
+  crates, such as a shared `tests/common` module, is reported once.
 - Cut detector false positives found by scanning Smells with itself. The
   observable contract of each changed rule moves to version `2`, so policies must
   pin the new versions:

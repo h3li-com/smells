@@ -2273,9 +2273,12 @@ fn parser_unresolved_owner_and_missing_module_fail_closed() {
         "type A=B;type B=A;impl A{fn f(){}}",
         "mod a{pub use crate::b::*;}mod b{pub use crate::a::*;}impl a::Unknown{fn f(){}}",
         "mod a{pub struct A;}mod b{pub struct A;}mod facade{pub use crate::a::*;pub use crate::b::*;}mod consumer{use crate::facade::*;impl A{fn f(){}}}",
-        "#[cfg(test)]struct A;#[cfg(not(test))]struct A;",
-        "#[cfg(test)]mod a{}#[cfg(not(test))]mod a{}",
-        "#[cfg(test)]use external::A;#[cfg(not(test))]use another::A;impl A{fn f(){}}",
+        "#[cfg_attr(unix,path=\"absent.rs\")]mod a;",
+        "mod a{#[cfg_attr(unix,path=\"x\")]mod b{}}",
+        "mod a{pub struct A;}mod b{pub struct A;}#[cfg(test)]use a::A;#[cfg(not(test))]use b::A;impl A{fn f(){}}",
+        "mod a{}mod b{}#[cfg(test)]use crate::a::A;#[cfg(not(test))]use crate::b::A;impl A{fn f(){}}",
+        "mod a{pub use crate::b::A;}mod b{pub use crate::a::A;}mod c{pub struct A;}#[cfg(test)]use a::A;#[cfg(not(test))]use c::A;impl A{fn f(){}}",
+        "macro_rules! named{struct A;}impl A{fn f(){}}",
     ] {
         let workspace = Workspace::new(source);
         assert_eq!(workspace.check().status.code(), Some(2), "{source}");
@@ -2321,21 +2324,112 @@ fn foreign_generic_macro_and_local_impl_targets_scan_cleanly() {
     assert_eq!(report(&output)["errors"], json!([]));
 }
 
+#[cfg(unix)]
 #[test]
-fn conditional_module_paths_do_not_silently_pick_the_default_file() {
-    let workspace =
-        Workspace::new("#[cfg_attr(feature=\"alternate\",path=\"other.rs\")]mod child;");
-    workspace.source("src/child.rs", "struct A;");
-    workspace.source("src/other.rs", "struct B;");
-    let output = workspace.check();
-    assert_eq!(output.status.code(), Some(2));
-    assert!(
-        report(&output)["errors"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|error| error.as_str().unwrap().contains("conditional module path"))
+fn modules_cross_in_root_directory_links_once_and_outside_links_fail_closed() {
+    let overloaded = "pub fn f(a:u8,b:u8,c:u8,d:u8,e:u8,g:u8,h:u8,i:u8){}";
+    let workspace = Workspace::new("mod linked;");
+    workspace.source("common/mod.rs", overloaded);
+    std::os::unix::fs::symlink("../common", workspace.path.join("src/linked")).unwrap();
+    let data = report(&workspace.check());
+    assert_eq!(data["errors"], json!([]));
+    let paths: Vec<_> = data["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|finding| finding["rule_id"] == "rust.function_arguments")
+        .map(|finding| finding["location"]["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(paths, ["common/mod.rs"]);
+
+    workspace.git(&["init", "-q"]);
+    workspace.git(&["add", "--", "."]);
+    let staged = workspace.command(&[
+        "check",
+        "--staged",
+        "--policy",
+        "quality-policy.json",
+        "--only-group",
+        "source",
+        "--format",
+        "json",
+    ]);
+    let data = report(&staged);
+    assert_eq!(data["errors"], json!([]));
+    assert_eq!(
+        finding(&data, "rust.function_arguments", "::f")["location"]["path"],
+        "common/mod.rs"
     );
+
+    let outside = Workspace::new("");
+    let escaping = Workspace::new("mod linked;");
+    outside.source("mod.rs", overloaded);
+    std::os::unix::fs::symlink(&outside.path, escaping.path.join("src/linked")).unwrap();
+    assert_eq!(escaping.check().status.code(), Some(2));
+}
+
+#[test]
+fn a_file_shared_by_two_crates_is_extracted_once_and_resolves_in_both() {
+    let workspace = Workspace::new("");
+    workspace.source("tests/a.rs", "mod common;");
+    workspace.source(
+        "tests/b.rs",
+        "mod common;\nfn g(x: common::Bag, y: &common::Bag) {}\nimpl common::Bag { fn h(&self) {} }",
+    );
+    workspace.source(
+        "tests/common/mod.rs",
+        "pub struct Bag;\npub fn f(a:u8,b:u8,c:u8,d:u8,e:u8,g:u8,h:u8,i:u8){}",
+    );
+    let data = report(&workspace.check());
+    assert_eq!(data["errors"], json!([]));
+    let matches = data["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|finding| finding["rule_id"] == "rust.function_arguments")
+        .count();
+    assert_eq!(matches, 1);
+}
+
+#[test]
+fn every_configuration_variant_is_scanned_at_its_own_file() {
+    let overloaded = "pub fn f(a:u8,b:u8,c:u8,d:u8,e:u8,g:u8,h:u8,i:u8){}";
+    let workspace = Workspace::new(
+        "#[cfg_attr(feature=\"alternate\",path=\"other.rs\")]pub mod child;\n\
+         #[cfg(unix)]pub mod imp{pub struct Unix;}\n\
+         #[cfg(windows)]pub mod imp{pub struct Windows;}\n\
+         impl imp::Windows{pub fn new()->Self{Self}}\n\
+         #[cfg(test)]pub struct Twin;\n\
+         #[cfg(not(test))]pub enum Twin{One}\n\
+         impl Twin{pub fn twin(&self){}}\n",
+    );
+    workspace.source("src/child.rs", overloaded);
+    workspace.source("src/other.rs", overloaded);
+    let output = workspace.check();
+    let data = report(&output);
+    assert_eq!(data["errors"], json!([]));
+    let mut paths: Vec<_> = data["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|finding| finding["rule_id"] == "rust.function_arguments")
+        .map(|finding| finding["location"]["path"].as_str().unwrap())
+        .collect();
+    paths.sort_unstable();
+    assert_eq!(paths, ["src/child.rs", "src/other.rs"]);
+    assert!(data["findings"].as_array().unwrap().iter().any(|finding| {
+        finding["symbol"]
+            .as_str()
+            .unwrap()
+            .contains("child [cfg variant 2]::f")
+    }));
+
+    let conditional_only =
+        Workspace::new("#[cfg_attr(feature=\"alternate\",path=\"other.rs\")]pub mod child;");
+    conditional_only.source("src/other.rs", overloaded);
+    let data = report(&conditional_only.check());
+    assert_eq!(data["errors"], json!([]));
+    assert!(matched(&data, "rust.function_arguments"));
 }
 
 #[test]

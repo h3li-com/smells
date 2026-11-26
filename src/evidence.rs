@@ -282,6 +282,7 @@ mod tests {
             Input {
                 files: BTreeMap::from([("model.py".into(), "class Child:\n    pass\n".into())]),
                 manifests: BTreeMap::new(),
+                directory_links: BTreeMap::new(),
                 artifacts: BTreeMap::new(),
                 artifact_candidates: BTreeMap::new(),
                 implementations: vec![Implementation {

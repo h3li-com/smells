@@ -56,17 +56,18 @@ fn field_slots(symbol: &str, path: &str, span: Span, fields: &Fields) -> Slots {
     }
 }
 
-fn insert_type(
-    facts: &mut Facts,
-    key: String,
-    ty: TypeFacts,
-    message: String,
-) -> Result<(), String> {
-    if facts.types.insert(key, ty).is_some() {
-        Err(message)
-    } else {
-        Ok(())
+/// The key for a type declared in `module`. A second declaration of the same name,
+/// such as an `enum` under one `cfg` and a `struct` under its negation, becomes a
+/// configuration variant; `impl` blocks bind to the first declaration.
+fn type_key(facts: &Facts, module: &Module, name: &syn::Ident) -> String {
+    let key = format!("{}::{name}", module.key);
+    let mut candidate = key.clone();
+    let mut ordinal = 2;
+    while facts.types.contains_key(&candidate) {
+        candidate = super::variant_key(&key, ordinal);
+        ordinal += 1;
     }
+    candidate
 }
 
 /// The location of a declaration in `module`, recorded as test code when the module is.
@@ -88,8 +89,8 @@ fn struct_declaration(
     item: &ItemStruct,
     policy: &Policy,
     report: &mut Report,
-) -> Result<(), String> {
-    let key = format!("{}::{}", module.key, item.ident);
+) {
+    let key = type_key(facts, module, &item.ident);
     let loc = declared_at(module, item.ident.span(), report);
     report.maximum(
         policy,
@@ -120,9 +121,8 @@ fn struct_declaration(
             )
         })
         .collect();
-    insert_type(
-        facts,
-        key.clone(),
+    facts.types.insert(
+        key,
         TypeFacts {
             location: loc,
             fields,
@@ -131,8 +131,7 @@ fn struct_declaration(
             variants: BTreeSet::new(),
             functions: vec![],
         },
-        format!("ambiguous authored type: {key}; active-cfg analysis is pending"),
-    )
+    );
 }
 
 fn enum_declaration(
@@ -141,8 +140,8 @@ fn enum_declaration(
     item: &ItemEnum,
     policy: &Policy,
     report: &mut Report,
-) -> Result<(), String> {
-    let key = format!("{}::{}", module.key, item.ident);
+) {
+    let key = type_key(facts, module, &item.ident);
     let loc = declared_at(module, item.ident.span(), report);
     report.maximum(
         policy,
@@ -170,9 +169,8 @@ fn enum_declaration(
             &variant.fields,
         ));
     }
-    insert_type(
-        facts,
-        key.clone(),
+    facts.types.insert(
+        key,
         TypeFacts {
             location: loc,
             fields: vec![],
@@ -190,21 +188,15 @@ fn enum_declaration(
                 .collect(),
             functions: vec![],
         },
-        format!("ambiguous authored type: {key}"),
-    )
+    );
 }
 
-fn type_alias(facts: &mut Facts, module: &Module, item: &ItemType) -> Result<(), String> {
-    let key = format!("{}::{}", module.key, item.ident);
-    if facts
+/// The first alias of a name wins; a later `cfg` twin aliases the same name.
+fn type_alias(facts: &mut Facts, module: &Module, item: &ItemType) {
+    facts
         .aliases
-        .insert(key.clone(), (module.key.clone(), (*item.ty).clone()))
-        .is_some()
-    {
-        Err(format!("ambiguous type alias: {key}"))
-    } else {
-        Ok(())
-    }
+        .entry(format!("{}::{}", module.key, item.ident))
+        .or_insert_with(|| (module.key.clone(), (*item.ty).clone()));
 }
 
 fn trait_declaration(module: &Module, item: &ItemTrait, policy: &Policy, report: &mut Report) {
@@ -234,24 +226,11 @@ fn declaration(
         Item::Struct(item) => struct_declaration(facts, module, item, policy, report),
         Item::Enum(item) => enum_declaration(facts, module, item, policy, report),
         Item::Type(item) => type_alias(facts, module, item),
-        Item::Trait(item) => {
-            trait_declaration(module, item, policy, report);
-            Ok(())
-        }
-        Item::Macro(item) => {
-            // Item macros such as `pin_project!` wrap ordinary declarations; other
-            // macro bodies, including `macro_rules!` rules, stay opaque.
-            let Ok(file) = syn::parse2::<syn::File>(item.mac.tokens.clone()) else {
-                return Ok(());
-            };
-            file.items
-                .iter()
-                .filter(|item| matches!(item, Item::Struct(_) | Item::Enum(_) | Item::Type(_)))
-                .try_for_each(|item| declaration(facts, module, item, policy, report))
-        }
-        Item::Verbatim(_) => Err(format!("unsupported item syntax in {}", module.path)),
-        _ => Ok(()),
+        Item::Trait(item) => trait_declaration(module, item, policy, report),
+        Item::Verbatim(_) => return Err(format!("unsupported item syntax in {}", module.path)),
+        _ => {}
     }
+    Ok(())
 }
 
 pub(super) fn declarations(
@@ -259,7 +238,12 @@ pub(super) fn declarations(
     policy: &Policy,
     report: &mut Report,
 ) -> Result<(), String> {
-    let modules: Vec<_> = facts.modules.values().cloned().collect();
+    let modules: Vec<_> = facts
+        .modules
+        .values()
+        .filter(|module| module.repeated.is_none())
+        .cloned()
+        .collect();
     for module in &modules {
         for item in &module.items {
             declaration(facts, module, item, policy, report)?;
@@ -288,7 +272,8 @@ impl<'ast> Visit<'ast> for Nested<'ast> {
         }
     }
     fn visit_expr(&mut self, node: &'ast Expr) {
-        if matches!(node, Expr::Verbatim(_)) {
+        // syn spells a stray `;` statement as an empty verbatim expression.
+        if matches!(node, Expr::Verbatim(tokens) if !tokens.is_empty()) {
             self.unsupported = true;
         }
         visit::visit_expr(self, node);
@@ -552,7 +537,12 @@ fn impl_functions(
 }
 
 pub(super) fn functions(facts: &mut Facts, input: &Input, report: &mut Report) {
-    let modules: Vec<_> = facts.modules.values().cloned().collect();
+    let modules: Vec<_> = facts
+        .modules
+        .values()
+        .filter(|module| module.repeated.is_none())
+        .cloned()
+        .collect();
     for module in modules {
         for item in &module.items {
             match item {
@@ -594,7 +584,7 @@ pub(super) fn record_type_metrics(facts: &Facts, input: &Input, report: &mut Rep
 
 #[cfg(test)]
 mod tests {
-    use super::{Facts, Module, Nested, Report, body_counts, declaration};
+    use super::{Facts, Module, Nested, Report, body_counts, declaration, type_key};
     use crate::core::model::History;
     use std::collections::BTreeMap;
     use syn::visit::Visit;
@@ -635,6 +625,7 @@ mod tests {
         .unwrap();
         let mut report = Report::new(&registry, &policy, "test", &[], &History::default());
         let mut facts = Facts {
+            variants: BTreeMap::new(),
             modules: BTreeMap::new(),
             types: BTreeMap::new(),
             functions: Vec::new(),
@@ -648,12 +639,64 @@ mod tests {
             items: Vec::new(),
             imports: BTreeMap::new(),
             test: false,
+            repeated: None,
         };
         let unsupported = syn::Item::Verbatim("unsupported syntax".parse().unwrap());
 
         assert_eq!(
             declaration(&mut facts, &module, &unsupported, &policy, &mut report).unwrap_err(),
             "unsupported item syntax in src/lib.rs"
+        );
+    }
+
+    #[test]
+    fn repeated_type_names_become_numbered_configuration_variants() {
+        let mut facts = Facts {
+            variants: BTreeMap::new(),
+            modules: BTreeMap::new(),
+            types: BTreeMap::new(),
+            functions: Vec::new(),
+            slots: Vec::new(),
+            aliases: BTreeMap::new(),
+        };
+        let module = Module {
+            key: "crate::io".into(),
+            root: "crate".into(),
+            path: "src/io.rs".into(),
+            items: Vec::new(),
+            imports: BTreeMap::new(),
+            test: false,
+            repeated: None,
+        };
+        let name = syn::Ident::new("Stack", proc_macro2::Span::call_site());
+        let mut keys = Vec::new();
+        for _ in 0..3 {
+            let key = type_key(&facts, &module, &name);
+            facts.types.insert(
+                key.clone(),
+                crate::scan::TypeFacts {
+                    location: crate::report::Location {
+                        path: "src/io.rs".into(),
+                        line: 1,
+                        column: 1,
+                    },
+                    fields: Vec::new(),
+                    field_count: 0,
+                    is_enum: false,
+                    variants: std::collections::BTreeSet::new(),
+                    functions: Vec::new(),
+                },
+            );
+            keys.push(key);
+        }
+
+        assert_eq!(
+            keys,
+            [
+                "crate::io::Stack",
+                "crate::io::Stack [cfg variant 2]",
+                "crate::io::Stack [cfg variant 3]"
+            ]
         );
     }
 
@@ -666,6 +709,16 @@ mod tests {
         };
         nested.visit_expr(&expression);
         assert!(nested.unsupported);
+
+        let empty_statement: syn::Block = syn::parse_quote!({
+            return 1;
+        });
+        let mut nested = Nested {
+            items: Vec::new(),
+            unsupported: false,
+        };
+        nested.visit_block(&empty_statement);
+        assert!(!nested.unsupported);
 
         let local_types: syn::Block = syn::parse_quote!({
             struct Local;

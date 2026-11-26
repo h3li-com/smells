@@ -2,7 +2,7 @@ use crate::{
     metrics::{self, Counter},
     policy::Policy,
     report::{FindingRelations, Report},
-    scan::{Facts, Function, syntax},
+    scan::{Facts, Function, syntax, without_variants},
     similarity::{DuplicateFamily, SimilarPair, duplicate_families, exact_jaccard_pairs},
 };
 use proc_macro2::{TokenStream, TokenTree};
@@ -774,7 +774,8 @@ fn duplicate_thresholds(policy: &Policy) -> Option<(u64, u64)> {
         .reduce(|left, right| (left.0.min(right.0), left.1.min(right.1)))
 }
 
-/// Declarations sharing one qualified symbol are mutually exclusive cfg
+/// Declarations sharing one qualified symbol, possibly in different
+/// configuration variants of a module, are mutually exclusive cfg
 /// alternatives, so only one of them is ever compiled.
 fn duplicate_rule_applies(
     id: &str,
@@ -782,11 +783,12 @@ fn duplicate_rule_applies(
     first: &Function,
     second: &Function,
 ) -> bool {
-    first.symbol != second.symbol
+    let owner = |function: &Function| function.owner.as_deref().map(without_variants);
+    without_variants(&first.symbol) != without_variants(&second.symbol)
         && (id != alternative
             || (first.owner.is_some()
                 && second.owner.is_some()
-                && first.owner != second.owner
+                && owner(first) != owner(second)
                 && interface(first) != interface(second)))
 }
 
@@ -1054,6 +1056,28 @@ mod tests {
             "rust.alternative_interfaces",
             &unix,
             &other
+        ));
+
+        let mut variant = method("fn hidden(&self) -> bool { true }");
+        variant.symbol = "crate::imp [cfg variant 2]::Service::hidden".into();
+        variant.owner = Some("crate::imp [cfg variant 2]::Service".into());
+        let mut canonical = method("fn hidden(&self) -> bool { true }");
+        canonical.symbol = "crate::imp::Service::hidden".into();
+        canonical.owner = Some("crate::imp::Service".into());
+        for id in ["rust.duplicate_functions", "rust.alternative_interfaces"] {
+            assert!(!duplicate_rule_applies(
+                id,
+                "rust.alternative_interfaces",
+                &canonical,
+                &variant
+            ));
+        }
+        variant.symbol = "crate::imp [cfg variant 2]::Service::shown".into();
+        assert!(!duplicate_rule_applies(
+            "rust.alternative_interfaces",
+            "rust.alternative_interfaces",
+            &canonical,
+            &variant
         ));
     }
 

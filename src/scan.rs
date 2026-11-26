@@ -30,6 +30,11 @@ pub(crate) struct Module {
     pub imports: BTreeMap<String, Vec<String>>,
     /// Compiled only for tests: a test target root or a `#[cfg(test)]` module chain.
     pub test: bool,
+    /// This module's key at the first load of its file, when the file or an
+    /// enclosing file was already loaded at another module path, as when two
+    /// crates share a source file. The module still resolves names, but only
+    /// the first load contributes declarations and functions.
+    pub repeated: Option<String>,
 }
 
 pub(crate) struct TypeFacts {
@@ -68,6 +73,31 @@ pub(crate) struct Facts {
     pub functions: Vec<Function>,
     pub slots: Vec<Slots>,
     pub aliases: BTreeMap<String, (String, Type)>,
+    /// Each module path that conditional compilation declares more than once,
+    /// mapped to the keys of its later configuration variants in source order.
+    pub variants: BTreeMap<String, Vec<String>>,
+}
+
+/// Marks the key of a module declared again under another `cfg`, such as
+/// `imp [cfg variant 2]` for the Windows twin of a Unix `imp` module.
+const VARIANT_MARKER: &str = " [cfg variant ";
+
+/// The key of the `ordinal`-th configuration variant of module `key`.
+fn variant_key(key: &str, ordinal: usize) -> String {
+    format!("{key}{VARIANT_MARKER}{ordinal}]")
+}
+
+/// `symbol` with every configuration variant marker removed, so the same item
+/// declared in two variants compares equal.
+pub(crate) fn without_variants(symbol: &str) -> String {
+    let mut result = String::with_capacity(symbol.len());
+    let mut rest = symbol;
+    while let Some(start) = rest.find(VARIANT_MARKER) {
+        result.push_str(&rest[..start]);
+        rest = rest[start..].split_once(']').map_or("", |(_, tail)| tail);
+    }
+    result.push_str(rest);
+    result
 }
 
 pub(crate) fn location(path: &str, span: Span) -> Location {
@@ -105,7 +135,11 @@ pub(crate) fn check(input: &Input, registry: &Registry) -> Report {
     if parsed.len() != input.files.len() {
         return report;
     }
-    let referenced = graph::referenced_sources(&parsed, &mut report);
+    let sources = graph::Sources {
+        parsed: &parsed,
+        directory_links: &input.directory_links,
+    };
+    let referenced = graph::referenced_sources(sources, &mut report);
     if report.has_errors() {
         return report;
     }
@@ -115,13 +149,14 @@ pub(crate) fn check(input: &Input, registry: &Registry) -> Report {
         return report;
     }
     let mut facts = Facts {
+        variants: BTreeMap::new(),
         modules: BTreeMap::new(),
         types: BTreeMap::new(),
         functions: vec![],
         slots: vec![],
         aliases: BTreeMap::new(),
     };
-    facts.modules = graph::collect_modules(roots, &parsed, &mut report);
+    (facts.modules, facts.variants) = graph::collect_modules(roots, sources, &mut report);
     if let Err(error) = graph::validate_module_coverage(&facts.modules, &parsed) {
         report.error(error);
     }
@@ -137,4 +172,19 @@ pub(crate) fn check(input: &Input, registry: &Registry) -> Report {
     extract::record_type_metrics(&facts, input, &mut report);
     crate::patterns::check(&facts, &input.policy, &mut report);
     report
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{variant_key, without_variants};
+
+    #[test]
+    fn variant_markers_strip_back_to_the_canonical_symbol() {
+        let module = variant_key("crate::imp", 2);
+        assert_eq!(module, "crate::imp [cfg variant 2]");
+        let nested = format!("{}::Driver::run", variant_key(&format!("{module}::io"), 13));
+        assert_eq!(without_variants(&nested), "crate::imp::io::Driver::run");
+        assert_eq!(without_variants("crate::plain"), "crate::plain");
+        assert_eq!(without_variants("crate [cfg variant 2"), "crate");
+    }
 }
