@@ -60,6 +60,8 @@ pub(crate) struct HistoryCommit {
     pub id: String,
     /// The commit has no parent: an initial import rather than a change.
     pub root: bool,
+    /// The commit subject line, used to recognise mechanical sweeps and reverts.
+    pub subject: String,
     pub files: Vec<String>,
 }
 

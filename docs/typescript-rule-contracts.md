@@ -22,9 +22,9 @@ Match when authored body code lines are greater than `maximum` (default 100). Th
 Exact canonical `up`, `down`, or Prisma `operations` Declaration Roles in a high-confidence framework migration Source Role retain matched Measurements and Findings but are reported as nonblocking `reported_by_role` review signals. Inferred roles require actual framework imports/contracts and framework-bound parameters. An explicit anchored role supplies file-level framework evidence for wrappers or custom providers, but the scanner still requires the framework's exact top-level export or direct class relationship, entrypoint set, and nonempty parameters where that framework uses them. Helpers and sibling declarations use normal blocking semantics.
 
 <a id="typescript-function-arguments"></a>
-### `typescript.function_arguments@1`
+### `typescript.function_arguments@2`
 
-Match when declared parameter nodes are greater than `maximum` (default 7). JavaScript's implicit `this` is not a declared parameter and is not counted; an explicit TypeScript `this` parameter is counted.
+Match when declared parameter nodes are greater than `maximum` (default 7). JavaScript's implicit `this` is not a declared parameter and is not counted; an explicit TypeScript `this` parameter is counted. Comments between parameters are not parameters.
 
 <a id="typescript-class-fields"></a>
 ### `typescript.class_fields@1`
@@ -73,20 +73,20 @@ Match only when field count, method count, and summed method lines are all at mo
 The rules below run without `--evidence`. Their built-in observations are conservative authored-source or bounded-Git-history indicators and identify their exact collector in each finding. A supplied external entry replaces the built-in observations for that rule, using the same measurement map and scanner-owned threshold evaluation.
 
 <a id="typescript-primitive-slots"></a>
-### `typescript.primitive_slots@1` — built in
-For each class with authored fields, count exact `string`, `number`, `boolean`, `bigint`, and `symbol` types. Match `minimum_raw_slots` and `minimum_share_percent`; aliases and containers are not unwrapped.
+### `typescript.primitive_slots@2` — built in
+For each class with authored fields (interface declarations are not classes and are not observed), count exact `string`, `number`, `boolean`, `bigint`, and `symbol` types. Match `minimum_raw_slots` and `minimum_share_percent`; aliases and containers are not unwrapped.
 
 <a id="typescript-alternative-interfaces"></a>
-### `typescript.alternative_interfaces@1` — built in
-Compare distinct classes with different method-name sets using identifier-normalized lexical body-token multisets. Match both token minima and configured Jaccard similarity. This is behavioral-shape evidence, not substitutability proof.
+### `typescript.alternative_interfaces@2` — built in
+Compare distinct classes with different method-name sets. Each class's concrete method bodies, in source order, become one code-only lexical token sequence (comments and strings masked; identifiers and numbers normalized; a boundary between methods), compared as multisets of ordered 4-token shingles. Match both token minima and configured shingle Jaccard similarity (default 6200 basis points). Python data-model special methods such as `__init__`, `__eq__`, `__hash__` and `__bool__` are protocol implementations and are left out of the method-name sets; library protocol hooks such as `__rich_console__` still count. Similar-sized classes whose token counts merely overlap no longer match. This is behavioral-shape evidence, not substitutability proof.
 
 <a id="typescript-repeated-dispatch"></a>
-### `typescript.repeated_dispatch@1` — built in
-Group callables by their authored `case` label sequence. Match `minimum_sites` sharing at least `minimum_arms`; discriminated-union identity is not inferred.
+### `typescript.repeated_dispatch@2` — built in
+Group callables by the sorted authored text of their `case` labels (string labels keep their literal text; `default` is not a label). Each `switch`/`match` statement counts once, for its innermost enclosing function, and a function with several identical statements is one site. Match `minimum_sites` sharing at least `minimum_arms`; discriminated-union identity is not inferred.
 
 <a id="typescript-temporary-fields"></a>
-### `typescript.temporary_fields@1` — built in
-Treat optional, nullable, or `undefined` fields as lifecycle candidates and count direct `this.field` use across non-constructor class methods; `constructor` initializes fields and is not lifecycle use. Apply the configured field, method, and maximum-use thresholds.
+### `typescript.temporary_fields@2` — built in
+Treat optional, nullable, or `undefined` fields as lifecycle candidates. A field is a name the class itself declares: a direct property declaration in the class body, a constructor parameter (including parameter properties), or a `this.name = ...` assignment. Members of inline object types, parameter lists and object literals nested inside a member are not class fields. Count direct `this.field` use across non-constructor class methods; `constructor` initializes fields and is not lifecycle use. Apply the configured field, method, and maximum-use thresholds.
 
 <a id="typescript-forwarding-share"></a>
 ### `typescript.forwarding_share@1` — built in
@@ -105,41 +105,41 @@ Count single-underscore private function/class declarations with no second ident
 Count authored generic parameters declared in angle-bracket syntax but not referenced elsewhere in the declaration. Match findings greater than `maximum_findings`.
 
 <a id="typescript-nominal-slot-contract"></a>
-### `typescript.nominal_slot_contract@1` — built in
-Count primitive class fields with common domain-role names such as IDs, email, phone, money, dates, addresses, and country/postcode values. Match mismatches greater than `maximum_mismatches`; a project contract may replace this naming heuristic.
+### `typescript.nominal_slot_contract@2` — built in
+Count primitive, non-boolean class fields (not `interface` declarations, which describe shapes such as wire payloads) with common domain-role names such as IDs, email, phone, money, dates, addresses, and country/postcode values. A role matches the whole name or a `_`-separated suffix (`user_id`, `zip_code`); the ambiguous `zip` counts only as the whole name, so `search_zip` is not a postcode. Match mismatches greater than `maximum_mismatches`; a project contract may replace this naming heuristic.
 
 <a id="typescript-port-conformance"></a>
-### `typescript.port_conformance@1` — built in
-For classes declaring an authored interface, compare direct method names with that interface and count missing methods. Match failures greater than `maximum_failures`; compiler and behavioral-test evidence remain optional stronger overrides.
+### `typescript.port_conformance@2` — built in
+For classes declaring an authored interface in their `extends`/`implements` heritage clause (not type-parameter constraints or defaults), compare direct method names with that interface and count missing methods. A port name resolves to a same-file declaration, else to the single declaration of that name; an ambiguous name is not resolved. Match failures greater than `maximum_failures`; compiler and behavioral-test evidence remain optional stronger overrides.
 
 <a id="typescript-refused-bequest"></a>
 ### `typescript.refused_bequest@1` — built in
 For same-corpus inheritance, count base methods and derived overrides that explicitly reject them by throwing an error. Apply the inherited-member and unused-share thresholds.
 
 <a id="typescript-divergent-change"></a>
-### `typescript.divergent_change@1` — built in
-Inspect up to 200 commits and measure each current file's change count plus distinct co-change responsibilities. A responsibility is the first module below the owning implementation root, after a leading `src` or `lib` and a top-level Python package (a directory with `__init__.py`); a file directly in that root is its own responsibility. The repository's initial commit is an import, not a change, and is skipped. Apply both configured minima. Without Git history this rule is incomplete, never clean.
+### `typescript.divergent_change@2` — built in
+Inspect up to 200 commits and measure each current file's change count plus distinct co-change responsibilities. A responsibility is the first module below the owning implementation root, after a leading `src` or `lib` and a top-level Python package (a directory with `__init__.py`); a file directly in that root is its own responsibility, except that files directly in a flat directory (one with no production files below it) share that directory as one responsibility. Only production code counts: test code (`tests`/`test`/`__tests__`/`benches` directories, `conftest.py`, `test_*.py`, `*_test.py`, `.test.`/`.spec.` files), files under `docs`, `docs_src`, `examples`, `fixtures`, `__fixtures__`, `scripts`, `bench(mark)s`, `playground`, `e2e` or `*-tests`/`*_tests` directories, `*.config.*` files, `setup.py` and `noxfile.py` are never responsibilities or finding locations. A file whose first comment lines carry a generated marker (`@generated`, `do not edit`, `auto-generated`, `generated by`, ...) is never a finding location. Logical changes exclude the repository's initial commit (an import), mechanical sweeps, and reverts: a commit is a sweep when its subject starts with `bump`, `format` or `reformat`, has a conventional type of `build`, `chore`, `ci`, `doc`, `docs`, `fmt`, `format`, `lint`, `style`, `test` or `typo`, or names a formatter, linter, type checker, typing, whitespace or spelling sweep (`rustfmt`, `clippy`, `ruff`, `isort`, `mypy`, `prettier`, `typos`, `msrv`, `typing`, `whitespace`, `ws`, `__future__`, ...), or when it touches at least max(20, 10% of production files) production files. A `Revert "X"` commit never counts and the change it reverts counts only when it was later re-applied, so a revert pair counts once at most. Commit subjects are matched only against these fixed structural words; no other commit prose or LLM inference is used. Apply both configured minima. Without Git history this rule is incomplete, never clean.
 
 <a id="typescript-parallel-inheritance"></a>
-### `typescript.parallel_inheritance@1` — built in
-Compare authored inheritance families and count shared child-role prefixes/suffixes across different bases. Match at least `minimum_parallel_pairs`; this detects parallel structure without claiming synchronized historical addition.
+### `typescript.parallel_inheritance@2` — built in
+Compare inheritance families and pair child roles one-to-one across different bases. A role is the child name minus the base name's words, ignoring `Base`/`Sync`/`Async` markers; roles pair exactly first, then when one role's words begin the other's (`Catch` with `CatchClause`). Sync/async twin bases (`SyncByteStream`/`AsyncByteStream`) pair children by their marker-free names. Affix roles pair only between differently named bases that are authored or external without a stripped marker, so copies of one hierarchy and external bases such as `BaseModel` do not pair; a class inheriting both bases is not counted; `interface` declarations describe shapes, not subclass hierarchies, and are not family members. Match at least `minimum_parallel_pairs`; this detects parallel structure without claiming synchronized historical addition.
 
 <a id="typescript-shotgun-surgery"></a>
-### `typescript.shotgun_surgery@1` — built in
-Inspect up to 200 commits and count distinct source responsibilities changed in each commit. A responsibility is the first module below the owning implementation root, after a leading `src` or `lib` and a top-level Python package (a directory with `__init__.py`); a file directly in that root is its own responsibility. The repository's initial commit is an import, not a change, and is skipped. Match owner count greater than `maximum_owners`. Without Git history this rule is incomplete, never clean.
+### `typescript.shotgun_surgery@2` — built in
+Inspect up to 200 commits and count distinct source responsibilities changed in each commit. A responsibility is the first module below the owning implementation root, after a leading `src` or `lib` and a top-level Python package (a directory with `__init__.py`); a file directly in that root is its own responsibility, except that files directly in a flat directory (one with no production files below it) share that directory as one responsibility. Only production code counts: test code (`tests`/`test`/`__tests__`/`benches` directories, `conftest.py`, `test_*.py`, `*_test.py`, `.test.`/`.spec.` files), files under `docs`, `docs_src`, `examples`, `fixtures`, `__fixtures__`, `scripts`, `bench(mark)s`, `playground`, `e2e` or `*-tests`/`*_tests` directories, `*.config.*` files, `setup.py` and `noxfile.py` are never responsibilities or finding locations. A file whose first comment lines carry a generated marker (`@generated`, `do not edit`, `auto-generated`, `generated by`, ...) is never a finding location. Logical changes exclude the repository's initial commit (an import), mechanical sweeps, and reverts: a commit is a sweep when its subject starts with `bump`, `format` or `reformat`, has a conventional type of `build`, `chore`, `ci`, `doc`, `docs`, `fmt`, `format`, `lint`, `style`, `test` or `typo`, or names a formatter, linter, type checker, typing, whitespace or spelling sweep (`rustfmt`, `clippy`, `ruff`, `isort`, `mypy`, `prettier`, `typos`, `msrv`, `typing`, `whitespace`, `ws`, `__future__`, ...), or when it touches at least max(20, 10% of production files) production files. A `Revert "X"` commit never counts and the change it reverts counts only when it was later re-applied, so a revert pair counts once at most. Commit subjects are matched only against these fixed structural words; no other commit prose or LLM inference is used. Match owner count greater than `maximum_owners`. Without Git history this rule is incomplete, never clean.
 
 <a id="typescript-foreign-accesses"></a>
-### `typescript.foreign_accesses@2` — built in
-Measure each method that has an owned receiver: count its dotted member accesses whose receiver is not `self`, `cls`, `this`, `Self`, or `super` against all of its dotted accesses, and apply the foreign count and exclusive-share thresholds. Free functions, static methods, and methods without dotted accesses have no owned data to compare and are not observed. External type ownership can replace this lexical classification.
+### `typescript.foreign_accesses@3` — built in
+Measure each method that has an owned receiver: count its dotted member accesses whose receiver is not `self`, `cls`, `this`, `Self`, or `super` against all of its dotted accesses, and apply the foreign count and exclusive-share thresholds. A local bound directly from owned state (`x = self.items`, `const def = this._def`) is owned, and a dotted chain of names inherits its root's ownership, so `this._def.innerType` reads owned state. Free functions, static methods, and methods without dotted accesses have no owned data to compare and are not observed. External type ownership can replace this lexical classification.
 
 <a id="typescript-dependency-contract"></a>
-### `typescript.dependency_contract@1` — built in
-Count foreign accesses to underscore/private-style members. Match forbidden accesses greater than `maximum_forbidden_accesses`; an explicit dependency contract may replace this visibility heuristic.
+### `typescript.dependency_contract@2` — built in
+Count foreign accesses to underscore/private-style members. Dunder names such as the `__proto__` builtin and all-caps `__NAME` binding constants such as `__STATIC_CONTENT` are public by convention, not private members. Match forbidden accesses greater than `maximum_forbidden_accesses`; an explicit dependency contract may replace this visibility heuristic.
 
 <a id="typescript-library-capabilities"></a>
-### `typescript.library_capabilities@1` — built in
-Count authored prototype or foreign attribute assignment workarounds (not `==`/`===` comparisons) as missing-capability signals. Match failures greater than `maximum_failures`; capability tests may replace the heuristic.
+### `typescript.library_capabilities@2` — built in
+Count authored prototype or foreign attribute assignment workarounds (not `==`/`===` comparisons) as missing-capability signals. A non-prototype assignment counts only when the root of its target chain is an imported binding or a host global (`window`, `globalThis`, `global`, `process`, `navigator`); a local object such as `config.languageOptions.parser` is not a library class, a DOM write such as `document.head.innerHTML` is ordinary use, and a type in an annotation (`const x: ts.server.ServerHost =`, `| typeof fs.realpathSync.native =`) is not an assignment target. Match failures greater than `maximum_failures`; capability tests may replace the heuristic.
 
 <a id="typescript-navigation-chains"></a>
-### `typescript.navigation_chains@2` — built in
-Measure the longest run of consecutive navigation hops in a contiguous dotted expression and match at least `minimum_transitions`. A hop is a member read or a zero-argument call; a call with any argument text starts a new run; standard conversions (`toString`, `valueOf`, `trim`, `keys`, `values`, `entries`, `length`, `slice`, and similar) are transparent; the first hop from `self`, `this`, or `Self` reads owned state and is not counted. Remaining fluent APIs may legitimately match; resolved domain-owner evidence may replace the lexical result.
+### `typescript.navigation_chains@3` — built in
+Measure the longest run of consecutive navigation hops in a contiguous dotted expression and match at least `minimum_transitions`. A hop is a member read or a zero-argument call; a call with any argument text, including nested parentheses or arguments continued on the following lines, starts a new run; standard conversions (`toString`, `valueOf`, `trim`, `keys`, `values`, `entries`, `length`, `slice`, and similar) are transparent; the first hop from `self`, `this`, or `Self` reads owned state and is not counted. Remaining fluent APIs may legitimately match; resolved domain-owner evidence may replace the lexical result.

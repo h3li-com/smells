@@ -546,10 +546,10 @@ mod tests {
                 &policy,
             )
         };
-        assert!(case(20, 82, 20, 100));
-        assert!(!case(19, 82, 20, 100));
-        assert!(!case(20, 82, 19, 100));
-        assert!(!case(20, 81, 20, 100));
+        assert!(case(20, 62, 20, 100));
+        assert!(!case(19, 62, 20, 100));
+        assert!(!case(20, 62, 19, 100));
+        assert!(!case(20, 61, 20, 100));
         assert!(
             evaluate(
                 "python.alternative_interfaces",

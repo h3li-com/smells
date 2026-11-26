@@ -131,9 +131,45 @@
           "$ref": "#/$defs/selection_v2"
         },
         "typescript.foreign_accesses": {
-          "$ref": "#/$defs/selection_v2"
+          "$ref": "#/$defs/selection_v3"
         },
         "typescript.navigation_chains": {
+          "$ref": "#/$defs/selection_v3"
+        },
+        "typescript.alternative_interfaces": {
+          "$ref": "#/$defs/selection_v2"
+        },
+        "typescript.dependency_contract": {
+          "$ref": "#/$defs/selection_v2"
+        },
+        "typescript.divergent_change": {
+          "$ref": "#/$defs/selection_v2"
+        },
+        "typescript.function_arguments": {
+          "$ref": "#/$defs/selection_v2"
+        },
+        "typescript.library_capabilities": {
+          "$ref": "#/$defs/selection_v2"
+        },
+        "typescript.nominal_slot_contract": {
+          "$ref": "#/$defs/selection_v2"
+        },
+        "typescript.parallel_inheritance": {
+          "$ref": "#/$defs/selection_v2"
+        },
+        "typescript.port_conformance": {
+          "$ref": "#/$defs/selection_v2"
+        },
+        "typescript.primitive_slots": {
+          "$ref": "#/$defs/selection_v2"
+        },
+        "typescript.repeated_dispatch": {
+          "$ref": "#/$defs/selection_v2"
+        },
+        "typescript.shotgun_surgery": {
+          "$ref": "#/$defs/selection_v2"
+        },
+        "typescript.temporary_fields": {
           "$ref": "#/$defs/selection_v2"
         },
         "typescript.function_crap": {

@@ -105,7 +105,9 @@ impl<'a> BuiltInCollectors<'a> {
         match group {
             StructuralCollector::ClassShape => self.collect_class_shape(kind, rule),
             StructuralCollector::FunctionRisk => self.collect_function_risk(kind, rule),
-            StructuralCollector::Repetition => Ok(structural::repeated_dispatch(self.model(rule)?)),
+            StructuralCollector::Repetition => {
+                structural::repeated_dispatch(rule, self.model(rule)?, self.input)
+            }
         }
     }
 
@@ -115,7 +117,9 @@ impl<'a> BuiltInCollectors<'a> {
                 structural::alternative_interfaces(rule, self.model(rule)?, self.input)
             }
             RuleKind::ForwardingShare => Ok(structural::forwarding_share(rule, self.model(rule)?)),
-            RuleKind::TemporaryFields => Ok(structural::temporary_fields(rule, self.model(rule)?)),
+            RuleKind::TemporaryFields => {
+                structural::temporary_fields(rule, self.model(rule)?, self.input)
+            }
             _ => unreachable!("collector group and class-shape dispatcher must agree"),
         }
     }
@@ -169,7 +173,9 @@ impl<'a> BuiltInCollectors<'a> {
     fn collect_inheritance(&self, kind: RuleKind, rule: &Rule) -> Result<Vec<Observation>, String> {
         match kind {
             RuleKind::ParallelInheritance => Ok(contracts::parallel_inheritance(self.model(rule)?)),
-            RuleKind::PortConformance => Ok(contracts::port_conformance(rule, self.model(rule)?)),
+            RuleKind::PortConformance => {
+                contracts::port_conformance(rule, self.model(rule)?, self.input)
+            }
             RuleKind::RefusedBequest => Ok(contracts::refused_bequest(self.model(rule)?)),
             _ => unreachable!("collector group and inheritance dispatcher must agree"),
         }

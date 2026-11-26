@@ -115,7 +115,7 @@ fn parameters(node: Node<'_>, source: &str) -> Vec<(String, String)> {
     for parameter in parameters.named_children(&mut cursor) {
         if matches!(
             parameter.kind(),
-            "keyword_separator" | "positional_separator"
+            "keyword_separator" | "positional_separator" | "comment"
         ) {
             continue;
         }
@@ -1187,6 +1187,31 @@ mod tests {
                 .map(|function| function.tokens.len())
                 .sum::<usize>()
         );
+    }
+
+    #[test]
+    fn comments_between_parameters_are_not_parameters() {
+        let source = concat!(
+            "export function resolve(\n",
+            "  first: string,\n",
+            "  /** @internal */\n",
+            "  second?: number,\n",
+            "  // Backward compatibility\n",
+            "  ...rest: string[]\n",
+            ") {}\n",
+        );
+        let (typescript_facts, _) = facts("typescript-v1", "resolve.ts", source);
+        let names = typescript_facts.functions[0]
+            .parameters
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["first", "second", "...rest"]);
+
+        let python =
+            "def build(\n    first,  # leading\n    # between\n    second,\n):\n    pass\n";
+        let (python_facts, _) = facts("python-v1", "build.py", python);
+        assert_eq!(python_facts.functions[0].parameters.len(), 2);
     }
 
     #[test]

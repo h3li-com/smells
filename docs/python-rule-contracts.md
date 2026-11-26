@@ -22,9 +22,9 @@ Match when authored body code lines are greater than `maximum` (default 100). Th
 An exact zero-argument Alembic `upgrade` or `downgrade` Declaration Role in a high-confidence `database_migration` Source Role retains the matched Measurement and Finding but is reported as a nonblocking `reported_by_role` review signal. Inferred roles require Alembic import and revision-graph evidence; an explicit anchored Alembic role supplies the file-level framework evidence but still requires revision metadata and the canonical signature. Helpers and same-named functions without that evidence use normal blocking semantics.
 
 <a id="python-function-arguments"></a>
-### `python.function_arguments@1`
+### `python.function_arguments@2`
 
-Match when declared parameter nodes are greater than `maximum` (default 7). A method receiver is a declared parameter and counts once. Keyword-only parameters that have a default (after `*` or `*args`) are not counted: callers must name them and may omit them, so they do not lengthen a call. Keyword-only parameters without a default still count.
+Match when declared parameter nodes are greater than `maximum` (default 7). A method receiver is a declared parameter and counts once. Keyword-only parameters that have a default (after `*` or `*args`) are not counted: callers must name them and may omit them, so they do not lengthen a call. Keyword-only parameters without a default still count. Comments between parameters are not parameters.
 
 <a id="python-class-fields"></a>
 ### `python.class_fields@1`
@@ -75,12 +75,12 @@ The rules below run without `--evidence`. Their built-in observations are conser
 For each class with annotated fields, count exact authored `str`, `int`, `float`, `bool`, and `bytes` types. Match `minimum_raw_slots` and `minimum_share_percent`; aliases and containers are not unwrapped.
 
 <a id="python-alternative-interfaces"></a>
-### `python.alternative_interfaces@1` — built in
-Compare distinct classes with different method-name sets using identifier-normalized lexical body-token multisets. Match both token minima and configured Jaccard similarity. This is behavioral-shape evidence, not substitutability proof.
+### `python.alternative_interfaces@2` — built in
+Compare distinct classes with different method-name sets. Each class's concrete method bodies, in source order, become one code-only lexical token sequence (comments and strings masked; identifiers and numbers normalized; a boundary between methods), compared as multisets of ordered 4-token shingles. Match both token minima and configured shingle Jaccard similarity (default 6200 basis points). Python data-model special methods such as `__init__`, `__eq__`, `__hash__` and `__bool__` are protocol implementations and are left out of the method-name sets; library protocol hooks such as `__rich_console__` still count. Similar-sized classes whose token counts merely overlap no longer match. This is behavioral-shape evidence, not substitutability proof.
 
 <a id="python-repeated-dispatch"></a>
-### `python.repeated_dispatch@1` — built in
-Group callables by their authored `case` label sequence. Match `minimum_sites` sharing at least `minimum_arms`; type identity is not inferred.
+### `python.repeated_dispatch@2` — built in
+Group callables by the sorted authored text of their `case` labels (string labels keep their literal text; a `case` with several patterns is one label). Each `switch`/`match` statement counts once, for its innermost enclosing function, and a function with several identical statements is one site. Match `minimum_sites` sharing at least `minimum_arms`; type identity is not inferred.
 
 <a id="python-temporary-fields"></a>
 ### `python.temporary_fields@1` — built in
@@ -95,49 +95,49 @@ Count non-constructor methods whose complete body is one optional `return` of `s
 Calculate cyclomatic complexity on the syntax tree and a conservative zero-coverage CRAP upper bound `C² + C`. Match scores greater than `warning_maximum` (default 5). A match blocks only when the rule is `required`, the score is greater than `maximum` (default 10), and it was measured from supplied LCOV coverage. Scores at most `maximum` and every zero-coverage upper bound are non-blocking warnings, and the explanation says which. Complete external coverage may replace this pessimistic observation. Decisions follow radon: `if`, `elif`, conditional expressions, `for`, `while`, an `else` on a loop or `try`, `except`, `assert`, comprehension `for`/`if`, `and`, `or`, and each `match` `case` except a wildcard or bare capture. A `case` guard and `finally` are not decisions. Unlike radon, decisions inside an `assert` count, and lambdas, like nested functions and classes, are their own scope. Text in strings and comments never counts.
 
 <a id="python-unused-code"></a>
-### `python.unused_code@1` — built in
-Count single-underscore private function/class declarations with no second identifier occurrence in the captured corpus. Match findings greater than `maximum_findings`; public and dynamic reachability are outside the built-in scope. Single-underscore protocol hooks such as `_missing_` or `_repr_markdown_` are called by a framework and are not private. Declarations under a conventional test path are grouped as `<path>::unused-test-declarations` and are a non-blocking indicator.
+### `python.unused_code@2` — built in
+Count single-underscore private function/class declarations with no second identifier occurrence in the captured corpus. Match findings greater than `maximum_findings`; public and dynamic reachability are outside the built-in scope. Single-underscore protocol hooks such as `_missing_` or `_repr_markdown_` are called by a framework and are not private. Functions registered by a decorator that a framework invokes without naming them are reachable: a decorator whose last name ends in `validator` or `serializer` (pydantic), `validates`, `validates_schema`, `pre_load`, `post_load`, `pre_dump`, or `post_dump` (marshmallow, SQLAlchemy), and a pytest `fixture` called with `name=` or with `autouse` not `False`. Other decorators, including a bare `@pytest.fixture`, do not make a declaration reachable. Declarations under a conventional test path are grouped as `<path>::unused-test-declarations` and are a non-blocking indicator.
 
 <a id="python-unused-type-parameters"></a>
 ### `python.unused_type_parameters@1` — built in
 Count authored generic parameters declared in bracket syntax but not referenced elsewhere in the declaration. Match findings greater than `maximum_findings`.
 
 <a id="python-nominal-slot-contract"></a>
-### `python.nominal_slot_contract@1` — built in
-Count primitive class fields with common domain-role names such as IDs, email, phone, money, dates, addresses, and country/postcode values. Match mismatches greater than `maximum_mismatches`; a project contract may replace this naming heuristic.
+### `python.nominal_slot_contract@2` — built in
+Count primitive, non-boolean class fields with common domain-role names such as IDs, email, phone, money, dates, addresses, and country/postcode values. A role matches the whole name or a `_`-separated suffix (`user_id`, `zip_code`); the ambiguous `zip` counts only as the whole name, so `search_zip` is not a postcode. Match mismatches greater than `maximum_mismatches`; a project contract may replace this naming heuristic.
 
 <a id="python-port-conformance"></a>
-### `python.port_conformance@1` — built in
-For classes inheriting an authored `Protocol`/`ABC`, compare direct method names with the port and count missing methods. Match failures greater than `maximum_failures`; behavioral tests remain an optional stronger override.
+### `python.port_conformance@2` — built in
+For classes inheriting an authored `Protocol`/`ABC`, compare direct method names with the port's required methods and count missing methods. A `Protocol` requires every declared method; an `ABC` requires only methods decorated with `abstractmethod` (or another `abc.abstract*` decorator), because concrete methods are inherited. Match failures greater than `maximum_failures`; behavioral tests remain an optional stronger override.
 
 <a id="python-refused-bequest"></a>
 ### `python.refused_bequest@1` — built in
 For same-corpus inheritance, count base methods and derived overrides that explicitly reject them using `pass`, `NotImplemented`, or `NotImplementedError`. Apply the inherited-member and unused-share thresholds.
 
 <a id="python-divergent-change"></a>
-### `python.divergent_change@1` — built in
-Inspect up to 200 commits and measure each current file's change count plus distinct co-change responsibilities. A responsibility is the first module below the owning implementation root, after a leading `src` or `lib` and a top-level Python package (a directory with `__init__.py`); a file directly in that root is its own responsibility. The repository's initial commit is an import, not a change, and is skipped. Apply both configured minima. Without Git history this rule is incomplete, never clean.
+### `python.divergent_change@2` — built in
+Inspect up to 200 commits and measure each current file's change count plus distinct co-change responsibilities. A responsibility is the first module below the owning implementation root, after a leading `src` or `lib` and a top-level Python package (a directory with `__init__.py`); a file directly in that root is its own responsibility, except that files directly in a flat directory (one with no production files below it) share that directory as one responsibility. Only production code counts: test code (`tests`/`test`/`__tests__`/`benches` directories, `conftest.py`, `test_*.py`, `*_test.py`, `.test.`/`.spec.` files), files under `docs`, `docs_src`, `examples`, `fixtures`, `__fixtures__`, `scripts`, `bench(mark)s`, `playground`, `e2e` or `*-tests`/`*_tests` directories, `*.config.*` files, `setup.py` and `noxfile.py` are never responsibilities or finding locations. A file whose first comment lines carry a generated marker (`@generated`, `do not edit`, `auto-generated`, `generated by`, ...) is never a finding location. Logical changes exclude the repository's initial commit (an import), mechanical sweeps, and reverts: a commit is a sweep when its subject starts with `bump`, `format` or `reformat`, has a conventional type of `build`, `chore`, `ci`, `doc`, `docs`, `fmt`, `format`, `lint`, `style`, `test` or `typo`, or names a formatter, linter, type checker, typing, whitespace or spelling sweep (`rustfmt`, `clippy`, `ruff`, `isort`, `mypy`, `prettier`, `typos`, `msrv`, `typing`, `whitespace`, `ws`, `__future__`, ...), or when it touches at least max(20, 10% of production files) production files. A `Revert "X"` commit never counts and the change it reverts counts only when it was later re-applied, so a revert pair counts once at most. Commit subjects are matched only against these fixed structural words; no other commit prose or LLM inference is used. Apply both configured minima. Without Git history this rule is incomplete, never clean.
 
 <a id="python-parallel-inheritance"></a>
-### `python.parallel_inheritance@1` — built in
-Compare authored inheritance families and count shared child-role prefixes/suffixes across different bases. Match at least `minimum_parallel_pairs`; this detects parallel structure without claiming synchronized historical addition.
+### `python.parallel_inheritance@2` — built in
+Compare inheritance families and pair child roles one-to-one across different bases. A role is the child name minus the base name's words, ignoring `Base`/`Sync`/`Async` markers; roles pair exactly first, then when one role's words begin the other's (`Catch` with `CatchClause`). Sync/async twin bases (`SyncByteStream`/`AsyncByteStream`) pair children by their marker-free names. Affix roles pair only between differently named bases that are authored or external without a stripped marker, so copies of one hierarchy and external bases such as `BaseModel` do not pair; a class inheriting both bases is not counted. Match at least `minimum_parallel_pairs`; this detects parallel structure without claiming synchronized historical addition.
 
 <a id="python-shotgun-surgery"></a>
-### `python.shotgun_surgery@1` — built in
-Inspect up to 200 commits and count distinct source responsibilities changed in each commit. A responsibility is the first module below the owning implementation root, after a leading `src` or `lib` and a top-level Python package (a directory with `__init__.py`); a file directly in that root is its own responsibility. The repository's initial commit is an import, not a change, and is skipped. Match owner count greater than `maximum_owners`. Without Git history this rule is incomplete, never clean.
+### `python.shotgun_surgery@2` — built in
+Inspect up to 200 commits and count distinct source responsibilities changed in each commit. A responsibility is the first module below the owning implementation root, after a leading `src` or `lib` and a top-level Python package (a directory with `__init__.py`); a file directly in that root is its own responsibility, except that files directly in a flat directory (one with no production files below it) share that directory as one responsibility. Only production code counts: test code (`tests`/`test`/`__tests__`/`benches` directories, `conftest.py`, `test_*.py`, `*_test.py`, `.test.`/`.spec.` files), files under `docs`, `docs_src`, `examples`, `fixtures`, `__fixtures__`, `scripts`, `bench(mark)s`, `playground`, `e2e` or `*-tests`/`*_tests` directories, `*.config.*` files, `setup.py` and `noxfile.py` are never responsibilities or finding locations. A file whose first comment lines carry a generated marker (`@generated`, `do not edit`, `auto-generated`, `generated by`, ...) is never a finding location. Logical changes exclude the repository's initial commit (an import), mechanical sweeps, and reverts: a commit is a sweep when its subject starts with `bump`, `format` or `reformat`, has a conventional type of `build`, `chore`, `ci`, `doc`, `docs`, `fmt`, `format`, `lint`, `style`, `test` or `typo`, or names a formatter, linter, type checker, typing, whitespace or spelling sweep (`rustfmt`, `clippy`, `ruff`, `isort`, `mypy`, `prettier`, `typos`, `msrv`, `typing`, `whitespace`, `ws`, `__future__`, ...), or when it touches at least max(20, 10% of production files) production files. A `Revert "X"` commit never counts and the change it reverts counts only when it was later re-applied, so a revert pair counts once at most. Commit subjects are matched only against these fixed structural words; no other commit prose or LLM inference is used. Match owner count greater than `maximum_owners`. Without Git history this rule is incomplete, never clean.
 
 <a id="python-foreign-accesses"></a>
-### `python.foreign_accesses@2` — built in
-Measure each method that has an owned receiver: count its dotted member accesses whose receiver is not `self`, `cls`, `this`, `Self`, or `super` against all of its dotted accesses, and apply the foreign count and exclusive-share thresholds. Free functions, static methods, and methods without dotted accesses have no owned data to compare and are not observed. External type ownership can replace this lexical classification.
+### `python.foreign_accesses@3` — built in
+Measure each method that has an owned receiver: count its dotted member accesses whose receiver is not `self`, `cls`, `this`, `Self`, or `super` against all of its dotted accesses, and apply the foreign count and exclusive-share thresholds. A local bound directly from owned state (`x = self.items`, `const def = this._def`) is owned, and a dotted chain of names inherits its root's ownership, so `this._def.innerType` reads owned state. Statement annotations such as `values: dict[str, t.Any] = {}` name types and are not accesses. Free functions, static methods, and methods without dotted accesses have no owned data to compare and are not observed. External type ownership can replace this lexical classification.
 
 <a id="python-dependency-contract"></a>
-### `python.dependency_contract@1` — built in
-Count foreign accesses to underscore/private-style members. Match forbidden accesses greater than `maximum_forbidden_accesses`; an explicit dependency contract may replace this visibility heuristic.
+### `python.dependency_contract@2` — built in
+Count foreign accesses to underscore/private-style members. Dunder names that begin and end with double underscores (`__html__`, `__version__`) are public protocol names, not private members. Match forbidden accesses greater than `maximum_forbidden_accesses`; an explicit dependency contract may replace this visibility heuristic.
 
 <a id="python-library-capabilities"></a>
-### `python.library_capabilities@1` — built in
-Count authored foreign/prototype attribute assignments (not `==` comparisons) and `setattr` workarounds as missing-capability signals. Match failures greater than `maximum_failures`; capability tests may replace the heuristic.
+### `python.library_capabilities@2` — built in
+Count authored foreign/prototype attribute assignments (not `==` comparisons) and `setattr` workarounds as missing-capability signals. `setattr(self, ...)` and `setattr(cls, ...)` target the object's own receiver and are not counted. Match failures greater than `maximum_failures`; capability tests may replace the heuristic.
 
 <a id="python-navigation-chains"></a>
-### `python.navigation_chains@2` — built in
-Measure the longest run of consecutive navigation hops in a contiguous dotted expression and match at least `minimum_transitions`. A hop is a member read or a zero-argument call; a call with any argument text starts a new run; standard conversions (`items`, `keys`, `values`, `copy`, `strip`, `lower`, `upper`, `encode`, `decode`, `split`, and similar) are transparent; the first hop from `self`, `this`, or `Self` reads owned state and is not counted. Remaining fluent APIs may legitimately match; resolved domain-owner evidence may replace the lexical result.
+### `python.navigation_chains@3` — built in
+Measure the longest run of consecutive navigation hops in a contiguous dotted expression and match at least `minimum_transitions`. A hop is a member read or a zero-argument call; a call with any argument text, including nested parentheses or arguments continued on the following lines, starts a new run; standard conversions (`items`, `keys`, `values`, `copy`, `strip`, `lower`, `upper`, `encode`, `decode`, `split`, and similar) are transparent; the first hop from `self`, `this`, or `Self` reads owned state and is not counted. Remaining fluent APIs may legitimately match; resolved domain-owner evidence may replace the lexical result.

@@ -29,7 +29,7 @@ fn member_access() -> &'static Regex {
 fn private_member_access() -> &'static Regex {
     static ACCESS: OnceLock<Regex> = OnceLock::new();
     ACCESS.get_or_init(|| {
-        Regex::new(r"\b([A-Za-z_][A-Za-z0-9_]*)\??\.(?:#|_)[A-Za-z_][A-Za-z0-9_]*")
+        Regex::new(r"\b([A-Za-z_][A-Za-z0-9_]*)\??\.((?:#|_)[A-Za-z_][A-Za-z0-9_]*)")
             .expect("valid built-in private-member expression")
     })
 }
@@ -68,6 +68,10 @@ fn navigation_adapters(language: &str) -> &'static [&'static str] {
             "into",
             "len",
             "is_empty",
+            "is_none",
+            "is_some",
+            "lock",
+            "await",
             "borrow",
             "borrow_mut",
             "keys",
@@ -129,18 +133,22 @@ const NAVIGATION_SELF_ROOTS: [&str; 3] = ["self", "this", "Self"];
 
 /// The longest run of consecutive navigation hops: field reads and zero-argument
 /// calls. A call that takes arguments starts a new run, adapters are transparent,
-/// and the first hop from the method's own receiver reads owned state.
-fn navigation_run(expression: &str, adapters: &[&str]) -> u64 {
+/// and the first hop from the method's own receiver reads owned state. `open_call`
+/// says the expression's last hop opens an argument list the expression regex could
+/// not close: nested parentheses or arguments on the following lines.
+fn navigation_run(expression: &str, adapters: &[&str], open_call: bool) -> u64 {
     let root_end = expression.find(['.', '?']).unwrap_or(expression.len());
     let mut skip_first = NAVIGATION_SELF_ROOTS.contains(&&expression[..root_end]);
     let (mut run, mut longest) = (0_u64, 0_u64);
-    for hop in navigation_hop().captures_iter(&expression[root_end..]) {
+    let hops = &expression[root_end..];
+    for hop in navigation_hop().captures_iter(hops) {
         if std::mem::take(&mut skip_first) {
             continue;
         }
         let name = hop.get(1).expect("hop name group").as_str();
+        let unclosed = open_call && hop.get(0).expect("hop match").end() == hops.len();
         let arguments = hop.get(2).map_or("()", |arguments| arguments.as_str());
-        if arguments != "()" {
+        if unclosed || arguments != "()" {
             run = 0;
         } else if !adapters.contains(&name) {
             run += 1;
@@ -165,7 +173,8 @@ pub(super) fn visit_navigation_chains(
             .ok_or_else(|| format!("missing authored code for {path}"))?;
         for (line_index, line) in code.lines().enumerate() {
             for candidate in navigation_expression().find_iter(line) {
-                let transitions = navigation_run(candidate.as_str(), adapters);
+                let open_call = line[candidate.end()..].starts_with('(');
+                let transitions = navigation_run(candidate.as_str(), adapters, open_call);
                 emit(Observation {
                     symbol: format!("{path}::navigation@{}", line_index + 1),
                     location: Location {
@@ -189,6 +198,192 @@ pub(super) fn visit_navigation_chains(
 
 const OWNED_RECEIVERS: [&str; 5] = ["self", "cls", "this", "Self", "super"];
 
+/// A local bound directly from owned state, such as `let buffer = self.buffer.as_mut();`,
+/// `let me = self.project();`, `const def = this._def` or `items = self.items`.
+fn owned_alias() -> &'static Regex {
+    static ALIAS: OnceLock<Regex> = OnceLock::new();
+    ALIAS.get_or_init(|| {
+        Regex::new(
+            r"(?m)(?:\b(?:let|const|var)\s+(?:mut\s+)?|^[ \t]*)([A-Za-z_][A-Za-z0-9_]*)\s*(?::[^=;\n]*)?=\s*(?:&\s*(?:mut\s+)?)?([A-Za-z_][A-Za-z0-9_]*)\s*\??\s*\.",
+        )
+        .expect("valid built-in owned-alias expression")
+    })
+}
+
+/// A Python annotated statement such as `mappings: dict[str, t.Any] = {}`; the
+/// annotation names types, not members the method reaches.
+fn python_annotation() -> &'static Regex {
+    static ANNOTATION: OnceLock<Regex> = OnceLock::new();
+    ANNOTATION.get_or_init(|| {
+        Regex::new(r"(?m)^[ \t]*([A-Za-z_][A-Za-z0-9_.]*)[ \t]*:([^=\n(){}]+?)[ \t]*(?:=|$)")
+            .expect("valid built-in Python annotation expression")
+    })
+}
+
+/// A destructuring binding such as `let Self { get, fallback, .. } = self;`,
+/// `if let Some(inner) = &self.inner` or `const { a, b: c } = this.props`.
+fn pattern_alias() -> &'static Regex {
+    static PATTERN: OnceLock<Regex> = OnceLock::new();
+    PATTERN.get_or_init(|| {
+        Regex::new(
+            r"\b(?:let|const|var)\s+((?:[A-Za-z_][A-Za-z0-9_:]*\s*)?[({\[][^=;]*?[)}\]])\s*=\s*(?:&\s*(?:mut\s+)?)?([A-Za-z_][A-Za-z0-9_]*)\b",
+        )
+        .expect("valid built-in pattern-alias expression")
+    })
+}
+
+/// A Rust `match` whose scrutinee starts at a name, such as `match &self.legacy {`.
+fn match_scrutinee() -> &'static Regex {
+    static SCRUTINEE: OnceLock<Regex> = OnceLock::new();
+    SCRUTINEE.get_or_init(|| {
+        Regex::new(r"\bmatch\s+(?:&\s*(?:mut\s+)?)?([A-Za-z_][A-Za-z0-9_]*)\b[^{;]*\{")
+            .expect("valid built-in match-scrutinee expression")
+    })
+}
+
+/// A lowercase name in a pattern; whether it binds depends on its neighbours.
+fn pattern_name() -> &'static Regex {
+    static NAME: OnceLock<Regex> = OnceLock::new();
+    NAME.get_or_init(|| {
+        Regex::new(r"\b[a-z_][A-Za-z0-9_]*\b").expect("valid built-in pattern-name expression")
+    })
+}
+
+/// Names a pattern binds: not keywords, paths, field labels (`field: binding`),
+/// constructors, or anything in a match guard.
+fn pattern_bindings(pattern: &str) -> Vec<&str> {
+    let pattern = pattern.split(" if ").next().unwrap_or(pattern);
+    pattern_name()
+        .find_iter(pattern)
+        .filter(|name| !matches!(name.as_str(), "ref" | "mut" | "_" | "box"))
+        .filter(|name| {
+            let before = pattern[..name.start()].trim_end();
+            let after = pattern[name.end()..].trim_start();
+            !before.ends_with("::")
+                && !before.ends_with('.')
+                && !after.starts_with(':')
+                && !after.starts_with('(')
+                && !after.starts_with('{')
+        })
+        .map(|name| name.as_str())
+        .collect()
+}
+
+/// The arm patterns of a `match` block whose body starts at `start`: the text before
+/// each top-level `=>`, after the previous arm's `,` or closing brace.
+fn match_arm_patterns(body: &str, start: usize) -> Vec<&str> {
+    let mut patterns = Vec::new();
+    let (mut depth, mut boundary) = (0_usize, start);
+    let bytes = body.as_bytes();
+    for (offset, byte) in bytes.iter().enumerate().skip(start) {
+        match byte {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' if depth == 0 => break,
+            b'}' if depth == 1 => (depth, boundary) = (0, offset + 1),
+            b')' | b']' | b'}' => depth -= 1,
+            b',' if depth == 0 => boundary = offset + 1,
+            b'=' if depth == 0 && bytes.get(offset + 1) == Some(&b'>') => {
+                patterns.push(&body[boundary..offset]);
+            }
+            _ => {}
+        }
+    }
+    patterns
+}
+
+/// Bindings in body order with the root they come from: plain aliases, destructuring
+/// patterns and the arms of a `match` on a name.
+fn alias_bindings(body: &str) -> Vec<(usize, &str, Vec<&str>)> {
+    let mut bindings: Vec<(usize, &str, Vec<&str>)> = Vec::new();
+    for capture in owned_alias().captures_iter(body) {
+        let name = capture.get(1).expect("alias name group").as_str();
+        let root = capture.get(2).expect("alias root group").as_str();
+        bindings.push((
+            capture.get(0).expect("alias match").start(),
+            root,
+            vec![name],
+        ));
+    }
+    for capture in pattern_alias().captures_iter(body) {
+        let names = pattern_bindings(capture.get(1).expect("pattern group").as_str());
+        let root = capture.get(2).expect("pattern root group").as_str();
+        bindings.push((capture.get(0).expect("pattern match").start(), root, names));
+    }
+    for capture in match_scrutinee().captures_iter(body) {
+        let whole = capture.get(0).expect("match expression");
+        let names = match_arm_patterns(body, whole.end())
+            .into_iter()
+            .flat_map(pattern_bindings)
+            .collect();
+        bindings.push((whole.start(), capture.get(1).expect("root").as_str(), names));
+    }
+    bindings.sort_by_key(|(start, _, _)| *start);
+    bindings
+}
+
+/// Names bound from owned state, in body order, so an alias of an alias stays owned.
+fn owned_aliases(body: &str) -> BTreeSet<&str> {
+    let mut aliases = BTreeSet::new();
+    for (_, root, names) in alias_bindings(body) {
+        if OWNED_RECEIVERS.contains(&root) || aliases.contains(root) {
+            aliases.extend(names);
+        }
+    }
+    aliases
+}
+
+/// Byte ranges of Python statement annotations. Block keywords and a trailing comma
+/// (a dictionary entry) are not annotations.
+fn python_annotation_ranges(body: &str) -> Vec<(usize, usize)> {
+    python_annotation()
+        .captures_iter(body)
+        .filter(|capture| !matches!(&capture[1], "else" | "try" | "finally" | "except"))
+        .filter_map(|capture| capture.get(2))
+        .filter(|annotation| !annotation.as_str().trim_end().ends_with(','))
+        .map(|annotation| (annotation.start(), annotation.end()))
+        .collect()
+}
+
+/// Whether the receiver at `start` continues a dotted chain of names such as the
+/// `innerType` in `this._def.innerType._parse`. A chain resumed after a call or an
+/// index, as in `make().value`, starts a new receiver.
+fn continues_chain(body: &str, start: usize) -> bool {
+    let separator = |character: char| character.is_whitespace() || character == '?';
+    body[..start]
+        .trim_end_matches(separator)
+        .strip_suffix('.')
+        .and_then(|before| before.trim_end_matches(separator).chars().next_back())
+        .is_some_and(|character| character.is_alphanumeric() || character == '_')
+}
+
+/// Ownership of each dotted access receiver in body order: an owned receiver, a local
+/// alias of owned state, or a chain continuing from either is owned.
+fn receiver_ownership(body: &str, python: bool) -> Vec<bool> {
+    let aliases = owned_aliases(body);
+    let annotations = if python {
+        python_annotation_ranges(body)
+    } else {
+        Vec::new()
+    };
+    let mut chain_owned = false;
+    member_access()
+        .captures_iter(body)
+        .map(|capture| capture.get(1).expect("receiver group"))
+        .filter(|receiver| {
+            !annotations
+                .iter()
+                .any(|(start, end)| (*start..*end).contains(&receiver.start()))
+        })
+        .map(|receiver| {
+            let name = receiver.as_str();
+            if !continues_chain(body, receiver.start()) {
+                chain_owned = OWNED_RECEIVERS.contains(&name) || aliases.contains(name);
+            }
+            chain_owned
+        })
+        .collect()
+}
+
 /// Feature Envy is a property of a method: compare its accesses through foreign
 /// receivers with those through its own. Free functions have no own data.
 pub(super) fn foreign_accesses(model: &SourceModel) -> Vec<Observation> {
@@ -198,27 +393,28 @@ pub(super) fn foreign_accesses(model: &SourceModel) -> Vec<Observation> {
         .filter(|function| function.receiver)
         .filter_map(|function| {
             let body = function.body.as_deref()?;
-            let receivers = member_access()
-                .captures_iter(body)
-                .map(|capture| capture.get(1).expect("receiver group").as_str())
-                .collect::<Vec<_>>();
-            if receivers.is_empty() {
+            let python = std::path::Path::new(&function.location.path)
+                .extension()
+                .is_some_and(|extension| {
+                    extension.eq_ignore_ascii_case("py") || extension.eq_ignore_ascii_case("pyi")
+                });
+            let ownership = receiver_ownership(body, python);
+            if ownership.is_empty() {
                 return None;
             }
-            let foreign = receivers
-                .iter()
-                .filter(|receiver| !OWNED_RECEIVERS.contains(receiver))
-                .count();
+            let foreign = ownership.iter().filter(|owned| !**owned).count();
             Some(observation(
                 function.symbol.clone(),
                 function.location.clone(),
                 [
                     ("foreign_accesses", foreign as u64),
-                    ("total_accesses", receivers.len() as u64),
+                    ("total_accesses", ownership.len() as u64),
                 ],
                 json!({
-                    "collector": "source_method_member_ownership_v2",
+                    "collector": "source_method_member_ownership_v3",
                     "owned_receivers": OWNED_RECEIVERS,
+                    "owned_aliases": "locals bound from owned state",
+                    "chains": "continuations inherit the chain root's ownership",
                 }),
             ))
         })
@@ -313,6 +509,21 @@ fn rust_dependency_contract(
     Ok(observations)
 }
 
+/// Whether a `_`-prefixed member name is public by convention: a dunder protocol or
+/// builtin such as `__html__`, `__version__` or `__proto__`, or, in TypeScript, an
+/// all-caps `__NAME` binding constant such as a Cloudflare `__STATIC_CONTENT`.
+fn public_underscore_member(language: &str, member: &str) -> bool {
+    let dunder = member.len() > 4 && member.starts_with("__") && member.ends_with("__");
+    let constant = language == "typescript"
+        && member.strip_prefix("__").is_some_and(|name| {
+            name.starts_with(|character: char| character.is_ascii_uppercase())
+                && name.chars().all(|character| {
+                    character.is_ascii_uppercase() || character.is_ascii_digit() || character == '_'
+                })
+        });
+    dunder || constant
+}
+
 pub(super) fn dependency_contract(
     rule: &Rule,
     model: &SourceModel,
@@ -321,6 +532,7 @@ pub(super) fn dependency_contract(
     if rule.id.starts_with("rust.") {
         return rust_dependency_contract(model, input);
     }
+    let language = rule.id.split_once('.').map_or("", |(language, _)| language);
     let mut observations = Vec::new();
     for (path, source) in &input.files {
         let code = model
@@ -330,6 +542,7 @@ pub(super) fn dependency_contract(
         let accesses = private_member_access()
             .captures_iter(code)
             .filter(|capture| !matches!(&capture[1], "self" | "cls" | "this" | "Self" | "super"))
+            .filter(|capture| !public_underscore_member(language, &capture[2]))
             .collect::<Vec<_>>();
         let Some(first) = accesses.first() else {
             continue;
@@ -354,8 +567,9 @@ pub(super) fn dependency_contract(
             related_locations: Vec::new(),
             measurements: BTreeMap::from([("forbidden_accesses".into(), accesses.len() as u64)]),
             evidence: json!({
-                "collector": "source_private_member_access_v1",
+                "collector": "source_private_member_access_v2",
                 "contract": "language_private_naming_or_syntax",
+                "public_by_convention": "dunder names; TypeScript all-caps __NAME constants",
             }),
         });
     }
@@ -368,6 +582,7 @@ pub(super) fn primitive_slots(rule: &Rule, model: &SourceModel) -> Vec<Observati
         .classes
         .iter()
         .filter(|class| !class.fields.is_empty())
+        .filter(|class| !(language == "typescript" && class.interface))
         .map(|class| {
             let raw = class
                 .fields
@@ -382,8 +597,8 @@ pub(super) fn primitive_slots(rule: &Rule, model: &SourceModel) -> Vec<Observati
                     ("total_slots", class.fields.len() as u64),
                 ],
                 json!({
-                    "collector": "authored_primitive_annotations_v1",
-                    "scope": "annotated class slots",
+                    "collector": "authored_primitive_annotations_v2",
+                    "scope": "annotated class slots; TypeScript interfaces are not classes",
                     "language": language,
                 }),
             )
@@ -396,6 +611,64 @@ mod tests {
     use super::*;
     use crate::collectors::model::{ClassFact, CodeScope, FieldFact};
     use std::sync::Arc;
+
+    #[test]
+    fn pattern_bindings_skip_paths_labels_and_guards() {
+        assert_eq!(pattern_bindings("state::Ready(ref mut x) if x.ok"), ["x"]);
+        assert_eq!(pattern_bindings("Point { x: px, y, .. }"), ["px", "y"]);
+    }
+
+    #[test]
+    fn match_arm_patterns_resume_after_nested_block_arms() {
+        let body = "match s { A => { if y { z } } B(b) => b, }";
+        let start = body.find('{').expect("match body") + 1;
+        let arms: Vec<&str> = match_arm_patterns(body, start)
+            .into_iter()
+            .map(str::trim)
+            .collect();
+        assert_eq!(arms, ["A", "B(b)"]);
+    }
+
+    #[test]
+    fn match_arm_patterns_split_on_top_level_commas_and_arrows_only() {
+        let body = "match s { A => 1, B(b, c) => b, x if x == 1 => x, }";
+        let start = body.find('{').expect("match body") + 1;
+        let arms: Vec<&str> = match_arm_patterns(body, start)
+            .into_iter()
+            .map(str::trim)
+            .collect();
+        assert_eq!(arms, ["A", "B(b, c)", "x if x == 1"]);
+    }
+
+    #[test]
+    fn public_underscore_members_need_a_name_inside_the_dunder() {
+        assert!(public_underscore_member("python", "__html__"));
+        assert!(public_underscore_member("python", "__a__"));
+        assert!(!public_underscore_member("python", "____"));
+        assert!(public_underscore_member("typescript", "__STATIC_CONTENT"));
+        assert!(!public_underscore_member("typescript", "__1A"));
+        assert!(!public_underscore_member("typescript", "__Ab"));
+    }
+
+    #[test]
+    fn continues_chain_follows_names_but_not_calls() {
+        let chain = "this._def.innerType._parse";
+        assert!(continues_chain(
+            chain,
+            chain.find("innerType").expect("member")
+        ));
+        assert!(continues_chain(
+            chain,
+            chain.find("_parse").expect("member")
+        ));
+        let optional = "this._def?.innerType";
+        assert!(continues_chain(
+            optional,
+            optional.find("innerType").expect("member")
+        ));
+        let call = "make().value";
+        assert!(!continues_chain(call, call.find("value").expect("member")));
+    }
 
     fn rule(id: &str) -> Rule {
         Rule {
@@ -433,11 +706,11 @@ mod tests {
             ("typescript", "a.b.toString().c"),
         ] {
             assert_eq!(
-                navigation_run(expression, navigation_adapters(language)),
+                navigation_run(expression, navigation_adapters(language), false),
                 2,
                 "{language}"
             );
-            assert_eq!(navigation_run(expression, &[]), 3, "{language}");
+            assert_eq!(navigation_run(expression, &[], false), 3, "{language}");
         }
     }
 
@@ -478,11 +751,12 @@ mod tests {
         assert_eq!(
             navigation_run(
                 "self.config.items.iter().cloned().last_seen",
-                navigation_adapters("rust")
+                navigation_adapters("rust"),
+                false
             ),
             2
         );
-        assert_eq!(navigation_run("Self.a.b.c.d", &[]), 3);
+        assert_eq!(navigation_run("Self.a.b.c.d", &[], false), 3);
     }
 
     #[test]
@@ -642,6 +916,199 @@ mod tests {
         assert_eq!(observations[0].measurements["forbidden_accesses"], 2);
         assert_eq!(observations[0].location.line, 2);
         assert_eq!(observations[0].location.column, 15);
+    }
+
+    #[test]
+    fn navigation_treats_option_queries_guards_and_await_as_transparent() {
+        let rust = navigation_adapters("rust");
+        for expression in [
+            "self.config.colors.matched().is_none",
+            "orphanage.sigchild.matched.lock().is_none()",
+            "field.attrs.default().is_some()",
+            "response.into_body().collect().await.unwrap().to_bytes()",
+        ] {
+            assert_eq!(navigation_run(expression, rust, false), 2, "{expression}");
+        }
+    }
+
+    #[test]
+    fn navigation_calls_with_nested_or_multi_line_arguments_break_the_run() {
+        let source = concat!(
+            "app.router._routes.append(Route(\"/admin\", endpoint))\n",
+            "table.box.__dict__.update(\n",
+            "    top_left=\"a\",\n",
+            ")\n",
+            "a.b.c.d\n",
+        );
+        let input = input("python-v1", &[("sample.py", source)]);
+        let model = model_with_code("sample.py", source);
+        let mut transitions = Vec::new();
+        visit_navigation_chains(
+            &rule("python.navigation_chains"),
+            &model,
+            &input,
+            |observation| transitions.push(observation.measurements["transitions"]),
+        )
+        .unwrap();
+        assert_eq!(transitions, [2, 2, 3]);
+    }
+
+    fn foreign_measurements(
+        rule_id: &str,
+        rule_pack: &str,
+        path: &str,
+        source: &str,
+    ) -> Vec<(String, u64, u64)> {
+        let model =
+            super::super::model::source_model(&rule(rule_id), &input(rule_pack, &[(path, source)]))
+                .unwrap();
+        foreign_accesses(&model)
+            .into_iter()
+            .map(|observation| {
+                (
+                    observation.symbol,
+                    observation.measurements["foreign_accesses"],
+                    observation.measurements["total_accesses"],
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn foreign_accesses_treat_locals_bound_from_owned_state_as_owned() {
+        let source = concat!(
+            "pub struct S { buffer: Vec<u8> }\n",
+            "impl S {\n",
+            "    fn field(&mut self, name: &str) {\n",
+            "        let buffer = self.buffer.as_mut();\n",
+            "        let me = self.project();\n",
+            "        let inner = me.inner;\n",
+            "        buffer.push(1); buffer.push(2); me.a.go(); inner.b(); name.len();\n",
+            "    }\n",
+            "}\n",
+        );
+        assert_eq!(
+            foreign_measurements("rust.foreign_accesses", "rust-v1", "src/lib.rs", source),
+            [("src/lib.rs::S.field".into(), 1, 8)]
+        );
+    }
+
+    #[test]
+    fn foreign_accesses_treat_pattern_bindings_from_owned_state_as_owned() {
+        let source = concat!(
+            "pub struct S { get: Route, legacy: Option<L> }\n",
+            "impl S {\n",
+            "    fn field(self, other: &O) {\n",
+            "        let Self { get, legacy: old, .. } = self;\n",
+            "        get.a(); get.b(); old.c();\n",
+            "        match &self.legacy {\n",
+            "            Some(legacy) if legacy.on => { legacy.d(); }\n",
+            "            None => other.e(),\n",
+            "        }\n",
+            "        if let Some(inner) = &self.legacy { inner.f(); }\n",
+            "        other.g();\n",
+            "    }\n",
+            "}\n",
+        );
+        assert_eq!(
+            foreign_measurements("rust.foreign_accesses", "rust-v1", "src/lib.rs", source),
+            [("src/lib.rs::S.field".into(), 2, 10)]
+        );
+    }
+
+    #[test]
+    fn foreign_accesses_ignore_python_statement_annotations() {
+        let source = concat!(
+            "class Config:\n",
+            "    def from_mapping(self, mapping):\n",
+            "        mappings: dict[str, t.Any] = {}\n",
+            "        names: t.List[str]\n",
+            "        table = {key: value.x, other: value.y,\n",
+            "                 last: value.z}\n",
+            "        mappings.update(mapping)\n",
+            "        if mapping:\n",
+            "            pass\n",
+            "        else: other.run()\n",
+        );
+        assert_eq!(
+            foreign_measurements("python.foreign_accesses", "python-v1", "sample.py", source),
+            [("sample.py::Config.from_mapping".into(), 5, 5)]
+        );
+    }
+
+    #[test]
+    fn foreign_accesses_inherit_ownership_along_a_chain_of_names() {
+        let source = concat!(
+            "class ZodReadonly {\n",
+            "  _parse(input: ParseInput) {\n",
+            "    const result = this._def.innerType._parse(input);\n",
+            "    make().value.other.run();\n",
+            "    return data.value.x;\n",
+            "  }\n",
+            "}\n",
+        );
+        assert_eq!(
+            foreign_measurements(
+                "typescript.foreign_accesses",
+                "typescript-v1",
+                "sample.ts",
+                source
+            ),
+            [("sample.ts::ZodReadonly._parse".into(), 2, 4)]
+        );
+    }
+
+    #[test]
+    fn dependency_contract_treats_dunders_and_binding_constants_as_public() {
+        let source = concat!(
+            "o.__html__()\n",
+            "httpx.__version__\n",
+            "delete result.__proto__\n",
+            "c.env.__STATIC_CONTENT\n",
+            "obj.__mangled\n",
+            "obj.__SECRET\n",
+            "obj._token\n",
+        );
+        for (rule_id, rule_pack, path, expected, first_line) in [
+            ("python.dependency_contract", "python-v1", "sample.py", 4, 4),
+            (
+                "typescript.dependency_contract",
+                "typescript-v1",
+                "sample.ts",
+                2,
+                5,
+            ),
+        ] {
+            let observations = dependency_contract(
+                &rule(rule_id),
+                &model_with_code(path, source),
+                &input(rule_pack, &[(path, source)]),
+            )
+            .unwrap();
+            assert_eq!(
+                observations[0].measurements["forbidden_accesses"], expected,
+                "{rule_id}"
+            );
+            assert_eq!(observations[0].location.line, first_line, "{rule_id}");
+        }
+    }
+
+    #[test]
+    fn primitive_slots_skip_typescript_interfaces() {
+        let source = concat!(
+            "interface Options { a: string; b: string; c: number; d: boolean; e: string }\n",
+            "class Row { a: string; b: string; c: number; d: boolean; e: string }\n",
+        );
+        let model = super::super::model::source_model(
+            &rule("typescript.primitive_slots"),
+            &input("typescript-v1", &[("sample.ts", source)]),
+        )
+        .unwrap();
+        let symbols = primitive_slots(&rule("typescript.primitive_slots"), &model)
+            .into_iter()
+            .map(|observation| observation.symbol)
+            .collect::<Vec<_>>();
+        assert_eq!(symbols, ["sample.ts::Row"]);
     }
 
     #[test]

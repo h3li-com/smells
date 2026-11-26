@@ -1,7 +1,7 @@
 use super::{
     common::{location_at, observation, primitive_type},
     model::{ClassFact, SourceModel},
-    syntax::code_only,
+    syntax::{code_only, import_statements},
 };
 use crate::{core::model::Input, evidence::Observation, policy::Rule};
 use regex::Regex;
@@ -11,22 +11,47 @@ use std::{
     path::{Component, Path},
     sync::OnceLock,
 };
+use syn::visit::Visit;
+
+fn rule_language(rule: &Rule) -> &str {
+    rule.id.split_once('.').map_or("", |(language, _)| language)
+}
+
+fn typescript_path(path: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .is_some_and(|extension| matches!(extension.to_str(), Some("ts" | "tsx" | "mts" | "cts")))
+}
 
 fn semantically_nominal_name(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
-    [
-        "id", "uuid", "email", "phone", "amount", "price", "currency", "date", "time", "address",
-        "country", "postcode", "zip",
-    ]
-    .iter()
-    .any(|role| name == *role || name.ends_with(&format!("_{role}")))
+    // `zip` names a postcode only as the whole name; `search_zip` is a compression flag.
+    name == "zip"
+        || [
+            "id", "uuid", "email", "phone", "amount", "price", "currency", "date", "time",
+            "address", "country", "postcode", "zipcode", "zip_code",
+        ]
+        .iter()
+        .any(|role| name == *role || name.ends_with(&format!("_{role}")))
+}
+
+fn boolean_type(authored_type: &str) -> bool {
+    matches!(authored_type.trim(), "bool" | "boolean")
+}
+
+/// A TypeScript `interface` describes a shape, not a class with nominal field slots.
+fn typescript_interface(language: &str, class: &ClassFact) -> bool {
+    language == "typescript"
+        && class.interface
+        && class.source.trim_start().starts_with("interface")
 }
 
 pub(super) fn nominal_slot_contract(rule: &Rule, model: &SourceModel) -> Vec<Observation> {
-    let language = rule.id.split_once('.').map_or("", |(language, _)| language);
+    let language = rule_language(rule);
     model
         .classes
         .iter()
+        .filter(|class| !typescript_interface(language, class))
         .filter_map(|class| {
             let mismatches = class
                 .fields
@@ -34,6 +59,7 @@ pub(super) fn nominal_slot_contract(rule: &Rule, model: &SourceModel) -> Vec<Obs
                 .filter(|field| {
                     semantically_nominal_name(&field.name)
                         && primitive_type(language, &field.authored_type)
+                        && !boolean_type(&field.authored_type)
                 })
                 .map(|field| field.name.as_str())
                 .collect::<Vec<_>>();
@@ -45,7 +71,7 @@ pub(super) fn nominal_slot_contract(rule: &Rule, model: &SourceModel) -> Vec<Obs
                     json!({
                         "collector": "authored_semantic_slot_name_v1",
                         "primitive_semantic_slots": mismatches,
-                        "scope": "well-known domain-role suffixes; optional project contracts may strengthen this check",
+                        "scope": "well-known whole-term domain-role suffixes on non-boolean class fields; optional project contracts may strengthen this check",
                     }),
                 )
             })
@@ -119,6 +145,9 @@ fn qualified_base_target(derived: &ClassFact, base: &str) -> Option<String> {
     Some(owner.join("::"))
 }
 
+/// Resolve a declared base by name. A same-file declaration wins; otherwise every
+/// same-named declaration elsewhere competes, so an unrelated namesake in another file
+/// makes the base ambiguous instead of resolving to the only interface among them.
 fn resolve_declared_base<'a>(
     model: &'a SourceModel,
     derived: &ClassFact,
@@ -126,62 +155,306 @@ fn resolve_declared_base<'a>(
     interfaces_only: bool,
 ) -> Option<&'a ClassFact> {
     let target = qualified_base_target(derived, base);
-    let mut candidates = model
+    let named = model
         .classes
         .iter()
-        .filter(|class| !interfaces_only || class.interface)
         .filter(|class| class.name == base_leaf(base))
         .filter(|class| {
             target
                 .as_ref()
                 .is_none_or(|target| logical_symbol(class) == *target)
-        });
-    let resolved = candidates.next()?;
-    candidates.next().is_none().then_some(resolved)
+        })
+        .collect::<Vec<_>>();
+    let same_file = named
+        .iter()
+        .copied()
+        .filter(|class| class.location.path == derived.location.path)
+        .collect::<Vec<_>>();
+    let scope = if same_file.is_empty() {
+        named
+    } else {
+        same_file
+    };
+    let [resolved] = scope.as_slice() else {
+        return None;
+    };
+    (!interfaces_only || resolved.interface).then_some(*resolved)
 }
 
-pub(super) fn port_conformance(rule: &Rule, model: &SourceModel) -> Vec<Observation> {
-    // A Rust trait method with a default body is provided, not required.
-    let provides_defaults = rule.id.starts_with("rust.");
-    let mut observations = Vec::new();
-    for implementation in model.classes.iter().filter(|class| !class.interface) {
-        let implemented = implementation
-            .methods
-            .iter()
-            .map(|method| method.name.as_str())
-            .collect::<BTreeSet<_>>();
-        for port in implementation
-            .bases
-            .iter()
-            .filter_map(|base| resolve_declared_base(model, implementation, base, true))
-        {
-            let required = port
-                .methods
-                .iter()
-                .filter(|method| !(provides_defaults && method.body.is_some()))
-                .map(|method| method.name.as_str())
-                .collect::<BTreeSet<_>>();
-            let missing = required
-                .difference(&implemented)
-                .copied()
-                .collect::<Vec<_>>();
-            let mut candidate = observation(
-                implementation.symbol.clone(),
-                implementation.location.clone(),
-                [("failures", missing.len() as u64)],
-                json!({
-                    "collector": "authored_port_shape_v1",
-                    "port": port.symbol,
-                    "missing_methods": missing,
-                    "scope": "declared interface/Protocol/ABC method names; Rust trait defaults are provided",
-                }),
-            );
-            candidate.related_symbols.push(port.symbol.clone());
-            candidate.related_locations.push(port.location.clone());
-            observations.push(candidate);
+/// Text of a declaration header after its name with every bracketed group removed,
+/// stopping at the body: `<K extends A = B> extends C<D> implements E {` yields
+/// ` extends C implements E `.
+fn depth_zero_header(text: &str) -> String {
+    let mut header = String::new();
+    let mut depth = 0_usize;
+    let mut previous = ' ';
+    for character in text.chars() {
+        match character {
+            '{' if depth == 0 => break,
+            '<' | '(' | '[' | '{' => depth += 1,
+            '>' if matches!(previous, '=' | '-') => {}
+            '>' | ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            _ if depth == 0 => header.push(character),
+            _ => {}
+        }
+        previous = character;
+    }
+    header
+}
+
+/// The header after `class|interface|trait <name>`, or `None` when the declaration is
+/// not present in the source.
+fn declaration_header(source: &str, name: &str) -> Option<String> {
+    static DECLARATION: OnceLock<Regex> = OnceLock::new();
+    let declaration = DECLARATION.get_or_init(|| {
+        Regex::new(r"\b(?:class|interface|trait)\s+([A-Za-z_$][A-Za-z0-9_$]*)")
+            .expect("valid declaration expression")
+    });
+    let start = declaration
+        .captures_iter(source)
+        .find(|captures| &captures[1] == name)?
+        .get(0)?
+        .end();
+    Some(depth_zero_header(&source[start..]))
+}
+
+/// Names in a TypeScript `extends`/`implements` clause, ignoring type parameters
+/// and their defaults.
+fn typescript_heritage(class: &ClassFact) -> Option<BTreeSet<String>> {
+    let header = declaration_header(&class.source, &class.name)?;
+    Some(
+        header
+            .split(|character: char| character.is_whitespace() || character == ',')
+            .filter(|word| !word.is_empty() && !matches!(*word, "extends" | "implements"))
+            .map(|word| base_leaf(word).to_string())
+            .collect(),
+    )
+}
+
+/// The declared bases a contract may resolve. TypeScript bases must appear in the
+/// real heritage clause, so a type-parameter constraint or default is never a base.
+fn declared_bases(class: &ClassFact) -> Vec<&str> {
+    let heritage = typescript_path(&class.location.path)
+        .then(|| typescript_heritage(class))
+        .flatten();
+    class
+        .bases
+        .iter()
+        .map(String::as_str)
+        .filter(|base| {
+            heritage
+                .as_ref()
+                .is_none_or(|heritage| heritage.contains(base_leaf(base)))
+        })
+        .collect()
+}
+
+/// Names a file imports from the standard library (`use std::task::{Context, Wake}`).
+#[derive(Default)]
+struct StandardImports(BTreeSet<String>);
+
+impl StandardImports {
+    fn collect(&mut self, tree: &syn::UseTree, standard: bool) {
+        match tree {
+            syn::UseTree::Path(path) => {
+                let root =
+                    standard || matches!(path.ident.to_string().as_str(), "std" | "core" | "alloc");
+                self.collect(&path.tree, root);
+            }
+            syn::UseTree::Name(name) if standard => {
+                self.0.insert(name.ident.to_string());
+            }
+            syn::UseTree::Rename(rename) if standard => {
+                self.0.insert(rename.rename.to_string());
+            }
+            syn::UseTree::Group(group) => {
+                for item in &group.items {
+                    self.collect(item, standard);
+                }
+            }
+            _ => {}
         }
     }
-    observations
+}
+
+impl<'ast> Visit<'ast> for StandardImports {
+    fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
+        self.collect(&item.tree, false);
+    }
+}
+
+#[derive(Default)]
+struct MacroImplementations(BTreeSet<(String, String, String)>, String, BTreeSet<String>);
+
+impl MacroImplementations {
+    /// An item macro hides generated methods; a bare trait name the file imports
+    /// from the standard library is not the authored trait of the same name.
+    fn unknown(&self, implementation: &syn::ItemImpl, trait_path: &syn::Path) -> bool {
+        let standard = trait_path.segments.len() == 1
+            && trait_path
+                .segments
+                .last()
+                .is_some_and(|segment| self.2.contains(&segment.ident.to_string()));
+        standard
+            || implementation
+                .items
+                .iter()
+                .any(|item| matches!(item, syn::ImplItem::Macro(_)))
+    }
+}
+
+impl<'ast> Visit<'ast> for MacroImplementations {
+    fn visit_item_impl(&mut self, implementation: &'ast syn::ItemImpl) {
+        let trait_path = implementation.trait_.as_ref().map(|(_, path, _)| path);
+        let syn::Type::Path(self_type) = implementation.self_ty.as_ref() else {
+            return syn::visit::visit_item_impl(self, implementation);
+        };
+        let trait_name = trait_path
+            .filter(|path| self.unknown(implementation, path))
+            .and_then(|path| path.segments.last());
+        if let (Some(trait_name), Some(type_name)) = (trait_name, self_type.path.segments.last()) {
+            self.0.insert((
+                self.1.clone(),
+                type_name.ident.to_string(),
+                trait_name.ident.to_string(),
+            ));
+        }
+        syn::visit::visit_item_impl(self, implementation);
+    }
+}
+
+/// Rust trait implementations whose bodies hold item-position macro invocations
+/// (`forward_to_deserialize_any!`) or whose bare trait name is imported from the
+/// standard library, keyed by path, implementing type, and trait. Generated methods
+/// are invisible to source shape and std traits are not the authored port, so
+/// omissions are unknown.
+fn rust_macro_implementations(
+    model: &SourceModel,
+    input: &Input,
+) -> Result<BTreeSet<(String, String, String)>, String> {
+    let paths = model
+        .classes
+        .iter()
+        .filter(|class| !class.interface && !class.bases.is_empty())
+        .map(|class| class.location.path.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut visitor = MacroImplementations::default();
+    for path in paths {
+        let Some(source) = input.files.get(path) else {
+            continue;
+        };
+        let file = syn::parse_file(source)
+            .map_err(|error| crate::scan::parse_error_message(path, &error))?;
+        let mut imports = StandardImports::default();
+        imports.visit_file(&file);
+        visitor.1 = path.to_string();
+        visitor.2 = imports.0;
+        visitor.visit_file(&file);
+    }
+    Ok(visitor.0)
+}
+
+fn python_protocol(port: &ClassFact) -> bool {
+    port.source
+        .split(':')
+        .next()
+        .is_some_and(|header| header.contains("Protocol"))
+}
+
+/// Methods a Python ABC declares with an `abstract*` decorator.
+fn python_abstract_methods(port: &ClassFact) -> BTreeSet<&str> {
+    static ABSTRACT: OnceLock<Regex> = OnceLock::new();
+    let expression = ABSTRACT.get_or_init(|| {
+        Regex::new(
+            r"@(?:abc\.)?abstract[A-Za-z_]*[^\n]*\n(?:[ \t]*@[^\n]*\n)*[ \t]*(?:async\s+)?def\s+([A-Za-z_][A-Za-z0-9_]*)",
+        )
+        .expect("valid abstract method expression")
+    });
+    expression
+        .captures_iter(&port.source)
+        .filter_map(|captures| captures.get(1))
+        .map(|name| name.as_str())
+        .collect()
+}
+
+/// Methods an implementation must supply: a Rust trait method with a default body is
+/// provided (even when a cfg-gated twin declaration has none), and an ABC requires only its abstract methods (a Protocol requires all).
+fn required_methods<'a>(language: &str, port: &'a ClassFact) -> BTreeSet<&'a str> {
+    let abstract_only =
+        (language == "python" && !python_protocol(port)).then(|| python_abstract_methods(port));
+    let provided = port
+        .methods
+        .iter()
+        .filter(|method| language == "rust" && method.body.is_some())
+        .map(|method| method.name.as_str())
+        .collect::<BTreeSet<_>>();
+    port.methods
+        .iter()
+        .map(|method| method.name.as_str())
+        .filter(|name| !provided.contains(name))
+        .filter(|name| {
+            abstract_only
+                .as_ref()
+                .is_none_or(|abstract_only| abstract_only.contains(name))
+        })
+        .collect()
+}
+
+fn port_observation(language: &str, implementation: &ClassFact, port: &ClassFact) -> Observation {
+    let implemented = implementation
+        .methods
+        .iter()
+        .map(|method| method.name.as_str())
+        .collect::<BTreeSet<_>>();
+    let required = required_methods(language, port);
+    let missing = required
+        .difference(&implemented)
+        .copied()
+        .collect::<Vec<_>>();
+    let mut candidate = observation(
+        implementation.symbol.clone(),
+        implementation.location.clone(),
+        [("failures", missing.len() as u64)],
+        json!({
+            "collector": "authored_port_shape_v1",
+            "port": port.symbol,
+            "missing_methods": missing,
+            "scope": "declared interface/Protocol method names and ABC abstract methods; Rust trait defaults are provided; Rust impls holding item macros are unknown",
+        }),
+    );
+    candidate.related_symbols.push(port.symbol.clone());
+    candidate.related_locations.push(port.location.clone());
+    candidate
+}
+
+pub(super) fn port_conformance(
+    rule: &Rule,
+    model: &SourceModel,
+    input: &Input,
+) -> Result<Vec<Observation>, String> {
+    let language = rule_language(rule);
+    let macro_implementations = if language == "rust" {
+        rust_macro_implementations(model, input)?
+    } else {
+        BTreeSet::new()
+    };
+    let mut observations = Vec::new();
+    for implementation in model.classes.iter().filter(|class| !class.interface) {
+        for port in declared_bases(implementation)
+            .into_iter()
+            .filter_map(|base| resolve_declared_base(model, implementation, base, true))
+        {
+            let key = (
+                implementation.location.path.clone(),
+                implementation.name.clone(),
+                port.name.clone(),
+            );
+            if !macro_implementations.contains(&key) {
+                observations.push(port_observation(language, implementation, port));
+            }
+        }
+    }
+    Ok(observations)
 }
 
 fn rejection_stub(body: &str) -> bool {
@@ -248,70 +521,375 @@ pub(super) fn refused_bequest(model: &SourceModel) -> Vec<Observation> {
     observations
 }
 
-fn hierarchy_role(child: &str, base: &str) -> Option<String> {
-    let base = base.strip_suffix("Base").unwrap_or(base);
+/// An upper-case letter starts a word after a lower-case letter or digit, and ends an
+/// acronym when a lower-case letter follows (`HTTPTransport`).
+fn word_boundary(previous: Option<&char>, character: char, next: Option<&char>) -> bool {
+    character.is_ascii_uppercase()
+        && previous.is_some_and(|previous| {
+            previous.is_ascii_lowercase()
+                || previous.is_ascii_digit()
+                || (previous.is_ascii_uppercase() && next.is_some_and(char::is_ascii_lowercase))
+        })
+}
+
+/// Lower-case words of an identifier: `TSEnumScope` is `ts enum scope`.
+fn identifier_words(name: &str) -> Vec<String> {
+    let characters = name.chars().collect::<Vec<_>>();
+    let mut words: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for (index, character) in characters.iter().copied().enumerate() {
+        if !character.is_ascii_alphanumeric() {
+            words.extend((!current.is_empty()).then(|| std::mem::take(&mut current)));
+            continue;
+        }
+        let previous = index.checked_sub(1).and_then(|index| characters.get(index));
+        if word_boundary(previous, character, characters.get(index + 1)) && !current.is_empty() {
+            words.push(std::mem::take(&mut current));
+        }
+        current.push(character.to_ascii_lowercase());
+    }
+    words.extend((!current.is_empty()).then_some(current));
+    words
+}
+
+/// Words that mark a sync/async variant or an abstract base rather than a role.
+fn without_markers(words: &[String], markers: &[&str]) -> Vec<String> {
+    words
+        .iter()
+        .filter(|word| !markers.contains(&word.as_str()))
+        .cloned()
+        .collect()
+}
+
+const VARIANT_MARKERS: [&str; 2] = ["sync", "async"];
+const BASE_MARKERS: [&str; 3] = ["base", "sync", "async"];
+
+/// The child's role relative to its base: the words left after removing the base
+/// name (without `Base`/`Sync`/`Async`) as a prefix or suffix.
+fn hierarchy_role(child: &[String], base: &[String]) -> Option<Vec<String>> {
+    if base.is_empty() {
+        return None;
+    }
     let role = child
         .strip_suffix(base)
-        .or_else(|| child.strip_prefix(base))?
-        .trim_matches('_');
-    (!role.is_empty()).then(|| role.to_ascii_lowercase())
+        .or_else(|| child.strip_prefix(base))?;
+    (!role.is_empty()).then(|| role.to_vec())
+}
+
+struct Member<'a> {
+    class: &'a ClassFact,
+    /// Role from the shared base-name affix.
+    affix: Option<Vec<String>>,
+    /// The whole child name without sync/async markers, for twin families.
+    variant_free: Vec<String>,
+}
+
+struct Family<'a> {
+    key: &'a str,
+    name: &'a str,
+    /// Authored base, or an external base whose whole name is the role affix; an
+    /// external `BaseModel` stripped to `Model` is too generic to pair roles.
+    trusted: bool,
+    /// Base name words without `Base`/`Sync`/`Async`.
+    stem: Vec<String>,
+    asynchronous: bool,
+    members: Vec<Member<'a>>,
+}
+
+impl Family<'_> {
+    fn has(&self, class: &ClassFact) -> bool {
+        self.members
+            .iter()
+            .any(|member| member.class.symbol == class.symbol)
+    }
+
+    /// `SyncByteStream`/`AsyncByteStream` or `BaseTransport`/`AsyncBaseTransport`.
+    fn twin_of(&self, other: &Self) -> bool {
+        !self.stem.is_empty() && self.stem == other.stem && self.asynchronous != other.asynchronous
+    }
+
+    /// Twin variants pair under any bases; affix roles pair only between two
+    /// differently named trusted bases, so copies of one hierarchy do not count.
+    fn comparable(&self, other: &Self, twin: bool) -> bool {
+        twin || (self.trusted && other.trusted && self.name != other.name)
+    }
+
+    /// Roles of children not shared with `other`; a class inheriting both bases is
+    /// one implementation, not a parallel addition.
+    fn roles<'b>(&'b self, other: &Self, twin: bool) -> BTreeMap<&'b [String], &'b ClassFact> {
+        let mut roles = BTreeMap::new();
+        for member in self
+            .members
+            .iter()
+            .filter(|member| !other.has(member.class))
+        {
+            let role = if twin {
+                Some(member.variant_free.as_slice())
+            } else {
+                member.affix.as_deref()
+            };
+            if let Some(role) = role.filter(|role| !role.is_empty()) {
+                roles.entry(role).or_insert(member.class);
+            }
+        }
+        roles
+    }
+}
+
+fn family_base<'a>(
+    model: &'a SourceModel,
+    child: &ClassFact,
+    base: &'a str,
+) -> Option<(&'a str, &'a str, bool)> {
+    if let Some(resolved) = resolve_declared_base(model, child, base, false) {
+        return Some((resolved.symbol.as_str(), resolved.name.as_str(), true));
+    }
+    let leaf = base_leaf(base);
+    (!model.classes.iter().any(|class| class.name == leaf)).then_some((base, leaf, false))
+}
+
+/// TypeScript interface declarations describe shapes, not subclass hierarchies.
+fn hierarchy_member(class: &ClassFact) -> bool {
+    !typescript_interface(
+        if typescript_path(&class.location.path) {
+            "typescript"
+        } else {
+            ""
+        },
+        class,
+    )
+}
+
+fn inheritance_families(model: &SourceModel) -> Vec<Family<'_>> {
+    let mut by_base: BTreeMap<&str, Family<'_>> = BTreeMap::new();
+    for child in model.classes.iter().filter(|class| hierarchy_member(class)) {
+        let child_words = without_markers(&identifier_words(&child.name), &VARIANT_MARKERS);
+        for base in declared_bases(child) {
+            let Some((key, name, authored)) = family_base(model, child, base) else {
+                continue;
+            };
+            let base_words = identifier_words(name);
+            let stem = without_markers(&base_words, &BASE_MARKERS);
+            let family = by_base.entry(key).or_insert_with(|| Family {
+                key,
+                name,
+                trusted: authored || stem == base_words,
+                stem,
+                asynchronous: base_words.iter().any(|word| word == "async"),
+                members: Vec::new(),
+            });
+            family.members.push(Member {
+                class: child,
+                affix: hierarchy_role(&child_words, &family.stem),
+                variant_free: child_words.clone(),
+            });
+        }
+    }
+    by_base.into_values().collect()
+}
+
+fn word_prefix(shorter: &[String], longer: &[String]) -> bool {
+    longer.starts_with(shorter)
+}
+
+/// One-to-one role pairs: exact role matches first, then roles where one role's
+/// words begin the other's (`Catch` with `CatchClause`).
+fn paired_roles<'a>(
+    first: &BTreeMap<&'a [String], &'a ClassFact>,
+    second: &BTreeMap<&'a [String], &'a ClassFact>,
+) -> Vec<(String, &'a ClassFact, &'a ClassFact)> {
+    let mut used = BTreeSet::new();
+    let mut unmatched = Vec::new();
+    let mut pairs = Vec::new();
+    for (role, class) in first {
+        if let Some(partner) = second.get(role) {
+            used.insert(*role);
+            pairs.push((role.join("_"), *class, *partner));
+        } else {
+            unmatched.push((*role, *class));
+        }
+    }
+    for (role, class) in unmatched {
+        let partner = second.iter().find(|(candidate, _)| {
+            !used.contains(*candidate)
+                && (word_prefix(role, candidate) || word_prefix(candidate, role))
+        });
+        if let Some((candidate, partner)) = partner {
+            used.insert(*candidate);
+            pairs.push((role.join("_"), class, *partner));
+        }
+    }
+    pairs
+}
+
+fn parallel_observation(
+    first: &Family<'_>,
+    second: &Family<'_>,
+    twin: bool,
+    pairs: &[(String, &ClassFact, &ClassFact)],
+) -> Option<Observation> {
+    let (_, anchor, _) = pairs.first()?;
+    let mut candidate = observation(
+        anchor.symbol.clone(),
+        anchor.location.clone(),
+        [("parallel_pairs", pairs.len() as u64)],
+        json!({
+            "collector": "authored_parallel_hierarchy_roles_v2",
+            "base_pair": [first.key, second.key],
+            "pairing": if twin { "sync_async_variants" } else { "shared_role_affixes" },
+            "shared_roles": pairs.iter().map(|(role, _, _)| role).collect::<Vec<_>>(),
+        }),
+    );
+    for (_, _, class) in pairs {
+        candidate.related_symbols.push(class.symbol.clone());
+        candidate.related_locations.push(class.location.clone());
+    }
+    Some(candidate)
 }
 
 pub(super) fn parallel_inheritance(model: &SourceModel) -> Vec<Observation> {
-    let mut by_base: BTreeMap<&str, BTreeMap<String, &ClassFact>> = BTreeMap::new();
-    for child in &model.classes {
-        for base in &child.bases {
-            let resolved = resolve_declared_base(model, child, base, false);
-            let same_named_declarations = model
-                .classes
-                .iter()
-                .filter(|class| class.name == base_leaf(base))
-                .count();
-            let (base_key, base_name) = if let Some(resolved) = resolved {
-                (resolved.symbol.as_str(), resolved.name.as_str())
-            } else if same_named_declarations == 0 {
-                (base.as_str(), base_leaf(base))
-            } else {
-                continue;
-            };
-            if let Some(role) = hierarchy_role(&child.name, base_name) {
-                by_base.entry(base_key).or_default().insert(role, child);
-            }
-        }
-    }
-    let families = by_base.into_iter().collect::<Vec<_>>();
+    let families = inheritance_families(model);
     let mut observations = Vec::new();
-    for (index, (first_base, first_roles)) in families.iter().enumerate() {
-        for (second_base, second_roles) in families.iter().skip(index + 1) {
-            let shared = first_roles
-                .keys()
-                .filter(|role| second_roles.contains_key(*role))
-                .collect::<Vec<_>>();
-            let Some(first) = shared.first().and_then(|role| first_roles.get(*role)) else {
+    let mut rest = families.as_slice();
+    while let [first, tail @ ..] = rest {
+        rest = tail;
+        for second in tail {
+            let twin = first.twin_of(second);
+            if !first.comparable(second, twin) {
                 continue;
-            };
-            let related = shared
-                .iter()
-                .filter_map(|role| second_roles.get(*role))
-                .collect::<Vec<_>>();
-            let mut candidate = observation(
-                first.symbol.clone(),
-                first.location.clone(),
-                [("parallel_pairs", shared.len() as u64)],
-                json!({
-                    "collector": "authored_parallel_hierarchy_roles_v1",
-                    "base_pair": [first_base, second_base],
-                    "shared_roles": shared,
-                }),
-            );
-            for class in related {
-                candidate.related_symbols.push(class.symbol.clone());
-                candidate.related_locations.push(class.location.clone());
             }
-            observations.push(candidate);
+            let pairs = paired_roles(&first.roles(second, twin), &second.roles(first, twin));
+            observations.extend(parallel_observation(first, second, twin, &pairs));
         }
     }
     observations
+}
+
+/// A Rust trait whose supertraits resolve (by qualified path, else by unique name) to an
+/// authored, non-empty trait extends local code (`HandlerWithoutStateExt: Handler`), not a library type.
+fn extends_local_trait(model: &SourceModel, extension: &ClassFact) -> bool {
+    let Some(header) = declaration_header(&extension.source, &extension.name) else {
+        return false;
+    };
+    let bounds = header.split(" where ").next().unwrap_or_default();
+    let Some((_, bounds)) = bounds.split_once(':') else {
+        return false;
+    };
+    bounds
+        .split('+')
+        .map(|bound| bound.trim().trim_start_matches('?').replace(' ', ""))
+        .filter_map(|bound| resolve_declared_base(model, extension, &bound, true))
+        .any(|base| base.symbol != extension.symbol && !base.methods.is_empty())
+}
+
+fn rust_library_capabilities(model: &SourceModel) -> Vec<Observation> {
+    model
+        .classes
+        .iter()
+        .filter(|class| {
+            class.interface
+                && !class.methods.is_empty()
+                && (class.name.ends_with("Ext") || class.name.ends_with("Extension"))
+                && !extends_local_trait(model, class)
+        })
+        .map(|class| {
+            observation(
+                class.symbol.clone(),
+                class.location.clone(),
+                [("failures", 1)],
+                json!({
+                    "collector": "rust_extension_trait_workaround_v1",
+                    "scope": "authored non-empty traits named *Ext or *Extension that do not extend an authored trait",
+                }),
+            )
+        })
+        .collect()
+}
+
+/// Names bound by TypeScript imports: defaults, named (after `as`), and namespaces.
+fn typescript_imported_names(
+    path: &str,
+    source: &str,
+    code: &str,
+) -> Result<BTreeSet<String>, String> {
+    static REQUIRE: OnceLock<Regex> = OnceLock::new();
+    let require = REQUIRE.get_or_init(|| {
+        Regex::new(r"\b(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*require\s*\(")
+            .expect("valid require expression")
+    });
+    let mut names = require
+        .captures_iter(code)
+        .map(|captures| captures[1].to_string())
+        .collect::<BTreeSet<_>>();
+    for statement in import_statements(path, source)? {
+        let Some(clause) = statement.trim().strip_prefix("import") else {
+            continue;
+        };
+        let clause = clause.split([';', '=']).next().unwrap_or_default();
+        let clause = clause
+            .rsplit_once(" from")
+            .map_or(clause, |(clause, _)| clause);
+        names.extend(
+            clause
+                .split([',', '{', '}'])
+                .filter_map(|binding| binding.rsplit(" as ").next())
+                .map(|binding| binding.trim().trim_start_matches("type ").trim())
+                .filter(|binding| {
+                    !binding.is_empty()
+                        && binding.chars().all(|character| {
+                            character.is_alphanumeric() || "_$".contains(character)
+                        })
+                })
+                .map(str::to_string),
+        );
+    }
+    Ok(names)
+}
+
+/// Whether a workaround match counts. `setattr(self, ...)` mutates the receiver
+/// itself; a TypeScript `a.b.c =` counts only when `a` is imported or a host global.
+fn library_target(matched: &str, imported: Option<&BTreeSet<String>>) -> bool {
+    const HOST_GLOBALS: [&str; 5] = ["window", "globalThis", "global", "process", "navigator"];
+    if let Some(arguments) = matched.strip_prefix("setattr") {
+        let receiver = arguments.trim_start().trim_start_matches('(').trim_start();
+        return !["self", "cls"].iter().any(|own| {
+            receiver
+                .strip_prefix(own)
+                .is_some_and(|rest| rest.trim_start().starts_with(','))
+        });
+    }
+    if matched.contains(".prototype.") {
+        return true;
+    }
+    let receiver = matched.split('.').next().unwrap_or_default();
+    imported.is_none_or(|imported| imported.contains(receiver) || HOST_GLOBALS.contains(&receiver))
+}
+
+/// Prototype assignments, `setattr` calls and assignments to a dotted target of at
+/// least three names, since `self.x =` is ordinary state.
+fn workaround_expression() -> &'static Regex {
+    static WORKAROUND: OnceLock<Regex> = OnceLock::new();
+    WORKAROUND.get_or_init(|| {
+        Regex::new(
+            r"(?m)(?:\b[A-Za-z_$][A-Za-z0-9_$]*\.prototype\.[A-Za-z_$][A-Za-z0-9_$]*\s*=(?:[^=]|$)|\bsetattr\s*\(\s*[A-Za-z_][A-Za-z0-9_.]*\s*,|\b[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*){2,}\s*=(?:[^=]|$))",
+        )
+        .expect("valid library workaround expression")
+    })
+}
+
+/// Whether a dotted assignment begins its expression: not the tail of a longer chain
+/// such as `dom.window.document.body.x =`, and not a type such as `let x: a.b.C =`,
+/// `| a.b.C =` or `typeof a.b.c =`.
+fn chain_root(code: &str, failure: &str, start: usize) -> bool {
+    if failure.starts_with("setattr") || failure.contains(".prototype.") {
+        return true;
+    }
+    let line = code[..start].rsplit('\n').next().unwrap_or_default();
+    let before = line.trim_end();
+    let type_query = before
+        .strip_suffix("typeof")
+        .is_some_and(|rest| !rest.ends_with(|c: char| c.is_alphanumeric() || c == '_'));
+    !before.ends_with(['.', ':', '|']) && !type_query
 }
 
 pub(super) fn library_capabilities(
@@ -319,39 +897,27 @@ pub(super) fn library_capabilities(
     model: &SourceModel,
     input: &Input,
 ) -> Result<Vec<Observation>, String> {
-    static WORKAROUND: OnceLock<Regex> = OnceLock::new();
     if rule.id.starts_with("rust.") {
-        return Ok(model
-            .classes
-            .iter()
-            .filter(|class| {
-                class.interface
-                    && !class.methods.is_empty()
-                    && (class.name.ends_with("Ext") || class.name.ends_with("Extension"))
-            })
-            .map(|class| {
-                observation(
-                    class.symbol.clone(),
-                    class.location.clone(),
-                    [("failures", 1)],
-                    json!({
-                        "collector": "rust_extension_trait_workaround_v1",
-                        "scope": "authored non-empty traits named *Ext or *Extension",
-                    }),
-                )
-            })
-            .collect());
+        return Ok(rust_library_capabilities(model));
     }
-    let workaround = WORKAROUND.get_or_init(|| {
-        Regex::new(
-            r"(?m)(?:\b[A-Za-z_$][A-Za-z0-9_$]*\.prototype\.[A-Za-z_$][A-Za-z0-9_$]*\s*=(?:[^=]|$)|\bsetattr\s*\(\s*[A-Za-z_][A-Za-z0-9_.]*\s*,|\b[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*\s*=(?:[^=]|$))",
-        )
-        .expect("valid library workaround expression")
-    });
+    let typescript = rule_language(rule) == "typescript";
+    let workaround = workaround_expression();
     let mut observations = Vec::new();
     for (path, source) in &input.files {
         let code = code_only(path, source)?;
-        let failures = workaround.find_iter(&code).collect::<Vec<_>>();
+        let mut failures = workaround
+            .find_iter(&code)
+            .filter(|failure| chain_root(&code, failure.as_str(), failure.start()))
+            .peekable();
+        if failures.peek().is_none() {
+            continue;
+        }
+        let imported = typescript
+            .then(|| typescript_imported_names(path, source, &code))
+            .transpose()?;
+        let failures = failures
+            .filter(|failure| library_target(failure.as_str(), imported.as_ref()))
+            .collect::<Vec<_>>();
         if let Some(first) = failures.first() {
             observations.push(observation(
                 format!("{path}::library-extension-workarounds"),
@@ -359,7 +925,7 @@ pub(super) fn library_capabilities(
                 [("failures", failures.len() as u64)],
                 json!({
                     "collector": "authored_library_extension_workaround_v1",
-                    "scope": "prototype or foreign attribute mutation; optional capability tests may replace this evidence",
+                    "scope": "prototype or imported/foreign attribute mutation and setattr on a non-receiver; optional capability tests may replace this evidence",
                 }),
             ));
         }
@@ -601,6 +1167,12 @@ mod tests {
             "if (Array.prototype.first === undefined) { stop(); }\n",
             "window.app.config = {};\n",
             "vendor.client.retry =\n  3;\n",
+            "config.languageOptions.parser = parser;\n",
+            "dom.window.document.body.innerHTML = html;\n",
+            "let realpath: typeof vendor.realpathSync.native = native;\n",
+            "let check: vendor.core.Check = check;\n",
+            "document.documentElement.dataset.state = 'ready';\n",
+            "import * as vendor from 'vendor';\n",
         );
         let observations = library_capabilities(
             &rule("typescript.library_capabilities"),
@@ -634,12 +1206,511 @@ mod tests {
             ..SourceModel::default()
         };
 
-        let observations = port_conformance(&rule("rust.port_conformance"), &model);
+        let observations = port_conformance(
+            &rule("rust.port_conformance"),
+            &model,
+            &input(BTreeMap::new()),
+        )
+        .unwrap();
         assert_eq!(observations.len(), 1);
         assert_eq!(observations[0].measurements["failures"], 1);
         assert_eq!(observations[0].evidence["missing_methods"], json!(["save"]));
 
-        let observations = port_conformance(&rule("typescript.port_conformance"), &model);
+        let observations = port_conformance(
+            &rule("typescript.port_conformance"),
+            &model,
+            &input(BTreeMap::new()),
+        )
+        .unwrap();
         assert_eq!(observations[0].measurements["failures"], 2);
+    }
+    #[test]
+    fn nominal_slots_ignore_boolean_flags_partial_terms_and_typescript_interfaces() {
+        assert!(semantically_nominal_name("zip"));
+        assert!(semantically_nominal_name("billing_zip_code"));
+        assert!(!semantically_nominal_name("search_zip"));
+        let field = |name: &str, authored_type: &str| FieldFact {
+            name: name.into(),
+            authored_type: authored_type.into(),
+            temporary: false,
+            private: false,
+        };
+        let mut args = class("src/args.rs", "Args", "Args");
+        args.fields = vec![field("search_zip", "bool"), field("is_id", "bool")];
+        let rust = SourceModel {
+            classes: vec![args],
+            ..SourceModel::default()
+        };
+        assert!(nominal_slot_contract(&rule("rust.nominal_slot_contract"), &rust).is_empty());
+
+        let mut shape = class("src/types.ts", "Message", "Message");
+        shape.interface = true;
+        shape.source = Arc::from("interface Message { id: string }");
+        shape.fields = vec![field("id", "string")];
+        let mut entity = class("src/entity.ts", "Account", "Account");
+        entity.source = Arc::from("class Account { id: string }");
+        entity.fields = vec![field("id", "string")];
+        let typescript = SourceModel {
+            classes: vec![shape, entity],
+            ..SourceModel::default()
+        };
+        let observations =
+            nominal_slot_contract(&rule("typescript.nominal_slot_contract"), &typescript);
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].symbol, "src/entity.ts::Account");
+    }
+
+    #[test]
+    fn rust_port_conformance_treats_item_macro_impls_as_unknown() {
+        let mut port = class("src/io.rs", "Read", "Read");
+        port.interface = true;
+        port.methods = vec![function("poll_read", None)];
+        let mut boxed = class("src/io.rs", "Box", "Box");
+        boxed.bases = vec!["Read".into()];
+        let mut file = class("src/file.rs", "File", "File");
+        file.bases = vec!["Read".into()];
+        let model = SourceModel {
+            classes: vec![port, boxed, file],
+            ..SourceModel::default()
+        };
+        let files = BTreeMap::from([
+            (
+                "src/io.rs".to_string(),
+                "trait Read { fn poll_read(&self); }\nimpl<T: Read> Read for Box<T> { forward!(); }\n"
+                    .to_string(),
+            ),
+            (
+                "src/file.rs".to_string(),
+                "struct File;\nimpl crate::io::Read for File {}\n".to_string(),
+            ),
+        ]);
+        let observations =
+            port_conformance(&rule("rust.port_conformance"), &model, &input(files)).unwrap();
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].symbol, "src/file.rs::File");
+        assert_eq!(observations[0].measurements["failures"], 1);
+    }
+
+    #[test]
+    fn rust_macro_implementations_read_only_files_with_trait_implementations() {
+        let mut supertrait = class("src/port.rs", "Port", "Port");
+        supertrait.interface = true;
+        supertrait.bases = vec!["Base".into()];
+        let plain = class("src/plain.rs", "Plain", "Plain");
+        let mut implementation = class("src/imp.rs", "Imp", "Imp");
+        implementation.bases = vec!["Port".into()];
+        let model = SourceModel {
+            classes: vec![supertrait, plain, implementation],
+            ..SourceModel::default()
+        };
+        let body = "impl Port for Imp { forward!(); }\n".to_string();
+        let files = ["src/port.rs", "src/plain.rs", "src/imp.rs"]
+            .map(|path| (path.to_string(), body.clone()))
+            .into();
+        let found = rust_macro_implementations(&model, &input(files)).unwrap();
+        let paths: Vec<&str> = found.iter().map(|(path, _, _)| path.as_str()).collect();
+        assert_eq!(paths, ["src/imp.rs"]);
+    }
+
+    #[test]
+    fn depth_zero_header_ignores_arrows_inside_brackets() {
+        assert_eq!(
+            depth_zero_header("<T extends () => X> implements E {"),
+            " implements E "
+        );
+        assert_eq!(depth_zero_header("implements E { x } y"), "implements E ");
+    }
+
+    #[test]
+    fn standard_imports_keep_names_under_std_roots_only() {
+        let file = syn::parse_file(
+            "use crate::io::{Read, Write as Out};\nuse std::fmt::{Display, Write as W};\nuse core::Wake;\n",
+        )
+        .unwrap();
+        let mut imports = StandardImports::default();
+        imports.visit_file(&file);
+        assert_eq!(
+            imports.0.into_iter().collect::<Vec<_>>(),
+            ["Display", "W", "Wake"]
+        );
+    }
+
+    #[test]
+    fn typescript_interfaces_need_the_language_flag_and_keyword() {
+        let mut shape = class("src/a.ts", "Shape", "Shape");
+        shape.interface = true;
+        shape.source = Arc::from("interface Shape { x: number }");
+        assert!(typescript_interface("typescript", &shape));
+        assert!(!typescript_interface("python", &shape));
+        shape.interface = false;
+        assert!(!typescript_interface("typescript", &shape));
+    }
+
+    #[test]
+    fn declared_bases_prefer_the_same_file() {
+        let local = class("src/a.py", "Base", "Base");
+        let other = class("src/b.py", "Base", "Base");
+        let mut derived = class("src/a.py", "Child", "Child");
+        derived.bases = vec!["Base".into()];
+        let model = SourceModel {
+            classes: vec![other, local, derived.clone()],
+            ..SourceModel::default()
+        };
+        let resolved = resolve_declared_base(&model, &derived, "Base", false).expect("resolves");
+        assert_eq!(resolved.location.path, "src/a.py");
+    }
+
+    #[test]
+    fn chain_root_reads_typeof_only_as_a_whole_word() {
+        for code in ["typeof a.b = 1", "x: a.b = 1"] {
+            assert!(!chain_root(code, "a.b", code.find("a.b").expect("chain")));
+        }
+        for code in ["my_typeof a.b = 1", "xtypeof a.b = 1", "a.b = 1"] {
+            assert!(chain_root(code, "a.b", code.find("a.b").expect("chain")));
+        }
+    }
+
+    #[test]
+    fn typescript_imported_names_keep_identifier_bindings_only() {
+        let source = "import './side.css';\nimport D, { a as b, type C } from 'm';\nimport * as ns from 'n';\n";
+        let names = typescript_imported_names("a.ts", source, source).unwrap();
+        assert_eq!(names.into_iter().collect::<Vec<_>>(), ["C", "D", "b", "ns"]);
+    }
+
+    #[test]
+    fn rust_ports_skip_std_imported_traits_and_cfg_gated_defaults() {
+        let mut wake = class("src/wake.rs", "Wake", "Wake");
+        wake.interface = true;
+        wake.methods = vec![function("wake", None), function("wake_by_ref", None)];
+        let mut serializer = class("src/ser.rs", "Serializer", "Serializer");
+        serializer.interface = true;
+        serializer.methods = vec![
+            function("collect_str", Some("self.serialize_str(value)")),
+            function("collect_str", None),
+            function("serialize_bool", None),
+        ];
+        let mut dummy = class("src/tests.rs", "DummyWaker", "DummyWaker");
+        dummy.bases = vec!["Wake".into()];
+        dummy.methods = vec![function("wake", Some(""))];
+        let mut content = class("src/content.rs", "Content", "Content");
+        content.bases = vec!["Serializer".into()];
+        content.methods = vec![function("serialize_bool", Some(""))];
+        let mut local = class("src/local.rs", "LocalWaker", "LocalWaker");
+        local.bases = vec!["Wake".into()];
+        local.methods = vec![function("wake", Some(""))];
+        let model = SourceModel {
+            classes: vec![wake, serializer, dummy, content, local],
+            ..SourceModel::default()
+        };
+        let files = BTreeMap::from([
+            (
+                "src/tests.rs".to_string(),
+                "use std::{sync::Arc, task::{Context, Wake}};
+struct DummyWaker;
+impl Wake for DummyWaker { fn wake(self: Arc<Self>) {} }
+"
+                .to_string(),
+            ),
+            (
+                "src/content.rs".to_string(),
+                "struct Content;
+impl Serializer for Content { fn serialize_bool(self) {} }
+"
+                .to_string(),
+            ),
+            (
+                "src/local.rs".to_string(),
+                "use crate::wake::Wake;
+struct LocalWaker;
+impl Wake for LocalWaker { fn wake(self) {} }
+"
+                .to_string(),
+            ),
+        ]);
+        let observations =
+            port_conformance(&rule("rust.port_conformance"), &model, &input(files)).unwrap();
+        let failures = observations
+            .iter()
+            .map(|observation| {
+                (
+                    observation.symbol.as_str(),
+                    observation.measurements["failures"],
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            failures,
+            [
+                ("src/content.rs::Content", 0),
+                ("src/local.rs::LocalWaker", 1)
+            ]
+        );
+    }
+
+    #[test]
+    fn python_abc_ports_require_only_abstract_methods_and_protocols_require_all() {
+        let mut column = class("src/columns.py", "Column", "Column");
+        column.interface = true;
+        column.source = Arc::from(concat!(
+            "class Column(ABC):\n",
+            "    def __call__(self, task):\n        return self.render(task)\n",
+            "    @abstractmethod\n    def render(self, task):\n        ...\n",
+            "    @property\n    @abc.abstractmethod\n    def width(self):\n        ...\n",
+        ));
+        column.methods = vec![
+            function("__call__", Some("return self.render(task)")),
+            function("render", Some("...")),
+            function("width", Some("...")),
+        ];
+        let mut text = class("src/text.py", "TextColumn", "TextColumn");
+        text.bases = vec!["Column".into()];
+        text.methods = vec![function("render", Some("return task"))];
+        let mut reader = class("src/reader.py", "Reader", "Reader");
+        reader.interface = true;
+        reader.source = Arc::from("class Reader(Protocol):\n    def read(self): ...\n");
+        reader.methods = vec![function("read", Some("..."))];
+        let mut file = class("src/file.py", "File", "File");
+        file.bases = vec!["Reader".into()];
+        let model = SourceModel {
+            classes: vec![column, text, reader, file],
+            ..SourceModel::default()
+        };
+        let observations = port_conformance(
+            &rule("python.port_conformance"),
+            &model,
+            &input(BTreeMap::new()),
+        )
+        .unwrap();
+        let missing = observations
+            .iter()
+            .map(|observation| {
+                (
+                    observation.symbol.as_str(),
+                    observation.evidence["missing_methods"].clone(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(missing["src/text.py::TextColumn"], json!(["width"]));
+        assert_eq!(missing["src/file.py::File"], json!(["read"]));
+    }
+
+    #[test]
+    fn typescript_ports_come_from_heritage_clauses_and_unambiguous_names() {
+        let mut schema = class("src/v4/schemas.ts", "ZodString", "ZodString");
+        schema.interface = true;
+        schema.source = Arc::from("interface ZodString { min(): void }");
+        schema.methods = vec![function("min", None)];
+        let mut record = class("src/v3/types.ts", "ZodRecord", "ZodRecord");
+        record.source = Arc::from(
+            "class ZodRecord<Key extends KeySchema = ZodString, Value = { a: 1 }> extends ZodType<Key> { }",
+        );
+        record.bases = vec!["ZodString".into(), "ZodType".into()];
+        let mut port = class("src/port.ts", "Port", "Port");
+        port.interface = true;
+        port.source = Arc::from("interface Port { load(): void }");
+        port.methods = vec![function("load", None)];
+        let mut other_port = class("src/other.ts", "Port", "Port");
+        other_port.source = Arc::from("class Port { }");
+        let mut adapter = class("src/adapter.ts", "Adapter", "Adapter");
+        adapter.source = Arc::from("class Adapter<T extends Base = Port> implements Port { }");
+        adapter.bases = vec!["Port".into()];
+        let model = SourceModel {
+            classes: vec![schema, record, port, other_port, adapter],
+            ..SourceModel::default()
+        };
+        let observations = port_conformance(
+            &rule("typescript.port_conformance"),
+            &model,
+            &input(BTreeMap::new()),
+        )
+        .unwrap();
+        assert!(observations.is_empty());
+        assert_eq!(
+            typescript_heritage(&model.classes[1]),
+            Some(BTreeSet::from(["ZodType".to_string()]))
+        );
+    }
+
+    #[test]
+    fn rust_extension_traits_over_authored_traits_are_not_library_workarounds() {
+        let mut handler = class("src/handler.rs", "Handler", "Handler");
+        handler.interface = true;
+        handler.methods = vec![function("call", None)];
+        let mut sealed = class("src/sealed.rs", "Sealed", "Sealed");
+        sealed.interface = true;
+        let mut local = class("src/handler.rs", "HandlerExt", "HandlerExt");
+        local.interface = true;
+        local.source = Arc::from(
+            "pub trait HandlerExt < T > : Handler < T , () > { fn into_service (self) ; }",
+        );
+        local.methods = vec![function("into_service", None)];
+        let mut foreign = class("src/parts.rs", "RequestPartsExt", "RequestPartsExt");
+        foreign.interface = true;
+        foreign.source = Arc::from(
+            "pub trait RequestPartsExt : sealed :: Sealed + Sized + futures :: Handler { fn extract (& mut self) ; }",
+        );
+        foreign.methods = vec![function("extract", None)];
+        let observations = library_capabilities(
+            &rule("rust.library_capabilities"),
+            &SourceModel {
+                classes: vec![handler, sealed, local, foreign],
+                ..SourceModel::default()
+            },
+            &input(BTreeMap::new()),
+        )
+        .unwrap();
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].symbol, "src/parts.rs::RequestPartsExt");
+    }
+
+    #[test]
+    fn python_setattr_on_the_own_receiver_is_not_a_library_workaround() {
+        let source = concat!(
+            "def __setstate__(self, state):\n",
+            "    for name, value in state.items():\n",
+            "        setattr(self, name, value)\n",
+            "        setattr( cls , name, value)\n",
+            "setattr(requests.Session, 'send', send)\n",
+            "if patched:\n",
+            "    requests.adapters.DEFAULT_RETRIES = 5\n",
+            "    monkeypatch.setattr(requests, 'get', get)\n",
+        );
+        let observations = library_capabilities(
+            &rule("python.library_capabilities"),
+            &SourceModel::default(),
+            &Input::fixture(
+                "python-v1",
+                BTreeMap::from([("src/patch.py".to_string(), source.to_string())]),
+            ),
+        )
+        .unwrap();
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].measurements["failures"], 3);
+        assert_eq!(observations[0].location.line, 5);
+    }
+
+    #[test]
+    fn identifier_words_split_acronyms_and_markers() {
+        assert_eq!(identifier_words("TSEnumScope"), ["ts", "enum", "scope"]);
+        assert_eq!(identifier_words("HTTPTransport"), ["http", "transport"]);
+        assert_eq!(
+            identifier_words("bound_async2Stream"),
+            ["bound", "async2", "stream"]
+        );
+    }
+
+    #[test]
+    fn sync_async_twin_hierarchies_pair_variant_free_child_names() {
+        let child = |name: &str, bases: &[&str]| {
+            let mut fact = class("src/streams.py", name, name);
+            fact.bases = bases.iter().map(|base| (*base).to_string()).collect();
+            fact
+        };
+        let model = SourceModel {
+            classes: vec![
+                child("SyncByteStream", &[]),
+                child("AsyncByteStream", &[]),
+                child("IteratorByteStream", &["SyncByteStream"]),
+                child("AsyncIteratorByteStream", &["AsyncByteStream"]),
+                child("BoundSyncStream", &["SyncByteStream"]),
+                child("BoundAsyncStream", &["AsyncByteStream"]),
+                child("ResponseStream", &["SyncByteStream"]),
+                child("AsyncResponseStream", &["AsyncByteStream"]),
+                child("ByteStream", &["SyncByteStream", "AsyncByteStream"]),
+                child("WSGIByteStream", &["SyncByteStream"]),
+            ],
+            ..SourceModel::default()
+        };
+        let observations = parallel_inheritance(&model);
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].measurements["parallel_pairs"], 3);
+        assert_eq!(observations[0].evidence["pairing"], "sync_async_variants");
+    }
+
+    #[test]
+    fn parallel_roles_pair_word_prefixes_one_to_one() {
+        let child = |path: &str, name: &str, base: &str| {
+            let mut fact = class(path, name, name);
+            fact.bases = vec![base.into()];
+            fact
+        };
+        let mut classes = vec![
+            class("src/scope/base.ts", "ScopeBase", "ScopeBase"),
+            class("src/definition/base.ts", "DefinitionBase", "DefinitionBase"),
+        ];
+        for name in [
+            "CatchScope",
+            "ClassScope",
+            "FunctionScope",
+            "FunctionTypeScope",
+            "TypeScope",
+            "WithScope",
+        ] {
+            classes.push(child("src/scope/all.ts", name, "ScopeBase"));
+        }
+        for name in [
+            "CatchClauseDefinition",
+            "ClassNameDefinition",
+            "FunctionNameDefinition",
+            "TypeDefinition",
+            "VariableDefinition",
+        ] {
+            classes.push(child("src/definition/all.ts", name, "DefinitionBase"));
+        }
+        let observations = parallel_inheritance(&SourceModel {
+            classes,
+            ..SourceModel::default()
+        });
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].measurements["parallel_pairs"], 4);
+        assert_eq!(
+            observations[0].evidence["shared_roles"],
+            json!(["type", "catch_clause", "class_name", "function_name"])
+        );
+    }
+
+    #[test]
+    fn parallel_roles_skip_copies_generic_external_bases_and_typescript_interfaces() {
+        let child = |path: &str, name: &str, base: &str| {
+            let mut fact = class(path, name, name);
+            fact.bases = vec![base.into()];
+            fact
+        };
+        let roles = ["Create", "Public", "Update"];
+        let mut classes = vec![
+            class("docs/one.py", "HeroBase", "HeroBase"),
+            class("docs/two.py", "HeroBase", "HeroBase"),
+        ];
+        for path in ["docs/one.py", "docs/two.py"] {
+            classes.extend(roles.map(|role| child(path, &format!("Hero{role}"), "HeroBase")));
+        }
+        classes.extend(
+            ["Header", "Cookie", "Query"]
+                .map(|role| child("tests/models.py", &format!("{role}Model"), "BaseModel")),
+        );
+        classes.push(class("src/key.py", "APIKeyBase", "APIKeyBase"));
+        classes.extend(
+            ["Header", "Cookie", "Query"]
+                .map(|role| child("src/key.py", &format!("APIKey{role}"), "APIKeyBase")),
+        );
+        classes.extend(["Boolean", "Null", "String"].map(|role| {
+            let mut literal = child("src/spec.ts", &format!("{role}Literal"), "LiteralBase");
+            literal.interface = true;
+            literal.source = Arc::from(format!("interface {role}Literal extends LiteralBase {{}}"));
+            literal
+        }));
+        classes.push(class("src/spec.ts", "LiteralBase", "LiteralBase"));
+        classes.push(class("src/token.ts", "TokenBase", "TokenBase"));
+        classes.extend(
+            ["Boolean", "Null", "String"]
+                .map(|role| child("src/token.ts", &format!("{role}Token"), "TokenBase")),
+        );
+
+        let observations = parallel_inheritance(&SourceModel {
+            classes,
+            ..SourceModel::default()
+        });
+
+        assert!(observations.is_empty());
     }
 }

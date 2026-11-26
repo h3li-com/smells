@@ -177,6 +177,33 @@ All notable changes to Smells are recorded here. Release tags use `vMAJOR.MINOR.
     have a default. Keyword-only parameters without a default still count.
   - `data_clumps` counts each distinct slot population once, so repeated
     identical signatures no longer exhaust `maximum_group_combinations`.
+- Recalibrate against the same twelve codebases until at least 90% of sampled
+  findings were true positives or defensible, with no rule holding two false
+  positives in one language (315 of 322, 97.8%; see
+  `docs/calibration/v0.7.0.md`). Each changed rule's version moves:
+  - `foreign_accesses` and `navigation_chains` move to `3` in every language.
+    Locals bound from owned state, Rust pattern bindings from `self`, and
+    dotted chains rooted in owned names are owned; navigation runs stop at
+    calls with arguments and skip standard conversions.
+  - `alternative_interfaces`, `divergent_change`, `shotgun_surgery`,
+    `port_conformance`, `nominal_slot_contract` and `library_capabilities`
+    move to `2` in every language. The history rules count only production
+    responsibilities, so test, docs, example, script and config files are not
+    owners, and skip mechanical sweeps (formatting, lint, typing, whitespace,
+    `doc:`, dependency bumps) and reverts. `port_conformance` no longer reports
+    trait default methods, cfg-gated twin declarations, macro-generated
+    methods, ABC concrete methods or type-parameter constraints.
+    `library_capabilities` counts a TypeScript assignment only when its target
+    chain is rooted in an import or a host global, and ignores type
+    annotations and `setattr` on the own receiver.
+  - Python and TypeScript `alternative_interfaces` compare ordered 4-token
+    shingles, and the default `minimum_similarity_basis_points` moves from
+    `8200` to `6200`. Rust keeps `8200`.
+  - `function_arguments`, `repeated_dispatch`, `parallel_inheritance` and
+    `dependency_contract` move to `2` in Python and TypeScript;
+    `python.unused_code`, `typescript.primitive_slots` and
+    `typescript.temporary_fields` move to `2`; `rust.unused_code` moves to
+    `3`.
 - Resolve `mod` declarations in Cargo target roots other than `lib.rs` and
   `main.rs` (files directly in `tests/`, `examples/` and `benches/`,
   `src/bin/*.rs` and `build.rs`) next to the root file. Before, the scan exited
