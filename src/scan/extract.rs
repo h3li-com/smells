@@ -61,13 +61,16 @@ fn field_slots(symbol: &str, path: &str, span: Span, fields: &Fields) -> Slots {
 /// configuration variant; `impl` blocks bind to the first declaration.
 fn type_key(facts: &Facts, module: &Module, name: &syn::Ident) -> String {
     let key = format!("{}::{name}", module.key);
-    let mut candidate = key.clone();
-    let mut ordinal = 2;
-    while facts.types.contains_key(&candidate) {
-        candidate = super::variant_key(&key, ordinal);
-        ordinal += 1;
+    if !facts.types.contains_key(&key) {
+        return key;
     }
-    candidate
+    // `key` is one of the taken types, so one of `types.len()` distinct
+    // variant candidates is always free.
+    (2..)
+        .take(facts.types.len())
+        .map(|ordinal| super::variant_key(&key, ordinal))
+        .find(|candidate| !facts.types.contains_key(candidate))
+        .unwrap_or(key)
 }
 
 /// The location of a declaration in `module`, recorded as test code when the module is.

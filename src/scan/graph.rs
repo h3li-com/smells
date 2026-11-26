@@ -693,8 +693,10 @@ impl Facts {
     /// modules it names, so a name resolves when any variant declares it.
     fn variant_keys(&self, key: &str) -> Vec<String> {
         let mut keys = vec![key.to_string()];
-        let mut index = 0;
-        while let Some(current) = keys.get(index).cloned() {
+        for index in 0.. {
+            let Some(current) = keys.get(index).cloned() else {
+                break;
+            };
             for (end, _) in current.match_indices("::") {
                 let Some(alternatives) = self.variants.get(&current[..end]) else {
                     continue;
@@ -706,7 +708,6 @@ impl Facts {
                     }
                 }
             }
-            index += 1;
         }
         keys
     }
