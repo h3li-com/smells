@@ -1,6 +1,8 @@
-//! Finds file changes in the history window whose only edit adds, removes or
-//! moves a lint or type-checker suppression. Such a change silences a tool; it
-//! does not change what the file does, so history rules do not count it.
+//! Finds file changes in the history window that leave the code as it was: the
+//! only edit adds, removes or moves a lint or type-checker suppression, only
+//! changes a version string, or moves the file unchanged from another path.
+//! Such a change silences a tool, marks a release or renames a file; it does
+//! not change what the file does, so history rules do not count it.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -34,11 +36,24 @@ const SUPPRESSION_MARKERS: &[&str] = &[
     "fmt: skip",
 ];
 
+/// Whether a comment is a tool directive: after its opener it starts with a
+/// suppression marker, such as `// @ts-expect-error why` or `# type: ignore`.
+pub(crate) fn directive_comment(comment: &str) -> bool {
+    let text = comment
+        .trim_start()
+        .trim_start_matches(['/', '*', '#', '!'])
+        .trim_start()
+        .to_ascii_lowercase();
+    SUPPRESSION_MARKERS
+        .iter()
+        .any(|marker| text.starts_with(marker))
+}
+
 /// Rust attributes that only suppress lints.
 const SUPPRESSION_ATTRIBUTES: &[&str] = &["#[allow(", "#[expect(", "#![allow(", "#![expect("];
 
 /// The `(commit, path)` changes in the history window that only edit
-/// suppressions. Missing objects are never fetched: in a partial clone, or when
+/// suppressions, a version string, or move the file unchanged. Missing objects are never fetched: in a partial clone, or when
 /// Git fails, no change is discounted and every changed file still counts.
 pub(super) fn suppression_only_edits(
     root: &Path,
@@ -92,6 +107,35 @@ impl FileEdit {
     fn suppression_only(&self) -> bool {
         self.hunks && lines_differ_only_in_suppressions(&self.removed, &self.added)
     }
+
+    /// Whether every changed line assigns a version string, a release bump.
+    fn version_only(&self) -> bool {
+        !self.added.is_empty()
+            && self.removed.len() == self.added.len()
+            && self
+                .removed
+                .iter()
+                .chain(&self.added)
+                .all(|line| version_assignment(line))
+    }
+}
+
+/// Whether a line assigns a string literal to a variable or constant named
+/// `version`, `VERSION` or `__version__`.
+fn version_assignment(line: &str) -> bool {
+    let Some((target, value)) = line.split_once('=') else {
+        return false;
+    };
+    let name = target.split(':').next().unwrap_or_default().trim();
+    let name = name.rsplit(' ').next().unwrap_or_default();
+    let value = value.trim().trim_end_matches([';', ',']).trim_end();
+    matches!(name, "version" | "VERSION" | "__version__")
+        && value.len() >= 2
+        && ['"', '\''].iter().any(|quote| {
+            value.starts_with(*quote)
+                && value.ends_with(*quote)
+                && !value[1..value.len() - 1].contains(*quote)
+        })
 }
 
 /// Parses `git log --patch --unified=0` output. Hunk line counts decide which
@@ -100,17 +144,9 @@ impl FileEdit {
 fn parse_patch_log(log: &str, files: &BTreeMap<String, String>) -> BTreeSet<(String, String)> {
     let mut found = BTreeSet::new();
     let mut commit = String::new();
+    let mut edits = Vec::new();
     let mut edit = FileEdit::default();
     let mut remaining = 0_usize;
-    let mut finish = |commit: &str, edit: &mut FileEdit| {
-        let done = std::mem::take(edit);
-        if let Some(path) = &done.path
-            && files.contains_key(path)
-            && done.suppression_only()
-        {
-            found.insert((commit.to_string(), path.clone()));
-        }
-    };
     for line in log.split('\n') {
         if remaining > 0 {
             if line.starts_with('\\') {
@@ -123,18 +159,44 @@ fn parse_patch_log(log: &str, files: &BTreeMap<String, String>) -> BTreeSet<(Str
                 edit.removed.push(removed.to_string());
             }
         } else if let Some(header) = line.strip_prefix('\u{1e}') {
-            finish(&commit, &mut edit);
+            edits.push(std::mem::take(&mut edit));
+            found.extend(unchanged_files(&commit, &std::mem::take(&mut edits), files));
             commit = header.trim().to_string();
         } else if let Some(paths) = line.strip_prefix("diff --git ") {
-            finish(&commit, &mut edit);
+            edits.push(std::mem::take(&mut edit));
             edit.path = diff_path(paths);
         } else if let Some(range) = line.strip_prefix("@@ ") {
             edit.hunks = true;
             remaining = hunk_lines(range);
         }
     }
-    finish(&commit, &mut edit);
+    edits.push(edit);
+    found.extend(unchanged_files(&commit, &edits, files));
     found
+}
+
+/// The `(commit, path)` pairs of one commit whose edit leaves the code as it
+/// was: it only edits suppressions, only changes a version string, or creates
+/// the file with exactly the lines the commit deletes from another file, a move.
+fn unchanged_files(
+    commit: &str,
+    edits: &[FileEdit],
+    files: &BTreeMap<String, String>,
+) -> Vec<(String, String)> {
+    let moved_from = |edit: &FileEdit| {
+        edit.removed.is_empty()
+            && !edit.added.is_empty()
+            && edits
+                .iter()
+                .any(|other| other.added.is_empty() && other.removed == edit.added)
+    };
+    edits
+        .iter()
+        .filter(|edit| edit.suppression_only() || edit.version_only() || moved_from(edit))
+        .filter_map(|edit| edit.path.clone())
+        .filter(|path| files.contains_key(path))
+        .map(|path| (commit.to_string(), path))
+        .collect()
 }
 
 /// The path in a `diff --git a/P b/P` header. Renames are disabled, so both
@@ -214,7 +276,10 @@ fn without_suppression(line: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{diff_path, hunk_lines, lines_differ_only_in_suppressions, parse_patch_log};
+    use super::{
+        diff_path, directive_comment, hunk_lines, lines_differ_only_in_suppressions,
+        parse_patch_log, version_assignment,
+    };
     use std::collections::BTreeMap;
 
     fn lines(text: &[&str]) -> Vec<String> {
@@ -285,6 +350,49 @@ mod tests {
     }
 
     #[test]
+    fn directive_comments_start_with_a_suppression_marker() {
+        for comment in [
+            "// @ts-expect-error wrong overload",
+            "/* eslint-disable no-console */",
+            "# type: ignore[attr-defined]",
+            "#noqa: E501",
+            "// prettier-ignore",
+        ] {
+            assert!(directive_comment(comment), "{comment}");
+        }
+        for comment in [
+            "// explain why",
+            "// see eslint-disable above",
+            "#: doc",
+            "",
+        ] {
+            assert!(!directive_comment(comment), "{comment}");
+        }
+    }
+
+    #[test]
+    fn version_assignments_set_a_version_name_to_a_string() {
+        for line in [
+            "__version__ = \"0.28.0\"",
+            "export const version = '4.1.0';",
+            "pub const VERSION: &str = \"1.2.3\";",
+            "  version=\"2\",",
+        ] {
+            assert!(version_assignment(line), "{line}");
+        }
+        for line in [
+            "__version__ = get_version()",
+            "minimum_version = \"3.9\"",
+            "version = \"a\" + \"b\"",
+            "version = \"",
+            "version == \"1\"",
+            "__title__ = \"httpx\"",
+        ] {
+            assert!(!version_assignment(line), "{line}");
+        }
+    }
+
+    #[test]
     fn patch_logs_report_suppression_only_files_per_commit() {
         let files = BTreeMap::from([
             ("a.ts".to_string(), String::new()),
@@ -297,12 +405,19 @@ diff --git a/b.ts b/b.ts\n--- a/b.ts\n+++ b/b.ts\n@@ -1 +1,2 @@\n--- not a heade
 +++ not a header // eslint-disable-line\n+run();\n\\ No newline at end of file\n\
 diff --git a/untracked.ts b/untracked.ts\n@@ -0,0 +1 @@\n+// @ts-ignore\n\
 diff --git a/c.ts b/c.ts\nnew file mode 100644\n\
-\u{1e}two\n\ndiff --git a/b.ts b/b.ts\n@@ -2 +2 @@\n-x = 1;\n+x = 1; // @ts-expect-error why\n";
+\u{1e}two\n\ndiff --git a/b.ts b/b.ts\n@@ -2 +2 @@\n-x = 1;\n+x = 1; // @ts-expect-error why\n\
+\u{1e}three\n\ndiff --git a/old/a.ts b/old/a.ts\ndeleted file mode 100644\n@@ -1,2 +0,0 @@\n-x = 1;\n-y = 2;\n\
+diff --git a/a.ts b/a.ts\nnew file mode 100644\n@@ -0,0 +1,2 @@\n+x = 1;\n+y = 2;\n\
+diff --git a/c.ts b/c.ts\nnew file mode 100644\n@@ -0,0 +1 @@\n+x = 1;\n\
+\u{1e}four\n\ndiff --git a/b.ts b/b.ts\n@@ -3 +3 @@\n-export const version = '1.0';\n+export const version = '1.1';\n\
+diff --git a/c.ts b/c.ts\n@@ -1 +1 @@\n-x = 1;\n+x = 2;\n";
         let found = parse_patch_log(log, &files);
         assert_eq!(
             found.into_iter().collect::<Vec<_>>(),
             vec![
+                ("four".to_string(), "b.ts".to_string()),
                 ("one".to_string(), "a.ts".to_string()),
+                ("three".to_string(), "a.ts".to_string()),
                 ("two".to_string(), "b.ts".to_string()),
             ]
         );

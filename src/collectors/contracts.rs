@@ -1,5 +1,5 @@
 use super::{
-    common::{location_at, observation, primitive_type},
+    common::{dunder, location_at, observation, primitive_type},
     model::{ClassFact, SourceModel},
     syntax::{code_only, import_statements},
 };
@@ -847,7 +847,8 @@ fn typescript_imported_names(
 }
 
 /// Whether a workaround match counts. `setattr(self, ...)` mutates the receiver
-/// itself; a TypeScript `a.b.c =` counts only when `a` is imported or a host global.
+/// itself; a TypeScript `a.b.c =` counts only when `a` is imported or a host global,
+/// and a `process.env` write sets an environment variable rather than patching a library.
 fn library_target(matched: &str, imported: Option<&BTreeSet<String>>) -> bool {
     const HOST_GLOBALS: [&str; 5] = ["window", "globalThis", "global", "process", "navigator"];
     if let Some(arguments) = matched.strip_prefix("setattr") {
@@ -861,7 +862,11 @@ fn library_target(matched: &str, imported: Option<&BTreeSet<String>>) -> bool {
     if matched.contains(".prototype.") {
         return true;
     }
-    let receiver = matched.split('.').next().unwrap_or_default();
+    let mut names = matched.split('.');
+    let receiver = names.next().unwrap_or_default();
+    if receiver == "process" && names.next().is_some_and(|name| name.trim_end() == "env") {
+        return false;
+    }
     imported.is_none_or(|imported| imported.contains(receiver) || HOST_GLOBALS.contains(&receiver))
 }
 
@@ -913,6 +918,72 @@ fn authored_settable_attributes(model: &SourceModel) -> BTreeSet<String> {
     attributes
 }
 
+/// Authored Python class names and the method names they declare.
+struct AuthoredClasses<'model> {
+    classes: BTreeSet<&'model str>,
+    methods: BTreeSet<&'model str>,
+}
+
+impl<'model> AuthoredClasses<'model> {
+    fn new(model: &'model SourceModel) -> Self {
+        Self {
+            classes: model
+                .classes
+                .iter()
+                .map(|class| class.name.as_str())
+                .collect(),
+            methods: model
+                .classes
+                .iter()
+                .flat_map(|class| &class.methods)
+                .map(|method| method.name.as_str())
+                .collect(),
+        }
+    }
+
+    /// Whether a Python workaround mutates an authored class object or one of its
+    /// methods rather than a library object: `setattr(codes, ...)` on an authored
+    /// class, `Outer.Inner.__doc__ = ...`, or `cls.__rich_repr__.angular = ...`.
+    /// A field reached through the receiver, as in `self.session.headers = ...`,
+    /// may hold a library object and still counts.
+    fn target(&self, matched: &str) -> bool {
+        let names = mutated_object(matched)
+            .split('.')
+            .map(str::trim)
+            .collect::<Vec<_>>();
+        match names.as_slice() {
+            [class] => *class == "cls" || self.classes.contains(class),
+            [root, member] => self.authored_member(root, member),
+            _ => false,
+        }
+    }
+
+    /// Whether `root.member` names a dunder or method of an authored class, reached
+    /// through `self`, `cls` or the class name, or a class nested in an authored class.
+    fn authored_member(&self, root: &str, member: &str) -> bool {
+        let receiver = matches!(root, "self" | "cls");
+        (receiver || self.classes.contains(root))
+            && (dunder(member)
+                || self.methods.contains(member)
+                || (!receiver && self.classes.contains(member)))
+    }
+}
+
+/// The object a Python workaround mutates: the first `setattr` argument, or the
+/// assignment target without its final attribute.
+fn mutated_object(matched: &str) -> &str {
+    matched.strip_prefix("setattr").map_or_else(
+        || {
+            let target = matched.split('=').next().unwrap_or_default().trim_end();
+            target.rsplit_once('.').map_or("", |(object, _)| object)
+        },
+        |arguments| {
+            let arguments = arguments.trim_start().trim_start_matches('(');
+            arguments.split(',').next().unwrap_or_default()
+        },
+    )
+}
+
 /// Whether a dotted Python assignment `a.b.name =` sets an attribute an authored
 /// class declares as assignable.
 fn authored_attribute_assignment(matched: &str, authored: &BTreeSet<String>) -> bool {
@@ -940,6 +1011,7 @@ pub(super) fn library_capabilities(
     } else {
         authored_settable_attributes(model)
     };
+    let classes = AuthoredClasses::new(model);
     let workaround = workaround_expression();
     let mut observations = Vec::new();
     for (path, source) in &input.files {
@@ -957,6 +1029,7 @@ pub(super) fn library_capabilities(
         let failures = failures
             .filter(|failure| library_target(failure.as_str(), imported.as_ref()))
             .filter(|failure| !authored_attribute_assignment(failure.as_str(), &authored))
+            .filter(|failure| typescript || !classes.target(failure.as_str()))
             .collect::<Vec<_>>();
         if let Some(first) = failures.first() {
             observations.push(observation(
@@ -965,7 +1038,7 @@ pub(super) fn library_capabilities(
                 [("failures", failures.len() as u64)],
                 json!({
                     "collector": "authored_library_extension_workaround_v1",
-                    "scope": "prototype or imported/foreign attribute mutation and setattr on a non-receiver; optional capability tests may replace this evidence",
+                    "scope": "prototype or imported/foreign attribute mutation and setattr on a non-receiver; Python mutations of an authored class object or its methods are excluded; optional capability tests may replace this evidence",
                 }),
             ));
         }
@@ -1212,6 +1285,9 @@ mod tests {
             "let realpath: typeof vendor.realpathSync.native = native;\n",
             "let check: vendor.core.Check = check;\n",
             "document.documentElement.dataset.state = 'ready';\n",
+            "process.env.NODE_ENV = 'production';\n",
+            "process.stdout.write = write;\n",
+            "process.stdout.columns = 80;\n",
             "import * as vendor from 'vendor';\n",
         );
         let observations = library_capabilities(
@@ -1224,7 +1300,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(observations.len(), 1);
-        assert_eq!(observations[0].measurements["failures"], 3);
+        assert_eq!(observations[0].measurements["failures"], 5);
         assert_eq!(observations[0].location.line, 3);
     }
 
@@ -1665,6 +1741,46 @@ impl Wake for LocalWaker { fn wake(self) {} }
             "a.prototype.elapsed = ",
             &BTreeSet::from(["elapsed".to_string()])
         ));
+    }
+
+    #[test]
+    fn python_mutations_of_authored_classes_are_not_workarounds() {
+        let source = concat!(
+            "class codes(IntEnum):\n",
+            "    OK = 200\n",
+            "class Foo:\n",
+            "    def __rich_repr__(self):\n",
+            "        yield 1\n",
+            "    def render(self):\n",
+            "        pass\n",
+            "    class Thing:\n",
+            "        pass\n",
+            "for code in codes:\n",
+            "    setattr(codes, code.name, int(code))\n",
+            "Foo.Thing.__doc__ = 'text'\n",
+            "Foo.__rich_repr__.angular = True\n",
+            "def decorate(cls):\n",
+            "    cls.__rich_repr__.angular = True\n",
+            "    self.session.headers = {}\n",
+            "    Foo.client.timeout = 3\n",
+            "    requests.Session.send = send\n",
+            "    setattr(requests, 'get', get)\n",
+            "    Foo.render.cache = {}\n",
+            "    cls.__init__.__signature__ = signature\n",
+            "    cls.__module__.flag = True\n",
+            "    cls.____.flag = True\n",
+            "    cls.__cache.flag = True\n",
+        );
+        let input = Input::fixture(
+            "python-v1",
+            BTreeMap::from([("src/repr.py".to_string(), source.to_string())]),
+        );
+        let rule = rule("python.library_capabilities");
+        let model = super::super::model::source_model(&rule, &input).unwrap();
+        let observations = library_capabilities(&rule, &model, &input).unwrap();
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].measurements["failures"], 6);
+        assert_eq!(observations[0].location.line, 16);
     }
 
     #[test]

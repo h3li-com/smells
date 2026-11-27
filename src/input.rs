@@ -10,7 +10,7 @@ use std::{
     process::Command,
 };
 
-mod suppression_edits;
+pub(crate) mod suppression_edits;
 
 use suppression_edits::suppression_only_edits;
 

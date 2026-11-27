@@ -123,10 +123,19 @@ const SWEEP_WORDS: &[&str] = &[
 ];
 /// Leading words of version-bump and formatting commits.
 const SWEEP_LEADS: &[&str] = &["bump", "format", "reformat"];
+/// Phrases that name a type-annotation sweep or a supported-Python-version
+/// change, the Python counterpart of an MSRV sweep.
+const SWEEP_PHRASES: &[&str] = &[
+    "type hint",
+    "type annotation",
+    "support for python",
+    "python version",
+];
 
 /// Whether a commit subject names a mechanical sweep: a no-production-change
-/// conventional type, a version bump or format lead, or a formatter, linter,
-/// type-checker, typing, whitespace, spelling or MSRV keyword.
+/// conventional type, a version bump or format lead, a formatter, linter,
+/// type-checker, typing, whitespace, spelling or MSRV keyword, or a
+/// type-annotation or supported-Python-version phrase.
 fn mechanical_subject(subject: &str) -> bool {
     let subject = subject
         .trim_start_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_')
@@ -138,6 +147,7 @@ fn mechanical_subject(subject: &str) -> bool {
     words.first().is_some_and(|lead| SWEEP_LEADS.contains(lead))
         || conventional_type(&subject).is_some_and(|kind| SWEEP_TYPES.contains(&kind))
         || words.iter().any(|word| SWEEP_WORDS.contains(word))
+        || SWEEP_PHRASES.iter().any(|phrase| subject.contains(phrase))
 }
 
 /// The type of a conventional-commit subject such as `chore(deps)!: ...`.
@@ -584,6 +594,10 @@ mod tests {
             "modern typing",
             "ws",
             "- build: package wheel",
+            "add missing type hints to __init__(...) (#2938)",
+            "Fix type annotation for `before_request`",
+            "drop support for Python 3.8",
+            "drop end of life python versions",
         ] {
             assert!(mechanical_subject(subject), "{subject} is a sweep");
         }
@@ -593,6 +607,7 @@ mod tests {
             "axum: deserialize error path on failure (#3924)",
             "Support custom date format",
             "taskdump: restore deferred leaf wakes during capture (#8445)",
+            "Accept `AsyncIterable` for responses",
             "",
         ] {
             assert!(!mechanical_subject(subject), "{subject} is a change");

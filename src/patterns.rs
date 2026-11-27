@@ -584,7 +584,22 @@ fn clumps(facts: &Facts, policy: &Policy, report: &mut Report) {
         }
     };
     for (group, support) in groups {
-        let populations: Vec<_> = support.into_iter().map(|i| &facts.slots[i]).collect();
+        let mut populations: Vec<_> = support.into_iter().map(|i| &facts.slots[i]).collect();
+        // A function that builds a struct declaring the group, such as its
+        // constructor, passes the struct's fields along rather than repeating them.
+        let declared: BTreeSet<&str> = populations
+            .iter()
+            .filter_map(|slots| slots.declares.as_deref())
+            .collect();
+        populations.retain(|slots| {
+            !slots
+                .returns
+                .as_deref()
+                .is_some_and(|built| declared.contains(built))
+        });
+        if (populations.len() as u64) < minimum {
+            continue;
+        }
         let first = populations[0];
         report.finding_with_relations(policy,id,&first.symbol,&first.location,"repeated named syntax group",json!({"slots":group.len(),"declarations":populations.len()}),"both >=",
             json!({"minimum_group_size":size,"minimum_declarations":minimum}),true,

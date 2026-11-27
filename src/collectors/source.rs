@@ -1,5 +1,5 @@
 use super::{
-    common::{location_at, observation, primitive_type, simple_names},
+    common::{dunder, location_at, observation, primitive_type, simple_names},
     model::SourceModel,
 };
 use crate::{core::model::Input, evidence::Observation, policy::Rule, report::Location};
@@ -64,7 +64,13 @@ fn navigation_adapters(language: &str) -> &'static [&'static str] {
             "as_bytes",
             "to_string",
             "to_owned",
+            "into_owned",
             "to_vec",
+            "to_str",
+            "to_string_lossy",
+            "as_path",
+            "as_os_str",
+            "to_path_buf",
             "into",
             "len",
             "is_empty",
@@ -232,11 +238,12 @@ fn pattern_alias() -> &'static Regex {
     })
 }
 
-/// A Rust `match` whose scrutinee starts at a name, such as `match &self.legacy {`.
+/// A Rust `match` whose scrutinee starts at a name, possibly borrowed or
+/// dereferenced, such as `match &self.legacy {` or `match *self {`.
 fn match_scrutinee() -> &'static Regex {
     static SCRUTINEE: OnceLock<Regex> = OnceLock::new();
     SCRUTINEE.get_or_init(|| {
-        Regex::new(r"\bmatch\s+(?:&\s*(?:mut\s+)?)?([A-Za-z_][A-Za-z0-9_]*)\b[^{;]*\{")
+        Regex::new(r"\bmatch\s+(?:&\s*(?:mut\s+)?|\*\s*)?([A-Za-z_][A-Za-z0-9_]*)\b[^{;]*\{")
             .expect("valid built-in match-scrutinee expression")
     })
 }
@@ -291,8 +298,57 @@ fn match_arm_patterns(body: &str, start: usize) -> Vec<&str> {
     patterns
 }
 
+/// A local closure whose first parameter is a name, such as
+/// `const removeFromMap = (map: Map<string, any[]>) => {` or `function visit(node) {`.
+fn local_closure() -> &'static Regex {
+    static CLOSURE: OnceLock<Regex> = OnceLock::new();
+    CLOSURE.get_or_init(|| {
+        Regex::new(
+            r"\b(?:(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*(?:async\s+)?(?:function\b\s*)?|function\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*(?:<[^>(]*>)?\s*)\(\s*([A-Za-z_$][A-Za-z0-9_$]*)\b",
+        )
+        .expect("valid built-in local-closure expression")
+    })
+}
+
+/// A call whose first argument starts at a name, such as `removeFromMap(this.listeners)`.
+fn named_call() -> &'static Regex {
+    static CALL: OnceLock<Regex> = OnceLock::new();
+    CALL.get_or_init(|| {
+        Regex::new(r"([A-Za-z_$][A-Za-z0-9_$]*)\s*\(\s*([A-Za-z_$][A-Za-z0-9_$]*)\b")
+            .expect("valid built-in named-call expression")
+    })
+}
+
+/// The first parameter of a local closure, bound to the root its calls pass in, when
+/// every call in the body passes an argument from the same root, as in
+/// `removeFromMap(this.a); removeFromMap(this.b)`. A closure that is never called, or
+/// called with arguments from different roots, binds nothing.
+fn closure_parameter_bindings(body: &str) -> Vec<(usize, &str, Vec<&str>)> {
+    local_closure()
+        .captures_iter(body)
+        .filter_map(|capture| {
+            let whole = capture.get(0).expect("closure match");
+            let name = capture.get(1).or_else(|| capture.get(2))?.as_str();
+            let parameter = capture.get(3).expect("closure parameter group").as_str();
+            let mut roots = named_call()
+                .captures_iter(body)
+                .filter(|call| call.get(1).is_some_and(|callee| callee.as_str() == name))
+                .filter(|call| {
+                    let start = call.get(0).expect("call match").start();
+                    !(whole.start()..whole.end()).contains(&start)
+                        && !body[..start].trim_end().ends_with('.')
+                })
+                .map(|call| call.get(2).expect("call argument group").as_str());
+            let root = roots.next()?;
+            roots
+                .all(|other| other == root)
+                .then(|| (whole.start(), root, vec![parameter]))
+        })
+        .collect()
+}
+
 /// Bindings in body order with the root they come from: plain aliases, destructuring
-/// patterns and the arms of a `match` on a name.
+/// patterns, the arms of a `match` on a name and local closure parameters.
 fn alias_bindings(body: &str) -> Vec<(usize, &str, Vec<&str>)> {
     let mut bindings: Vec<(usize, &str, Vec<&str>)> = Vec::new();
     for capture in owned_alias().captures_iter(body) {
@@ -317,6 +373,7 @@ fn alias_bindings(body: &str) -> Vec<(usize, &str, Vec<&str>)> {
             .collect();
         bindings.push((whole.start(), capture.get(1).expect("root").as_str(), names));
     }
+    bindings.extend(closure_parameter_bindings(body));
     bindings.sort_by_key(|(start, _, _)| *start);
     bindings
 }
@@ -510,10 +567,16 @@ fn rust_dependency_contract(
 }
 
 /// Whether a `_`-prefixed member name is public by convention: a dunder protocol or
-/// builtin such as `__html__`, `__version__` or `__proto__`, or, in TypeScript, an
-/// all-caps `__NAME` binding constant such as a Cloudflare `__STATIC_CONTENT`.
+/// builtin such as `__html__`, `__version__` or `__proto__`; in Python, a sunder enum
+/// protocol name such as `_value_` or `_missing_`; or, in TypeScript, an all-caps
+/// `__NAME` binding constant such as a Cloudflare `__STATIC_CONTENT`.
 fn public_underscore_member(language: &str, member: &str) -> bool {
-    let dunder = member.len() > 4 && member.starts_with("__") && member.ends_with("__");
+    let sunder = language == "python"
+        && member.len() > 2
+        && member.starts_with('_')
+        && member.ends_with('_')
+        && !member.starts_with("__")
+        && !member.ends_with("__");
     let constant = language == "typescript"
         && member.strip_prefix("__").is_some_and(|name| {
             name.starts_with(|character: char| character.is_ascii_uppercase())
@@ -521,7 +584,7 @@ fn public_underscore_member(language: &str, member: &str) -> bool {
                     character.is_ascii_uppercase() || character.is_ascii_digit() || character == '_'
                 })
         });
-    dunder || constant
+    dunder(member) || sunder || constant
 }
 
 /// Whether the innermost class around `offset`, the one that starts last, in `path` declares `member` as a
@@ -598,7 +661,7 @@ pub(super) fn dependency_contract(
             evidence: json!({
                 "collector": "source_private_member_access_v2",
                 "contract": "language_private_naming_or_syntax",
-                "public_by_convention": "dunder names; TypeScript all-caps __NAME constants",
+                "public_by_convention": "dunder names; Python sunder names; TypeScript all-caps __NAME constants",
             }),
         });
     }
@@ -674,6 +737,13 @@ mod tests {
         assert!(public_underscore_member("python", "__html__"));
         assert!(public_underscore_member("python", "__a__"));
         assert!(!public_underscore_member("python", "____"));
+        assert!(public_underscore_member("python", "_value_"));
+        assert!(public_underscore_member("python", "_a_"));
+        assert!(!public_underscore_member("python", "_value"));
+        assert!(!public_underscore_member("python", "___"));
+        assert!(!public_underscore_member("python", "_a__"));
+        assert!(!public_underscore_member("python", "__a_"));
+        assert!(!public_underscore_member("typescript", "_value_"));
         assert!(public_underscore_member("typescript", "__STATIC_CONTENT"));
         assert!(!public_underscore_member("typescript", "__1A"));
         assert!(!public_underscore_member("typescript", "__Ab"));
@@ -731,6 +801,7 @@ mod tests {
     fn navigation_adapters_are_transparent_only_in_their_own_language() {
         for (language, expression) in [
             ("rust", "a.b.iter().c"),
+            ("rust", "a.b.into_owned().c"),
             ("python", "a.b.items().c"),
             ("typescript", "a.b.toString().c"),
         ] {
@@ -1046,6 +1117,26 @@ mod tests {
     }
 
     #[test]
+    fn foreign_accesses_treat_bindings_from_a_dereferenced_self_match_as_owned() {
+        let source = concat!(
+            "pub enum E { A(Inner), B(Inner) }\n",
+            "impl E {\n",
+            "    fn field(&self, other: &O) {\n",
+            "        match *self {\n",
+            "            E::A(ref s) => { s.a(); s.b(); }\n",
+            "            E::B(ref s) => { s.c(); other.d(); }\n",
+            "        }\n",
+            "        other.e();\n",
+            "    }\n",
+            "}\n",
+        );
+        assert_eq!(
+            foreign_measurements("rust.foreign_accesses", "rust-v1", "src/lib.rs", source),
+            [("src/lib.rs::E.field".into(), 2, 5)]
+        );
+    }
+
+    #[test]
     fn foreign_accesses_ignore_python_statement_annotations() {
         let source = concat!(
             "class Config:\n",
@@ -1084,6 +1175,38 @@ mod tests {
                 source
             ),
             [("sample.ts::ZodReadonly._parse".into(), 2, 4)]
+        );
+    }
+
+    #[test]
+    fn foreign_accesses_treat_closure_parameters_given_only_owned_state_as_owned() {
+        let source = concat!(
+            "class HMRContext {\n",
+            "  off(event: string, other: Other) {\n",
+            "    const removeFromMap = (map: Map<string, any[]>) => {\n",
+            "      const existing = map.get(event)\n",
+            "      map.set(event, existing.filter(Boolean))\n",
+            "    }\n",
+            "    removeFromMap(this.client.listeners)\n",
+            "    removeFromMap(this.newListeners)\n",
+            "    other.removeFromMap(other.listeners)\n",
+            "    const mixed = (m: Map<string, any[]>) => m.clear()\n",
+            "    mixed(this.newListeners)\n",
+            "    mixed(other.listeners)\n",
+            "    function visit(node: Node) { node.a(); node.b() }\n",
+            "    visit(other.root)\n",
+            "    const unused = (x: X) => x.run()\n",
+            "  }\n",
+            "}\n",
+        );
+        assert_eq!(
+            foreign_measurements(
+                "typescript.foreign_accesses",
+                "typescript-v1",
+                "sample.ts",
+                source
+            ),
+            [("sample.ts::HMRContext.off".into(), 8, 14)]
         );
     }
 

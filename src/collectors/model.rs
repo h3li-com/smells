@@ -669,7 +669,11 @@ impl RustModelVisitor<'_> {
         !self.allows_unused && rust_private(visibility, name, attributes)
     }
 
-    fn record_nested_functions(&mut self, parent: &str, block: &syn::Block) {
+    /// Records the functions nested in `block`. A `dead_code` allowance on the
+    /// enclosing item (`allows`) covers the items in its body, as it does for rustc.
+    fn record_nested_functions(&mut self, parent: &str, block: &syn::Block, allows: bool) {
+        let enclosing = self.allows_unused;
+        self.allows_unused |= allows;
         let mut nested = NestedRustFunctions::default();
         nested.visit_block(block);
         for function in nested.items {
@@ -690,8 +694,13 @@ impl RustModelVisitor<'_> {
             fact.symbol.clone_from(&symbol);
             fact.scope = CodeScope::of(self.test);
             self.model.functions.push(fact);
-            self.record_nested_functions(&symbol, &function.block);
+            self.record_nested_functions(
+                &symbol,
+                &function.block,
+                rust_allows_unused(&function.attrs),
+            );
         }
+        self.allows_unused = enclosing;
     }
 }
 
@@ -742,7 +751,11 @@ impl<'ast> Visit<'ast> for RustModelVisitor<'_> {
         }
         let symbol = fact.symbol.clone();
         self.model.functions.push(fact);
-        self.record_nested_functions(&symbol, &function.block);
+        self.record_nested_functions(
+            &symbol,
+            &function.block,
+            rust_allows_unused(&function.attrs),
+        );
     }
 
     fn visit_item_struct(&mut self, structure: &'ast syn::ItemStruct) {
@@ -822,7 +835,9 @@ impl<'ast> Visit<'ast> for RustModelVisitor<'_> {
         class.source = code_only(&self.path, &trait_item.to_token_stream().to_string())
             .expect("Rust trait token masking cannot fail")
             .into();
-        class.type_parameters = rust_type_parameters(&trait_item.generics);
+        // A trait's own type parameters are chosen by its impl headers and bounds,
+        // as in a marker `trait Sealed<B> {}`, so its body is no measure of their use.
+        class.type_parameters = Vec::new();
         class.methods.extend(functions.iter().cloned());
         self.model.functions.extend(functions);
         for method in &trait_item.items {
@@ -831,7 +846,7 @@ impl<'ast> Visit<'ast> for RustModelVisitor<'_> {
             {
                 let parent =
                     rust_function(&self.path, Some(&owner), &method.sig, Some(block), false).symbol;
-                self.record_nested_functions(&parent, block);
+                self.record_nested_functions(&parent, block, rust_allows_unused(&method.attrs));
             }
         }
     }
@@ -884,7 +899,11 @@ impl<'ast> Visit<'ast> for RustModelVisitor<'_> {
         for method in &implementation.items {
             if let ImplItem::Fn(method) = method {
                 let parent = format!("{}::{}.{}", self.path, owner, method.sig.ident);
-                self.record_nested_functions(&parent, &method.block);
+                self.record_nested_functions(
+                    &parent,
+                    &method.block,
+                    rust_allows_unused(&implementation.attrs) || rust_allows_unused(&method.attrs),
+                );
             }
         }
     }
@@ -1507,6 +1526,15 @@ mod tests {
             .find(|class| class.name == "Account")
             .unwrap();
         assert_eq!(account.type_parameters, ["T"]);
+        assert!(
+            model
+                .classes
+                .iter()
+                .find(|class| class.name == "Port")
+                .unwrap()
+                .type_parameters
+                .is_empty()
+        );
         assert_eq!(account.bases, ["Port"]);
         assert_eq!(account.methods.len(), 2);
         assert_eq!(
@@ -1723,6 +1751,10 @@ mod tests {
             "#[cfg(test)] mod tests { fn helper() {} struct Fixture; impl Fixture { fn build() {} } }\n",
             "#[cfg(test)] fn gated() {}\n",
             "#[allow(dead_code)] impl Holder { fn method() {} }\n",
+            "#[allow(dead_code)] fn outer() { fn inner() { fn deepest() {} } }\n",
+            "fn open() { fn exposed() {} }\n",
+            "#[allow(dead_code)] impl Gated { fn method() { fn nested() {} } }\n",
+            "impl Open { #[allow(dead_code)] fn method() { fn nested() {} } }\n",
         );
         let model = source_model(
             &rule("rust.unused_code"),
@@ -1754,6 +1786,20 @@ mod tests {
         assert_eq!(flags("src/lib.rs::tests::Fixture.build"), (true, true));
         assert_eq!(flags("src/lib.rs::gated"), (true, true));
         assert_eq!(flags("src/lib.rs::Holder.method"), (false, false));
+        assert_eq!(flags("src/lib.rs::outer::inner@10:36"), (false, false));
+        assert_eq!(
+            flags("src/lib.rs::outer::inner@10:36::deepest@10:49"),
+            (false, false)
+        );
+        assert_eq!(flags("src/lib.rs::open::exposed@11:15"), (true, false));
+        assert_eq!(
+            flags("src/lib.rs::Gated.method::nested@12:50"),
+            (false, false)
+        );
+        assert_eq!(
+            flags("src/lib.rs::Open.method::nested@13:49"),
+            (false, false)
+        );
         assert_eq!(flags("tests/cli.rs::shared"), (true, true));
         let class = |name: &str| {
             model

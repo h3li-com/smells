@@ -65,6 +65,11 @@ pub(crate) struct Slots {
     pub location: Location,
     pub types: Vec<Type>,
     pub named: Vec<(String, String)>,
+    /// The struct whose fields these are.
+    pub declares: Option<String>,
+    /// The type a function's slots build, from its return type: `Self` names the
+    /// owner, and `Option` or `Result` names the type they wrap.
+    pub returns: Option<String>,
 }
 
 pub(crate) struct Facts {

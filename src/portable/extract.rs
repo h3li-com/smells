@@ -305,9 +305,15 @@ struct ActiveClass {
     symbol: String,
     location: Location,
     fields: BTreeSet<String>,
+    /// Names of the method signatures seen so far; later overloads and the
+    /// implementation of an overloaded method belong to the first one.
+    signatures: BTreeSet<String>,
     methods: usize,
     method_lines: usize,
     operations: usize,
+    enumeration: bool,
+    /// Python properties with a `@name.setter`, whose assignments run the setter.
+    setters: BTreeSet<String>,
 }
 
 struct AccessorState {
@@ -332,6 +338,7 @@ struct ActiveFunction {
     metric_needs: RuleNeeds,
     owner: Option<String>,
     direct_class: Option<usize>,
+    overload_implementation: bool,
     accessor: Option<AccessorState>,
 }
 
@@ -383,6 +390,27 @@ fn direct_class_index(node: Node<'_>, language: &str, classes: &[ActiveClass]) -
     (owner.id() == classes[class_index].node_id).then_some(class_index)
 }
 
+/// The innermost class whose direct field holds this function, as in
+/// `static create = () => ...`: a property holding a function is a method.
+fn property_function_class_index(
+    node: Node<'_>,
+    language: &str,
+    classes: &[ActiveClass],
+) -> Option<usize> {
+    let class_index = classes.len().checked_sub(1)?;
+    let field = node.parent()?;
+    let property = language == "typescript"
+        && field.kind() == "public_field_definition"
+        && field
+            .child_by_field_name("value")
+            .is_some_and(|value| value.id() == node.id());
+    let owner = field
+        .parent()
+        .filter(|body| body.kind() == "class_body")?
+        .parent()?;
+    (property && owner.id() == classes[class_index].node_id).then_some(class_index)
+}
+
 fn sole_statement(body: Node<'_>) -> Option<Node<'_>> {
     (body.named_child_count() == 1)
         .then(|| body.named_child(0))
@@ -410,7 +438,8 @@ fn active_function(
     order: usize,
 ) -> ActiveFunction {
     let owner = direct_class_owner(node, language).map(|owner| node_name(owner, source));
-    let direct_class = direct_class_index(node, language, classes);
+    let direct_class = direct_class_index(node, language, classes)
+        .or_else(|| property_function_class_index(node, language, classes));
     let record_fact = needs.functions;
     let metric_needs = active_function_needs(needs, direct_class.is_some());
     let declared_parameters = if metric_needs.parameters {
@@ -421,6 +450,8 @@ fn active_function(
     let body = node.child_by_field_name("body");
     let body_range = body.map(|body| (body.start_byte(), body.end_byte()));
     let symbol = node_name(node, source);
+    let overload_implementation =
+        direct_class.is_some_and(|index| classes[index].signatures.contains(&symbol));
     let accessor = direct_class.map(|_| {
         let statement = body.and_then(sole_statement);
         let ordinary = declared_parameters
@@ -454,6 +485,7 @@ fn active_function(
         metric_needs,
         owner,
         direct_class,
+        overload_implementation,
         accessor,
     }
 }
@@ -581,7 +613,9 @@ fn update_python_field(
     } else {
         None
     };
-    if let Some(name) = name.filter(|name| !name.is_empty()) {
+    // A dunder class attribute such as `__slots__` declares protocol, not state.
+    let dunder = |name: &str| name.len() > 4 && name.starts_with("__") && name.ends_with("__");
+    if let Some(name) = name.filter(|name| !name.is_empty() && !dunder(name)) {
         classes[target.class_index].fields.insert(name);
     }
 }
@@ -607,7 +641,13 @@ fn update_typescript_field(
         && let Some(name) = node.child_by_field_name("name")
         && let Ok(name) = name.utf8_text(source.as_bytes())
     {
-        classes[class_index].fields.insert(name.to_string());
+        // A property holding a function is a method, counted when the function ends.
+        if !node
+            .child_by_field_name("value")
+            .is_some_and(|value| matches!(value.kind(), "arrow_function" | "function_expression"))
+        {
+            classes[class_index].fields.insert(name.to_string());
+        }
     }
     if functions.last().is_some_and(|function| {
         is_direct_constructor(function.direct_class, &function.symbol, class_index)
@@ -620,8 +660,19 @@ fn update_typescript_field(
     }
 }
 
-fn update_metrics(node: Node<'_>, functions: &mut [ActiveFunction]) {
+/// Whether a comment is ordinary commentary: not a tool directive and not a
+/// Python `#:` attribute doc comment, which is documentation.
+fn ordinary_comment(node: Node<'_>, source: &str, language: &str) -> bool {
+    let text = node.utf8_text(source.as_bytes()).unwrap_or_default();
+    let documentation = language == "python" && text.starts_with("#:");
+    !documentation && !crate::input::suppression_edits::directive_comment(text)
+}
+
+fn update_metrics(node: Node<'_>, source: &str, language: &str, functions: &mut [ActiveFunction]) {
     if node.kind().contains("comment") {
+        if !ordinary_comment(node, source, language) {
+            return;
+        }
         for function in functions {
             record_comment(node, function.metric_needs, &mut function.metrics);
         }
@@ -662,11 +713,60 @@ fn start_class(
         symbol: node_name(node, source),
         location: location(path, node),
         fields: BTreeSet::new(),
+        signatures: BTreeSet::new(),
         methods: 0,
         method_lines: 0,
         operations: 0,
+        enumeration: language == "python" && enumeration_class(node, source),
+        setters: if language == "python" {
+            python_setter_properties(node, source)
+        } else {
+            BTreeSet::new()
+        },
     });
     state.next_class_order += 1;
+}
+
+/// Whether a Python class derives from a standard-library enumeration base, such as
+/// `Enum`, `enum.IntFlag` or `StrEnum`.
+fn enumeration_class(node: Node<'_>, source: &str) -> bool {
+    const BASES: &[&str] = &["Enum", "IntEnum", "StrEnum", "Flag", "IntFlag", "ReprEnum"];
+    let Some(bases) = node.child_by_field_name("superclasses") else {
+        return false;
+    };
+    let mut cursor = bases.walk();
+    bases.named_children(&mut cursor).any(|base| {
+        matches!(base.kind(), "identifier" | "attribute")
+            && source[base.byte_range()]
+                .rsplit('.')
+                .next()
+                .is_some_and(|name| BASES.contains(&name.trim()))
+    })
+}
+
+/// The properties a Python class body gives a `@name.setter`.
+fn python_setter_properties(node: Node<'_>, source: &str) -> BTreeSet<String> {
+    let Some(body) = node.child_by_field_name("body") else {
+        return BTreeSet::new();
+    };
+    let mut cursor = body.walk();
+    body.named_children(&mut cursor)
+        .filter(|child| child.kind() == "decorated_definition")
+        .flat_map(|definition| {
+            let mut cursor = definition.walk();
+            definition
+                .named_children(&mut cursor)
+                .filter(|decorator| decorator.kind() == "decorator")
+                .filter_map(|decorator| {
+                    let text = source[decorator.byte_range()]
+                        .trim_start_matches('@')
+                        .trim();
+                    let (property, accessor) = text.rsplit_once('.')?;
+                    (accessor.trim() == "setter").then(|| property.trim().to_string())
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
 }
 
 fn start_function(
@@ -711,9 +811,14 @@ fn record_typescript_signature(
     let Some(class_index) = direct_class_index(node, language, classes) else {
         return;
     };
+    let name = node_name(node, source);
     let class = &mut classes[class_index];
+    if class.signatures.contains(&name) {
+        return;
+    }
     class.methods += 1;
-    class.operations += usize::from(node_name(node, source) != "constructor");
+    class.operations += usize::from(name != "constructor");
+    class.signatures.insert(name);
 }
 
 fn update_accessors(
@@ -786,7 +891,7 @@ fn enter_node(
     update_accessors(node, source, language, &mut state.functions);
     start_python_assignment(node, language, needs, state);
     update_class_field(node, source, language, needs, state);
-    update_metrics(node, &mut state.functions);
+    update_metrics(node, source, language, &mut state.functions);
 }
 
 fn exit_node(node: Node<'_>, state: &mut ExtractionState) {
@@ -806,14 +911,16 @@ fn exit_node(node: Node<'_>, state: &mut ExtractionState) {
         let lines = function.metrics.body_code_rows.len();
         if let Some(class_index) = function.direct_class {
             let class = &mut state.classes[class_index];
-            class.methods += 1;
             class.method_lines += lines;
-            let accessor = function
-                .accessor
-                .as_ref()
-                .is_some_and(|accessor| accessor.constructor || accessor.matched);
-            if !accessor {
-                class.operations += 1;
+            if !function.overload_implementation {
+                class.methods += 1;
+                let accessor = function
+                    .accessor
+                    .as_ref()
+                    .is_some_and(|accessor| accessor.constructor || accessor.matched);
+                if !accessor {
+                    class.operations += 1;
+                }
             }
         }
         if function.record_fact
@@ -851,10 +958,15 @@ fn exit_node(node: Node<'_>, state: &mut ExtractionState) {
             ClassFact {
                 symbol: class.symbol,
                 location: class.location,
-                fields: class.fields.len(),
+                fields: class
+                    .fields
+                    .iter()
+                    .filter(|field| !class.setters.contains(*field))
+                    .count(),
                 methods: class.methods,
                 method_lines: class.method_lines,
                 operations: class.operations,
+                enumeration: class.enumeration,
             },
         ));
     }
@@ -1380,5 +1492,117 @@ mod tests {
         assert_eq!(facts.classes[1].methods, 1);
         assert_eq!(facts.classes[1].operations, 1);
         assert_eq!(stats.functions, 1);
+    }
+
+    #[test]
+    fn directives_and_attribute_doc_comments_are_not_ordinary_comments() {
+        let typescript = concat!(
+            "function run() {\n",
+            "  // @ts-expect-error wrong overload\n",
+            "  call(1);\n",
+            "  // explains the call\n",
+            "  call(2);\n",
+            "}\n",
+        );
+        let (typescript_facts, _) = facts("typescript-v1", "run.ts", typescript);
+        assert_eq!(typescript_facts.functions[0].comments, 1);
+
+        let python = concat!(
+            "def run(self):\n",
+            "    #: the default name\n",
+            "    self.name = 1\n",
+            "    # type: ignore\n",
+            "    # explains the call\n",
+            "    call()\n",
+        );
+        let (python_facts, _) = facts("python-v1", "run.py", python);
+        assert_eq!(python_facts.functions[0].comments, 1);
+    }
+
+    #[test]
+    fn typescript_function_properties_are_methods_not_fields() {
+        let source = concat!(
+            "class Factory {\n",
+            "  name = 'app';\n",
+            "  options: object = {};\n",
+            "  createApp = (base: string) => base;\n",
+            "  createHandler = function (value: number) { return value; };\n",
+            "}\n",
+        );
+        let (facts, _) = facts("typescript-v1", "factory.ts", source);
+
+        assert_eq!(facts.classes[0].fields, 2);
+        assert_eq!(facts.classes[0].operations, 2);
+        assert_eq!(facts.classes[0].methods, 2);
+        assert_eq!(facts.classes[0].method_lines, 2);
+    }
+
+    #[test]
+    fn python_setter_properties_and_dunders_are_not_fields() {
+        let source = concat!(
+            "class Scaffold:\n",
+            "    __slots__ = ('_folder', 'name')\n",
+            "    __match_args__ = ('name',)\n",
+            "    __secret = 1\n",
+            "    ____ = 1\n",
+            "    def __init__(self, folder, name):\n",
+            "        self.folder = folder\n",
+            "        self.name = name\n",
+            "    @property\n",
+            "    def folder(self):\n",
+            "        return self._folder\n",
+            "    @folder.setter\n",
+            "    def folder(self, value):\n",
+            "        self._folder = value\n",
+        );
+        let (facts, _) = facts("python-v1", "scaffold.py", source);
+
+        assert_eq!(facts.classes[0].fields, 4);
+    }
+
+    #[test]
+    fn python_enum_subclasses_are_enumerations() {
+        let source = concat!(
+            "class Color(enum.Enum):\n    RED = 1\n",
+            "class Mode(str, StrEnum):\n    FAST = 'fast'\n",
+            "class Point(NamedTuple):\n    x: int\n",
+            "class Enumerated(EnumBase):\n    y = 2\n",
+        );
+        let (facts, _) = facts("python-v1", "kinds.py", source);
+        let enumerations = facts
+            .classes
+            .iter()
+            .map(|class| class.enumeration)
+            .collect::<Vec<_>>();
+
+        assert_eq!(enumerations, [true, true, false, false]);
+    }
+
+    #[test]
+    fn typescript_overloads_count_as_one_method() {
+        let source = concat!(
+            "declare class Socket {\n",
+            "  constructor(url: string);\n",
+            "  constructor(url: URL);\n",
+            "  on(event: 'open', listener: () => void): this;\n",
+            "  on(event: 'close', listener: () => void): this;\n",
+            "  send(data: string): void;\n",
+            "}\n",
+            "class Parser {\n",
+            "  parse(text: string): number;\n",
+            "  parse(text: Buffer): number;\n",
+            "  parse(text: string | Buffer): number {\n",
+            "    return text.length;\n",
+            "  }\n",
+            "  reset(): void {}\n",
+            "}\n",
+        );
+        let (facts, _) = facts("typescript-v1", "overloads.ts", source);
+
+        assert_eq!(facts.classes[0].methods, 3);
+        assert_eq!(facts.classes[0].operations, 2);
+        assert_eq!(facts.classes[1].methods, 2);
+        assert_eq!(facts.classes[1].operations, 2);
+        assert_eq!(facts.classes[1].method_lines, 1);
     }
 }

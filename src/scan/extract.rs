@@ -44,8 +44,16 @@ fn body_counts(source: &str, body: &Block) -> Result<(usize, usize), String> {
     Ok((code.len(), comments.len()))
 }
 
-fn field_slots(symbol: &str, path: &str, span: Span, fields: &Fields) -> Slots {
+fn field_slots(
+    symbol: &str,
+    path: &str,
+    span: Span,
+    fields: &Fields,
+    declares: Option<String>,
+) -> Slots {
     Slots {
+        declares,
+        returns: None,
         symbol: symbol.into(),
         location: location(path, span),
         types: fields.iter().map(|f| f.ty.clone()).collect(),
@@ -108,6 +116,7 @@ fn struct_declaration(
         &module.path,
         item.ident.span(),
         &item.fields,
+        Some(item.ident.to_string()),
     ));
     let fields = item
         .fields
@@ -170,6 +179,7 @@ fn enum_declaration(
             &module.path,
             variant.ident.span(),
             &variant.fields,
+            None,
         ));
     }
     facts.types.insert(
@@ -301,6 +311,33 @@ fn function_counts(
     }
 }
 
+/// The type a function builds, by name: its return type's last path segment, with
+/// `Self` resolved to the owner's name and `Option<T>` or `Result<T, E>` to `T`.
+fn built_type(signature: &Signature, owner: Option<&str>) -> Option<String> {
+    let syn::ReturnType::Type(_, ty) = &signature.output else {
+        return None;
+    };
+    let mut ty: &Type = ty;
+    loop {
+        let Type::Path(path) = ty else {
+            return None;
+        };
+        let segment = path.path.segments.last()?;
+        let name = segment.ident.to_string();
+        if matches!(name.as_str(), "Option" | "Result")
+            && let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments
+            && let Some(syn::GenericArgument::Type(inner)) = arguments.args.first()
+        {
+            ty = inner;
+            continue;
+        }
+        if name == "Self" {
+            return owner.map(|owner| owner.rsplit("::").next().unwrap_or(owner).to_string());
+        }
+        return Some(name);
+    }
+}
+
 #[expect(
     clippy::too_many_arguments,
     clippy::too_many_lines,
@@ -359,6 +396,8 @@ fn function(
         })
         .collect();
     facts.slots.push(Slots {
+        declares: None,
+        returns: built_type(signature, owner.as_deref()),
         symbol: symbol.to_string(),
         location: loc.clone(),
         types: parameters.iter().map(|p| (*p.ty).clone()).collect(),

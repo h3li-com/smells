@@ -2568,6 +2568,32 @@ fn named_groups_require_distinct_declarations_and_exact_syntax() {
 }
 
 #[test]
+fn named_groups_do_not_count_constructors_of_a_supporting_struct() {
+    let pair = "struct A{x:i32,y:i32,z:i32}struct B{x:i32,y:i32,z:i32}";
+    for (constructor, expected) in [
+        ("fn make(x:i32,y:i32,z:i32)->A{A{x,y,z}}", false),
+        ("impl A{fn new(x:i32,y:i32,z:i32)->Self{A{x,y,z}}}", false),
+        (
+            "impl A{fn try_new(x:i32,y:i32,z:i32)->Result<Self,()>{Ok(A{x,y,z})}}",
+            false,
+        ),
+        ("fn make(x:i32,y:i32,z:i32)->Option<A>{None}", false),
+        ("fn make(x:i32,y:i32,z:i32)->i32{x}", true),
+        (
+            "struct C{x:i32,y:i32,z:i32}fn make(x:i32,y:i32,z:i32)->A{A{x,y,z}}",
+            true,
+        ),
+    ] {
+        let workspace = Workspace::new(&format!("{pair}{constructor}"));
+        assert_eq!(
+            matched(&report(&workspace.check()), "rust.data_clumps"),
+            expected,
+            "{constructor}"
+        );
+    }
+}
+
+#[test]
 fn duplicate_similarity_compares_the_fraction_without_rounding() {
     let source =
         "fn a()->i32{let x=1;let y=x+2;let z=y*3;z} fn b(){let x=9;let y=x+8;let z=y*7;z;}";

@@ -42,7 +42,7 @@ fn class_patterns(facts: &Facts, policy: &Policy, language: &str, report: &mut R
     let data_class = format!("{language}.data_class");
     let lazy_class = format!("{language}.lazy_class");
     for class in &facts.classes {
-        if policy.enabled(&data_class) {
+        if policy.enabled(&data_class) && !class.enumeration {
             let minimum = policy.parameter(&data_class, "minimum_fields");
             let maximum = policy.parameter(&data_class, "maximum_operations");
             report.finding(

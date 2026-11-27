@@ -224,6 +224,35 @@ All notable changes to Smells are recorded here. Release tags use `vMAJOR.MINOR.
   - `python.library_capabilities` does not count assignments to an attribute an
     authored class declares as assignable (an annotated field or an
     `@name.setter` property).
+- Run a fourth calibration round on a fresh scan of eleven of the twelve
+  codebases (fastapi was skipped) and fix the false positives it found, without
+  changing any rule version, threshold or policy mode. 26 of 248 sampled
+  findings were false positives; all 26 are fixed:
+  - The history rules do not count a file whose only change is a move with
+    unchanged content, or whose only edit replaces string literals assigned to
+    `version`, `VERSION` or `__version__`. Commit subjects naming type hints,
+    type annotations, Python support or Python versions are sweeps.
+  - TypeScript class properties holding an arrow function or function
+    expression are methods, not fields. Overload signatures and their
+    implementation count as one method. `comment_share` excludes directive
+    comments such as `@ts-expect-error`, `noqa` and `type: ignore`, and Python
+    `#:` attribute doc comments.
+  - Python field sets exclude dunder class attributes and `@name.setter`
+    properties, `data_class` skips `Enum` subclasses, `dependency_contract`
+    treats sunder names such as `_value_` as public, and
+    `library_capabilities` does not count writes to authored classes or their
+    methods.
+  - `typescript.library_capabilities` treats `process.env` writes as ordinary
+    use.
+  - `typescript.foreign_accesses` treats a local closure's parameter as owned
+    when every call passes it owned state. `rust.foreign_accesses` treats
+    bindings from `match *self` arms as owned.
+  - `rust.data_clumps` does not count constructors of the struct that declares
+    the group as supporters. `rust.unused_type_parameters` does not count a
+    trait's own type parameters. `rust.unused_code` treats functions nested in
+    an item under `#[allow(dead_code)]` as allowed. `rust.navigation_chains`
+    treats `into_owned`, `to_str`, `to_string_lossy`, `as_path` and
+    `to_path_buf` as transparent conversions.
 - Resolve `mod` declarations in Cargo target roots other than `lib.rs` and
   `main.rs` (files directly in `tests/`, `examples/` and `benches/`,
   `src/bin/*.rs` and `build.rs`) next to the root file. Before, the scan exited

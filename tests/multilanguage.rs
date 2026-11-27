@@ -5955,3 +5955,34 @@ fn exported_underscore_typescript_declarations_are_public() {
         "{finding}"
     );
 }
+
+#[test]
+fn python_enumerations_are_not_data_classes() {
+    let mut policy = portable_policy("python");
+    require_only(&mut policy, &["python.data_class"]);
+    require(
+        &mut policy,
+        "python.data_class",
+        json!({"minimum_fields": 2, "maximum_operations": 2}),
+    );
+    let workspace = Workspace::new(
+        "src/kinds.py",
+        concat!(
+            "import enum\n",
+            "class Color(enum.Enum):\n    RED = 1\n    GREEN = 2\n    BLUE = 3\n",
+            "class Point:\n    x = 1\n    y = 2\n    z = 3\n",
+        ),
+        &policy,
+    );
+
+    let output = workspace.check_path();
+    assert_eq!(output.status.code(), Some(1));
+    let flagged = report(&output)["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|finding| finding["rule_id"] == "python.data_class")
+        .map(|finding| finding["symbol"].as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(flagged, ["Point"]);
+}

@@ -64,6 +64,8 @@ struct ClassFact {
     methods: usize,
     method_lines: usize,
     operations: usize,
+    /// A Python `Enum` subclass, whose members are enumeration values, not fields.
+    enumeration: bool,
 }
 
 #[derive(Default, Deserialize, Serialize)]
