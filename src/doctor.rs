@@ -76,6 +76,8 @@ pub(crate) struct DoctorReport {
     pub checks: Vec<Check>,
     pub diagnostics: Option<Diagnostics>,
     pub burndown: Option<Burndown>,
+    /// Commands to run next, in order; empty when an error must be fixed first.
+    pub next_steps: Vec<String>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -306,11 +308,71 @@ pub(crate) fn diagnose(
         }
     };
     append_governance_checks(root, &owned_policy_target, &mut checks);
+    let next_steps = match (&resolved, &diagnostics) {
+        (Ok(policy_source), Some(_)) => next_steps(root, policy_source, burndown.as_ref()),
+        _ => Vec::new(),
+    };
     DoctorReport {
         checks,
         diagnostics,
         burndown,
+        next_steps,
     }
+}
+
+/// The starter policy file for a rule pack, as published in `examples/`.
+fn starter_policy_file(rule_pack: &str) -> &'static str {
+    match rule_pack {
+        "python-v1" => "python-quality-policy.json",
+        "typescript-v1" => "typescript-quality-policy.json",
+        _ => "quality-policy.json",
+    }
+}
+
+/// A command that saves the starter policy for `rule_pack` as `target`.
+fn starter_policy_command(rule_pack: &str, target: &Path) -> String {
+    format!(
+        "curl -fsSLo {} https://raw.githubusercontent.com/mindful-time/smells/v{}/examples/{}",
+        target.display(),
+        env!("CARGO_PKG_VERSION"),
+        starter_policy_file(rule_pack)
+    )
+}
+
+/// How to add a policy when `smells check` finds none in `root`: the starter for the
+/// inferred language, or a pointer to `smells doctor` when the language is ambiguous.
+pub(crate) fn missing_policy_hint(root: &Path) -> String {
+    let target = root.join("quality-policy.json");
+    match infer_starter_policy(root) {
+        Ok(ResolvedPolicy::BuiltIn { rule_pack, .. }) => format!(
+            "save the {rule_pack} starter policy with `{}`, or run `smells doctor` to try smells without one",
+            starter_policy_command(rule_pack, &target)
+        ),
+        _ => "pass --policy FILE, or run `smells doctor` to see which starter policy fits".into(),
+    }
+}
+
+fn next_steps(
+    root: &Path,
+    policy_source: &ResolvedPolicy,
+    burndown: Option<&Burndown>,
+) -> Vec<String> {
+    let mut steps = Vec::new();
+    if let ResolvedPolicy::BuiltIn { rule_pack, .. } = policy_source {
+        steps.push(starter_policy_command(
+            rule_pack,
+            &root.join("quality-policy.json"),
+        ));
+    }
+    let mut check = String::from("smells check");
+    if root != Path::new(".") {
+        let _ = write!(check, " --path {}", root.display());
+    }
+    if let Some(burndown) = burndown {
+        let _ = write!(check, " --base {}", burndown.base_ref);
+    }
+    steps.push(check);
+    steps
 }
 
 fn append_governance_checks(root: &Path, owned_policy_target: &str, checks: &mut Vec<Check>) {
@@ -680,7 +742,8 @@ pub(crate) fn diagnostics_from_report(report: &Report, view: CrapView) -> Diagno
         blocking_findings,
         ignored_findings,
         review_signals,
-        matched_smells: report.summary.matched_smell_patterns,
+        // Count the rows the smell table shows, so a hidden CRAP estimate is not counted.
+        matched_smells: smells.len(),
         total_smells: report.summary.total_smell_patterns,
         estimated_crap_hidden,
         smells,
@@ -1025,6 +1088,7 @@ pub(crate) fn to_json(report: &DoctorReport) -> Value {
             .collect::<Vec<_>>(),
         "diagnostics": diagnostics,
         "burndown": burndown,
+        "next_steps": report.next_steps,
     })
 }
 
@@ -1122,7 +1186,18 @@ pub(crate) fn to_table(report: &DoctorReport, color: bool) -> String {
     if let Some(burndown) = &report.burndown {
         append_burndown_table(&mut output, burndown, palette);
     }
+    append_next_steps(&mut output, &report.next_steps, palette);
     output
+}
+
+fn append_next_steps(output: &mut String, steps: &[String], palette: Palette) {
+    if steps.is_empty() {
+        return;
+    }
+    let _ = write!(output, "\n{}\n", palette.paint("1", "Next steps"));
+    for (index, step) in steps.iter().enumerate() {
+        let _ = writeln!(output, "  {}. {step}", index + 1);
+    }
 }
 
 fn append_diagnostics_table(output: &mut String, diagnostics: &Diagnostics, palette: Palette) {
@@ -1492,6 +1567,7 @@ mod tests {
             ],
             diagnostics: None,
             burndown: None,
+            next_steps: Vec::new(),
         };
         assert_eq!(exit_code(&warned.checks), 0);
         assert_eq!(
@@ -1505,6 +1581,7 @@ mod tests {
                 ],
                 "diagnostics": null,
                 "burndown": null,
+                "next_steps": [],
             })
         );
         assert_eq!(
@@ -1521,6 +1598,7 @@ mod tests {
             checks: vec![check("c", Status::Error, "broken")],
             diagnostics: None,
             burndown: None,
+            next_steps: Vec::new(),
         };
         assert_eq!(exit_code(&failed.checks), 2);
         assert_eq!(to_json(&failed)["status"], "unhealthy");
@@ -1594,6 +1672,7 @@ mod tests {
                 }],
             }),
             burndown: None,
+            next_steps: Vec::new(),
         };
         let table = to_table(&report, false);
         assert!(
@@ -1645,6 +1724,7 @@ mod tests {
                 hotspots: Vec::new(),
             }),
             burndown: None,
+            next_steps: Vec::new(),
         };
         let clean_table = to_table(&clean, false);
         assert!(
@@ -1752,6 +1832,7 @@ mod tests {
             checks: vec![check("policy", Status::Ok, "ok")],
             diagnostics: Some(current),
             burndown: Some(burndown),
+            next_steps: Vec::new(),
         };
         let table = to_table(&report, false);
         assert!(
@@ -1907,5 +1988,85 @@ mod tests {
         assert!(checks.is_empty());
         record_base_error(true, "bad ref".into(), &mut checks);
         assert_eq!(checks, vec![check("base_ref", Status::Error, "bad ref")]);
+    }
+
+    #[test]
+    fn starter_policy_hints_and_next_steps_name_the_exact_commands() {
+        let base_dir =
+            std::env::temp_dir().join(format!("smells-doctor-hints-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base_dir);
+        for (manifest, file) in [
+            ("Cargo.toml", "/examples/quality-policy.json"),
+            ("pyproject.toml", "/examples/python-quality-policy.json"),
+            ("package.json", "/examples/typescript-quality-policy.json"),
+        ] {
+            let dir = base_dir.join(manifest);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join(manifest), "").unwrap();
+            let hint = missing_policy_hint(&dir);
+            let target = dir.join("quality-policy.json");
+            assert!(
+                hint.contains(&format!("curl -fsSLo {} ", target.display())),
+                "{hint}"
+            );
+            assert!(
+                hint.contains(&format!("/v{}{file}`", env!("CARGO_PKG_VERSION"))),
+                "{hint}"
+            );
+        }
+        let unknown = base_dir.join("unknown");
+        fs::create_dir_all(&unknown).unwrap();
+        assert_eq!(
+            missing_policy_hint(&unknown),
+            "pass --policy FILE, or run `smells doctor` to see which starter policy fits"
+        );
+        let _ = fs::remove_dir_all(&base_dir);
+
+        let built_in = ResolvedPolicy::BuiltIn {
+            rule_pack: "python-v1",
+            text: "",
+        };
+        let burndown = Burndown {
+            base_ref: "origin/main".into(),
+            base_commit: String::new(),
+            base_score: 0,
+            current_score: 0,
+            score_delta: 0,
+            base_blocking: 0,
+            current_blocking: 0,
+            blocking_delta: 0,
+            base_review: 0,
+            current_review: 0,
+            review_delta: 0,
+            base_ignored: 0,
+            current_ignored: 0,
+            ignored_delta: 0,
+            smell_deltas: Vec::new(),
+        };
+        assert_eq!(
+            next_steps(Path::new("."), &built_in, Some(&burndown)),
+            vec![
+                format!(
+                    "curl -fsSLo ./quality-policy.json https://raw.githubusercontent.com/mindful-time/smells/v{}/examples/python-quality-policy.json",
+                    env!("CARGO_PKG_VERSION")
+                ),
+                "smells check --base origin/main".to_string(),
+            ]
+        );
+        let file = ResolvedPolicy::File(PathBuf::from("app/quality-policy.json"));
+        let steps = next_steps(Path::new("app"), &file, None);
+        assert_eq!(steps, vec!["smells check --path app".to_string()]);
+
+        let report = DoctorReport {
+            checks: Vec::new(),
+            diagnostics: None,
+            burndown: None,
+            next_steps: steps,
+        };
+        assert!(to_table(&report, false).ends_with("\nNext steps\n  1. smells check --path app\n"));
+        assert_eq!(
+            to_json(&report)["next_steps"],
+            json!(["smells check --path app"])
+        );
     }
 }

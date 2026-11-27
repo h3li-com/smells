@@ -12,7 +12,7 @@ use crate::{
     doctor, metrics, policy, report,
 };
 
-const USAGE: &str = "smells --version\nsmells check (--path DIR | --staged) [--policy FILE] [--base REF] [--evidence FILE] [--coverage LCOV] [--format table|json] [--report FILE] [--log FILE] [policy group selectors]\nsmells policy show [--policy FILE] [--format table|json] [policy group selectors]\nsmells contracts validate [--policy FILE]\nsmells doctor [--policy FILE] [--path DIR] [--coverage LCOV] [--base REF] [--format table|json]\nsmells rules [--rule-pack rust-v1|python-v1|typescript-v1]\n\n--policy defaults to quality-policy.json in the --path directory (or the current directory).\n--coverage reads LCOV line coverage for exact CRAP scores; doctor also finds lcov.info, coverage/lcov.info or target/llvm-cov/lcov.info.\n\npolicy group selectors: --group NAME | --only-group NAME | --all-groups | --no-default-groups | --no-group NAME";
+const USAGE: &str = "smells --version\nsmells check [--path DIR | --staged] [--policy FILE] [--base REF] [--evidence FILE] [--coverage LCOV] [--format table|json] [--report FILE] [--log FILE] [policy group selectors]\nsmells policy show [--policy FILE] [--format table|json] [policy group selectors]\nsmells contracts validate [--policy FILE]\nsmells doctor [--policy FILE] [--path DIR] [--coverage LCOV] [--base REF] [--format table|json]\nsmells rules [--rule-pack rust-v1|python-v1|typescript-v1]\n\ncheck scans --path . unless --path or --staged is given.\n--policy defaults to quality-policy.json in the --path directory (or the current directory).\n--log defaults to smells-findings.log unless --format is given; --format table prints every finding instead.\n--coverage reads LCOV line coverage for exact CRAP scores; doctor also finds lcov.info, coverage/lcov.info or target/llvm-cov/lcov.info.\n\npolicy group selectors: --group NAME | --only-group NAME | --all-groups | --no-default-groups | --no-group NAME";
 
 enum Command {
     Help,
@@ -172,6 +172,9 @@ fn consume_operation_option(
 }
 
 const DEFAULT_POLICY: &str = "quality-policy.json";
+/// Where a table-format scan writes its Finding Log when `--log` is not given, so the
+/// terminal gets a short summary instead of every finding.
+const DEFAULT_LOG: &str = "smells-findings.log";
 
 /// Uses `--policy` when given, otherwise `quality-policy.json` in `root`; a missing
 /// default is an error so an unconfigured repository never scans with no policy.
@@ -184,31 +187,45 @@ fn policy_or_default(explicit: Option<PathBuf>, root: &Path) -> Result<PathBuf, 
         return Ok(path);
     }
     Err(format!(
-        "no --policy given and {} not found; pass --policy FILE",
-        path.display()
+        "no --policy given and {} not found; {}",
+        path.display(),
+        doctor::missing_policy_hint(root)
     ))
+}
+
+/// Validates the source flags and returns the scan root, `.` unless `--path` or `--staged` is given.
+fn check_source(options: &PendingOptions) -> Result<Option<PathBuf>, String> {
+    if options.staged && options.source.is_some() {
+        return Err("--staged and --path cannot be combined".into());
+    }
+    if options.base_ref.is_some() && options.evidence_path.is_some() {
+        return Err("--evidence cannot be used with --base".into());
+    }
+    Ok(match &options.source {
+        None if !options.staged => Some(PathBuf::from(".")),
+        source => source.clone(),
+    })
 }
 
 fn finish_operation(options: PendingOptions, contracts: bool) -> Result<Command, String> {
     if contracts {
         return policy_or_default(options.policy_path, Path::new(".")).map(Command::Validate);
     }
-    if options.staged == options.source.is_some() {
-        return Err("select exactly one of --staged and --path".into());
-    }
-    if options.base_ref.is_some() && options.evidence_path.is_some() {
-        return Err("--evidence cannot be used with --base".into());
-    }
-    let root = options.source.as_deref().unwrap_or(Path::new("."));
+    let source = check_source(&options)?;
+    let root = source.as_deref().unwrap_or(Path::new("."));
     let policy_path = policy_or_default(options.policy_path, root)?;
+    let log_path = match (options.log_path, &options.format) {
+        (None, None) => Some(PathBuf::from(DEFAULT_LOG)),
+        (log_path, _) => log_path,
+    };
     Ok(Command::Check(CheckOptions {
-        source: options.source,
+        source,
         policy_path,
         evidence_path: options.evidence_path,
         coverage_path: options.coverage_path,
         base_ref: options.base_ref,
         report_path: options.report_path,
-        log_path: options.log_path,
+        log_path,
         format: options.format,
         selection: options.selection,
     }))
@@ -321,7 +338,7 @@ fn consume_show_option(
 }
 
 fn command(args: &[String]) -> Result<Command, String> {
-    if args.is_empty() || args == ["--help"] {
+    if args.is_empty() || args.iter().any(|arg| arg == "--help" || arg == "-h") {
         return Ok(Command::Help);
     }
     if args == ["--version"] {
@@ -837,6 +854,71 @@ mod tests {
             ],
         ] {
             assert!(command(&arguments(&invalid)).is_err());
+        }
+    }
+
+    #[test]
+    fn check_defaults_to_the_current_directory_and_a_finding_log() {
+        let Ok(Command::Check(parsed)) =
+            command(&arguments(&["check", "--policy", "quality-policy.json"]))
+        else {
+            panic!("bare check was rejected");
+        };
+        assert_eq!(parsed.source, Some(PathBuf::from(".")));
+        assert_eq!(parsed.log_path, Some(PathBuf::from(DEFAULT_LOG)));
+
+        for (format, log) in [("table", None), ("json", None)] {
+            let Ok(Command::Check(parsed)) = command(&arguments(&[
+                "check",
+                "--policy",
+                "quality-policy.json",
+                "--format",
+                format,
+            ])) else {
+                panic!("check rejected --format {format}");
+            };
+            assert_eq!(parsed.log_path, log);
+        }
+
+        let Ok(Command::Check(staged)) = command(&arguments(&[
+            "check",
+            "--staged",
+            "--policy",
+            "quality-policy.json",
+            "--log",
+            "custom.log",
+        ])) else {
+            panic!("staged check was rejected");
+        };
+        assert_eq!(staged.source, None);
+        assert_eq!(staged.log_path, Some(PathBuf::from("custom.log")));
+
+        let Err(both) = command(&arguments(&[
+            "check",
+            "--staged",
+            "--path",
+            ".",
+            "--policy",
+            "quality-policy.json",
+        ])) else {
+            panic!("check accepted --staged with --path");
+        };
+        assert_eq!(both, "--staged and --path cannot be combined");
+    }
+
+    #[test]
+    fn help_is_printed_for_any_command() {
+        for args in [
+            vec!["--help"],
+            vec!["-h"],
+            vec!["check", "--help"],
+            vec!["doctor", "-h"],
+            vec!["policy", "show", "--help"],
+        ] {
+            assert!(
+                matches!(command(&arguments(&args)), Ok(Command::Help)),
+                "{args:?}"
+            );
         }
     }
 }

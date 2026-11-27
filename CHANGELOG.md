@@ -4,6 +4,15 @@ All notable changes to Smells are recorded here. Release tags use `vMAJOR.MINOR.
 
 ## 0.7.0 - 2026-11-23
 
+- Make the first run shorter. `smells check` scans the current directory when
+  neither `--path` nor `--staged` is given, and without `--log` or `--format`
+  it prints a short summary and writes the complete Finding Log to
+  `smells-findings.log`; `--format table` still prints every finding. A
+  missing `quality-policy.json` still exits `2`, and the error now names the
+  exact `curl` command for the matching starter policy. `smells doctor` ends
+  with numbered next steps (`next_steps` in JSON), and its matched-smell count
+  equals the rows its smell table shows. `--help` works after any command.
+
 - Scan every Rust configuration variant instead of exiting `2` on conditional
   alternatives. Same-named `cfg` modules, `#[cfg_attr(…, path = "…")]` children
   and repeated type declarations each become a variant reported at its own file

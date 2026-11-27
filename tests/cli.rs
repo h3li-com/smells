@@ -3758,6 +3758,7 @@ fn doctor_reports_governance_gaps_as_warnings_on_a_complete_repository() {
     let (code, data) = doctor(&workspace, &[]);
     assert_eq!(code, Some(0), "{data}");
     assert_eq!(data["status"], "healthy");
+    assert_eq!(data["next_steps"], json!(["smells check"]), "{data}");
     assert_eq!(doctor_check(&data, "policy")["status"], "ok");
     assert_eq!(doctor_check(&data, "git_history")["status"], "ok");
     assert_eq!(doctor_check(&data, "suppressions")["status"], "ok");
@@ -3797,6 +3798,7 @@ fn doctor_fails_closed_on_missing_history_invalid_policy_and_bad_arguments() {
     let (code, data) = doctor(&workspace, &[]);
     assert_eq!(code, Some(2));
     assert_eq!(data["status"], "unhealthy");
+    assert_eq!(data["next_steps"], json!([]), "{data}");
     assert_eq!(doctor_check(&data, "git_history")["status"], "error");
 
     workspace.modify("/scanner_version", json!("0.0.0"));

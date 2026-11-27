@@ -12,192 +12,77 @@
 
 **Stop code smells and AI slop before they reach `main`.**
 
-`smells` is a fast, deterministic code-smell scanner for **Rust, Python, TypeScript, and TSX**. It runs **28 built-in rules across all 23 Refactoring.Guru smell categories**, ratchets pull requests against Git history with `--base`, and gives humans and coding agents auditable evidence instead of guesswork.
+`smells` is a fast, deterministic code-smell scanner for **Rust, Python, TypeScript, and TSX**. It checks all 23 [Refactoring.Guru](https://refactoring.guru/refactoring/smells) smells with 28 rules, and it can compare your branch against `main` so old debt doesn't block you but new smells do.
 
-- **No baseline file to maintain or game:** `--base origin/main` compares your branch against `main` in memory. Legacy debt stays visible, new or worse smells block, and paying down debt locks in automatically.
-- **Built for humans and coding agents:** One scan writes a compact numbered Finding Log and a normalized JSON report with exact lines, source excerpts, Refactoring.Guru links, and embedded `when_to_ignore` guidance. No MCP server, plugin, or LLM required.
-- **Fail-closed by default:** Shallow Git clones, parser errors, budget exhaustion, unapproved suppression growth, and weakened policy rules exit `2` instead of passing silently.
-- **Safe everywhere:** Single native binary. Never runs your app code, tests, compilers, or package scripts.
-
-[Quick start](#quick-start) · [How ratcheting works](#ratchet-existing-repos-with---base) · [CI & hooks](#add-it-to-ci-and-pre-commit) · [Coding agents](#use-with-coding-agents) · [Commands](#commands)
+It is a single native binary. It never runs your code, tests, or package scripts.
 
 ---
 
 ## Quick start
 
-### 1. Install `smells`
+### 1. Install
 
-Pick any channel—every one installs the same native Rust CLI:
+Use whichever package manager you already have:
 
 ```sh
-# Python tooling (uv)
-uv tool install smells==0.7.0
-
-# Node projects
-npm install --save-dev --save-exact @mindful-time/smells@0.7.0
-
-# Rust tooling
-cargo install --locked --version 0.7.0 smells
+uv tool install smells==0.7.0                                    # Python
+npm install --save-dev --save-exact @mindful-time/smells@0.7.0   # Node
+cargo install --locked --version 0.7.0 smells                    # Rust
 ```
 
-Standalone binaries for macOS, Linux, and Windows are also on the [v0.7.0 GitHub Release](https://github.com/mindful-time/smells/releases/tag/v0.7.0).
+Prebuilt binaries for macOS, Linux, and Windows are on the [v0.7.0 release page](https://github.com/mindful-time/smells/releases/tag/v0.7.0).
 
-### 2. Run `smells doctor` (zero config!)
+### 2. See how your code is doing
+
+From your repository root:
 
 ```sh
 smells doctor
 ```
 
-That's it—no flags or config file required to try it. `smells doctor` auto-detects your checked-in policy (or uses the built-in Rust, Python, or TypeScript starter policy if you don't have one yet), checks Git history and governance wiring, prints your **0–100 Codebase Health Score**, all **23 smells**, **Top Hotspot Files**, and (when `origin/main` or `origin/master` exists) your **Burndown** automatically.
+No config needed. You get a 0–100 health score, a table of all 23 smells, your worst files, and a list of setup tips.
 
-### 3. Commit a policy and gate PRs with `--base`
+### 3. Add a policy and run the check
 
-When you're ready to enforce hard blockers in CI and pre-commit, commit the starter policy for your language ([Rust](examples/quality-policy.json), [Python](examples/python-quality-policy.json), or [TypeScript/TSX](examples/typescript-quality-policy.json)):
+`smells check` is the strict gate you put in pre-commit and CI. It reads `quality-policy.json` from the folder you scan. `smells doctor` ends with **Next steps** that name the exact download command for your language, for example:
 
 ```sh
 curl -fsSLo quality-policy.json \
   https://raw.githubusercontent.com/mindful-time/smells/v0.7.0/examples/python-quality-policy.json
 ```
 
-**Ratchet a pull request or branch against `main` (best for existing repos):**
+(Use `typescript-quality-policy.json` for TypeScript or `quality-policy.json` for Rust. If you forget, `smells check` prints this command and exits `2`.)
+
+Then run:
 
 ```sh
-smells check \
-  --path . \
-  --policy quality-policy.json \
-  --base origin/main \
-  --format table \
-  --log smells-findings.log \
-  --report smells-report.json
+smells check --base origin/main
 ```
 
-**Or scan the full repo (best for greenfield repos or health audits):**
+`smells check` scans the current folder. The terminal shows a short summary and every finding goes to `smells-findings.log`. Open it and start at the **Issue Index** at the top: blocking findings come first, each with a file, line, and a pointer to its details. Add `smells-findings.log` to `.gitignore`.
 
-```sh
-smells check \
-  --path . \
-  --policy quality-policy.json \
-  --format table \
-  --log smells-findings.log \
-  --report smells-report.json
-```
-
-Terminal output stays short and points straight to `smells-findings.log` (for humans and agents) and `smells-report.json` (for automation). Add `--format json` to print JSON directly to stdout.
+`--base origin/main` only fails on smells your branch adds or makes worse. Leave it off to check the whole repository. Pass `--format table` to print every finding in the terminal instead.
 
 ---
 
-## How it works
-
-```text
-source + checked-in policy (+ optional --base REF)
-                      ↓
-   28 deterministic rules across 23 smell categories
-                      ↓
-   compact Finding Log + normalized JSON report + attestation
-                      ↓
-   exit 0 (pass)  |  exit 1 (blocking smell)  |  exit 2 (incomplete/invalid)
-```
-
-### Exit codes
+## Reading the result
 
 | Exit | Meaning | What to do |
 | ---: | --- | --- |
-| `0` | Passed (no unsuppressed blocking smells or regressions) | Review any non-blocking or `ignored_match` signals |
-| `1` | One or more `required` rules matched or regressed | Open `smells-findings.log` and fix the blocking findings |
-| `2` | Scan was invalid or incomplete | Fix the policy, parser, shallow Git history, suppression, or budget error |
+| `0` | No blocking smells | Optionally look at the `review` findings in the log |
+| `1` | A blocking smell was found (or got worse) | Fix the `blocking` findings at the top of the log |
+| `2` | The scan could not finish | Fix the error it prints (bad policy, parser error, shallow Git clone, …). Exit `2` never means clean |
 
-Exit `2` **never** means clean. Errors always outrank violations.
+Findings come in two levels:
 
-### Hard blockers vs. review warnings (`smells check` vs. `smells doctor`)
+- **Blocking** (`"mode": "required"`): fails the check. The starter policies block Long Method, Long Parameter List, Large Class, Duplicate Code, and Dead Code.
+- **Review** (`"mode": "report"`): every other smell. Listed in the log, never fails the check.
 
-Every scan checks **all 28 rules across all 23 smells**, separated into two levels so CI stays strict without drowning humans or coding agents in false positives:
+You can make any rule blocking by setting its `mode` to `"required"` in `quality-policy.json`.
 
-- **Hard blockers (`"mode": "required"`):** Fail `smells check` with exit `1` and always appear at the top of the Issue Index. Starter policies set **Bloaters** (Long Method, Long Parameter List, Large Class), **Duplicate Code** (`duplicate_functions`), and **Dead Code** (`unused_code`) to `required` by default—and you can flip any additional rule to `"required"` in `quality-policy.json`.
-- **Review warnings (`"mode": "report"`):** Structural and history heuristics (such as `data_class`, `lazy_class`, `divergent_change`, `shotgun_surgery`, and `navigation_chains`) that still run on every scan and appear as non-blocking `review` findings in `smells-findings.log` and JSON, without bloating the 4-line stdout summary or failing CI on normal DTOs/wrappers.
+### When a finding is intentional
 
-Use the two commands for their distinct jobs:
-
-| Command | Role | Output |
-| --- | --- | --- |
-| **`smells check --base origin/main`** | **PR & pre-commit gate** | 4-line stdout summary with burndown `delta` + full Finding Log & JSON; exits `1` on new/worse `required` smells, `2` on broken setup |
-| **`smells doctor`** | **Zero-flag health score & burndown** | Just run `smells doctor` (auto-discovers your policy or built-in starter + `origin/main`): colored report (`NO_COLOR` respected) with setup checks, a **0–100 Health Score**, 23-smell breakdown (`blocking` vs. `review`), top 5 hotspots, and burndown; override with `--policy`/`--base` |
-
----
-
-## Ratchet existing repos with `--base`
-
-You do not have to clean up years of legacy debt on day one. Pass `--base <REF>` (for example `--base origin/main` in CI, or `--base HEAD` in a pre-commit hook) and Smells computes an in-memory **Debt Envelope** from that Git commit:
-
-- **Legacy debt does not block you:** Existing violations stay visible in the report without failing unrelated PRs.
-- **New or worse smells block (exit `1`):** Adding a new violation or making an existing one worse fails the check.
-- **Burndown locks in automatically and shows on stdout:** Every `--base` scan prints `base`, `legacy`, `delta` (e.g. `-3` when you pay down debt), `new_ignores`, and any `weakened_rules` right on terminal/CI stdout, in `smells-findings.log`, and in `smells-report.json`—no baseline JSON file to regenerate or merge-conflict.
-- **Anti-gaming guardrails are on by default:** Adding new `smells: ignore` suppressions (`blocked_by_suppression_growth`) or weakening `required` rules (`blocked_by_policy_weakening`) fails closed unless reviewed intentionally.
-- **Blocks bloaters, Duplicate Code, and Dead Code out of the box:** Starter policies set bloaters plus `duplicate_functions` (Duplicate Code) and `unused_code` (Dead Code) to `required`, while all remaining smells run and appear as `review` signals (and any rule can be switched to `required` in `quality-policy.json`).
-
-Every report also includes a default-on `attestation` block recording exact rule counts, policy digest, history completeness, and exit code.
-
----
-
-## Add it to CI and pre-commit
-
-### Copy-ready CI gates (GitHub Actions & Azure Pipelines)
-
-Ready-to-use, fail-closed templates live in [`examples/ci/`](examples/ci/):
-
-- [`examples/ci/github-actions-smells.yml`](examples/ci/github-actions-smells.yml) — independent `smells` job on `pull_request` and `merge_group`, `fetch-depth: 0`, pinned `0.7.0`, `--base`, and always-uploaded Finding Log + JSON report.
-- [`examples/ci/azure-pipelines-smells.yml`](examples/ci/azure-pipelines-smells.yml) — independent job with `fetchDepth: 0`, `--base`, and always-published artifacts.
-- [`examples/ci/CODEOWNERS`](examples/ci/CODEOWNERS) — requires owner review for changes to `*quality-policy.json`, `AGENTS.md`, `CLAUDE.md`, and CI gate files.
-
-> **Important:** Always check out full Git history (`fetch-depth: 0` / `fetchDepth: 0`). History rules (`Divergent Change`, `Shotgun Surgery`) use up to 200 commits and exit `2` on a shallow clone instead of reporting a false clean result.
-
-See [CI gate templates & branch-protection checklist](docs/project-integration.md#ci-gate-templates) for setup details.
-
-### Pre-commit hook (`--staged`)
-
-`--staged` scans the exact Git index snapshot rather than unstaged working-tree edits. With [`pre-commit`](https://pre-commit.com/):
-
-```yaml
-repos:
-  - repo: local
-    hooks:
-      - id: smells
-        name: deterministic smell scan
-        language: system
-        entry: uvx --from smells==0.7.0 smells check --staged --base HEAD --policy quality-policy.json --format table --log smells-findings.log --report smells-report.json
-        pass_filenames: false
-```
-
-Node projects can use `npx --no-install smells check ...`; Rust projects can call `smells check ...` directly. An inactive shell hook example is also in [`hooks/pre-commit.example`](hooks/pre-commit.example).
-
----
-
-## Use with coding agents
-
-`smells` needs no MCP server, plugin, or model-specific API. The scanner supplies deterministic evidence; the agent researches the exact Refactoring.Guru reference, verifies context, and makes a small behavior-preserving fix.
-
-Add this contract to your repository's root `AGENTS.md` (and put `@AGENTS.md` in `CLAUDE.md` if you use Claude Code):
-
-```md
-## Smell review
-
-- Run `smells check --path . --policy quality-policy.json --base origin/main --format table --log smells-findings.log --report smells-report.json` before reviewing or refactoring code smells.
-- Treat exit code `2` as an incomplete scan, never as clean.
-- Open `smells-findings.log`, start at the Issue Index, and resolve every `scanner_error` and `blocking` finding first (always listed at the top).
-- Check `review` warnings for files touched in the current change; use `smells doctor --policy quality-policy.json` for a compact repo-wide diagnostic overview instead of reading every legacy `review` entry.
-- Before fixing or suppressing a finding, open and read its exact Refactoring.Guru URL and embedded `when_to_ignore` guidance. If the URL cannot be consulted, report research as incomplete and stop.
-- Verify findings against declarations, callers, and tests. Add `smells: ignore[exact-rule-id] -- reason` only when the verified exception applies—never merely to pass a hook.
-- Prefer small, behavior-preserving edits, then rerun project tests and `smells check`.
-```
-
-Works out of the box with **Codex**, **Claude Code**, **Pi**, and any other CLI-capable agent.
-
----
-
-## Real-world code: suppressions, tests, migrations, and monorepos
-
-### Audited source suppressions
-
-When a finding is genuinely justified after checking its Refactoring.Guru `when_to_ignore` guidance, suppress only the next declaration with an explicit rule ID and reason:
+Read the finding's `when_to_ignore` guidance in the log first. If it applies, put a comment above the declaration with the exact rule ID and a reason:
 
 ```python
 # smells: ignore[python.function_arguments] -- stable external API
@@ -205,61 +90,61 @@ def publish(a, b, c, d):
     ...
 ```
 
-```rust
-// smells: ignore[rust.function_arguments] -- compatibility boundary
-fn publish(a: i32, b: i32, c: i32, d: i32, e: i32, f: i32, g: i32, h: i32) {}
-```
-
-```typescript
-// smells: ignore[typescript.function_arguments] -- stable external API
-publish(a: number, b: number, c: number, d: number): void {}
-```
-
-Suppressed findings stay visible in reports as `ignored_match` (never hidden). Malformed, unknown, duplicate, misplaced, or unused directives fail closed with exit `2`.
-
-### Tests and database migrations (`source_roles`)
-
-Instead of excluding test suites or migration directories and losing visibility, declare `source_roles` in `quality-policy.json`:
-
-```json
-"source_roles": [
-  {
-    "role": "test_suite",
-    "framework": "pytest",
-    "paths": ["/tests/**/*.py"]
-  },
-  {
-    "role": "database_migration",
-    "framework": "alembic",
-    "paths": ["/backend/alembic/versions/**/*.py"],
-    "configuration": ["/backend/alembic.ini"]
-  }
-]
-```
-
-- **Test suites** (`pytest`, `unittest`, `vitest`, `jest`, `playwright`, `cargo_test`): long canonical test cases/blocks (`test_*`, `describe`/`it`/`test`, `#[test]`) become visible non-blocking `reported_by_role` review signals, while test helpers and all other rules stay strictly enforced.
-- **Database migrations** (Alembic, Django, TypeORM, MikroORM, Kysely, Knex, Sequelize/Umzug, Prisma, Drizzle, SeaORM, SQLx, Diesel, Refinery): canonical migration entrypoints stay measured as non-blocking review signals and SQL bodies are inventoried explicitly. See [migration code analysis](docs/migration-code-analysis.md).
-
-### Monorepos, rule groups, and optional evidence
-
-- **Monorepos:** Run from the repo root. Files are grouped automatically under their nearest `Cargo.toml`, `pyproject.toml`, or `package.json` (or `__unowned__`). Mixed-language repos use one policy file and one scan per language pack.
-- **Rule groups:** Starter policies run `all` 28 rules. Narrow intentionally with `--only-group`, `--group`, or `--no-group` (`source`, `evidence`, or any of the five Refactoring.Guru categories). Preview with `smells policy show`.
-- **Measured CRAP:** Pass `--coverage lcov.info` (any LCOV file from `cargo llvm-cov`, `pytest --cov`, or `vitest --coverage`) to score CRAP from real line coverage. Starter policies score CRAP in bands: 5 or less is fine, 6 to 10 is a non-blocking warning, and above 10 blocks. Only a score measured from coverage can block; without coverage, scores assume 0% coverage and stay warnings. `smells doctor` finds `lcov.info` automatically and, without it, hides those 0%-coverage estimates instead of flooding you.
-- **Optional higher-fidelity evidence:** Built-in collectors work standalone with zero setup. If you already produce compiler, coverage, type, or architecture facts, pass `--evidence provider-evidence.json` (cannot be combined with `--base`). See [provider evidence](docs/provider-evidence.md).
+Rust and TypeScript use `//` comments with the same format. Ignored findings stay visible in the report as `ignored_match`. A typo'd, unknown, or unused ignore makes the scan exit `2`.
 
 ---
 
-## Supported languages & smells
+## Use it in pre-commit and CI
 
-| Language pack | Files scanned | Active rules | Class-like model |
-| --- | --- | ---: | --- |
-| `rust-v1` | `.rs` | 28 | `struct`/`enum` state + inherent & trait `impl` methods |
-| `python-v1` | `.py`, `.pyi` | 28 | Classes, direct methods, and `self`/`cls` fields |
-| `typescript-v1` | `.ts`, `.tsx`, `.mts`, `.cts` | 28 | Classes, abstract classes, interfaces, signatures, and authored fields |
+**Pre-commit** with [`pre-commit`](https://pre-commit.com/). `--staged` scans exactly what you are about to commit:
 
-All three packs cover the same **23 canonical Refactoring.Guru smells** (28 executable rules):
+```yaml
+repos:
+  - repo: local
+    hooks:
+      - id: smells
+        name: smells
+        language: system
+        entry: uvx --from smells==0.7.0 smells check --staged --base HEAD
+        pass_filenames: false
+```
 
-| Category | Smells covered |
+Node projects can use `npx --no-install smells check ...`. Rust projects can call `smells check ...` directly.
+
+**CI:** copy a ready-made template from [`examples/ci/`](examples/ci/) ([GitHub Actions](examples/ci/github-actions-smells.yml), [Azure Pipelines](examples/ci/azure-pipelines-smells.yml)). Check out the full Git history (`fetch-depth: 0`): some rules read history, and a shallow clone exits `2` rather than passing. See [CI setup](docs/project-integration.md#ci-gate-templates).
+
+---
+
+## Use it with coding agents
+
+No MCP server or plugin is needed. Add this to your repository's `AGENTS.md` (and put `@AGENTS.md` in `CLAUDE.md` for Claude Code):
+
+```md
+## Smell review
+
+- Run `smells check --base origin/main --report smells-report.json` before reviewing or refactoring code smells.
+- Treat exit code `2` as an incomplete scan, never as clean.
+- Open `smells-findings.log`, start at the Issue Index, and fix every `scanner_error` and `blocking` finding first.
+- Before fixing or ignoring a finding, read its Refactoring.Guru link and `when_to_ignore` guidance.
+- Add `smells: ignore[exact-rule-id] -- reason` only when that guidance really applies, never just to pass a hook.
+- Make small, behavior-preserving edits, then rerun the tests and `smells check`.
+```
+
+Works with Codex, Claude Code, Pi, and any agent that can run a command.
+
+---
+
+## Supported languages
+
+| Language | Files | Policy file to start from |
+| --- | --- | --- |
+| Rust | `.rs` | [`examples/quality-policy.json`](examples/quality-policy.json) |
+| Python | `.py`, `.pyi` | [`examples/python-quality-policy.json`](examples/python-quality-policy.json) |
+| TypeScript | `.ts`, `.tsx`, `.mts`, `.cts` | [`examples/typescript-quality-policy.json`](examples/typescript-quality-policy.json) |
+
+Each language checks the same 23 smells:
+
+| Category | Smells |
 | --- | --- |
 | **Bloaters** | Long Method, Large Class, Primitive Obsession, Long Parameter List, Data Clumps |
 | **OO Abusers** | Alternative Classes with Different Interfaces, Refused Bequest, Switch Statements, Temporary Field |
@@ -267,7 +152,7 @@ All three packs cover the same **23 canonical Refactoring.Guru smells** (28 exec
 | **Dispensables** | Comments, Duplicate Code, Data Class, Dead Code, Lazy Class, Speculative Generality |
 | **Couplers** | Feature Envy, Inappropriate Intimacy, Incomplete Library Class, Message Chains, Middle Man |
 
-*Not yet supported: Java, Kotlin, JavaScript, and JSX.* Use Smells alongside your compiler, type checker, tests, coverage, and security tools—it complements them rather than replacing them.
+Not supported yet: Java, Kotlin, JavaScript, and JSX. `smells` complements your compiler, type checker, tests, and security tools; it doesn't replace them.
 
 ---
 
@@ -275,39 +160,32 @@ All three packs cover the same **23 canonical Refactoring.Guru smells** (28 exec
 
 | Command | What it does |
 | --- | --- |
-| `smells check --path DIR [--policy FILE] [--base REF]` | Scan a directory (optionally ratcheted against a Git ref) |
-| `smells check --staged [--policy FILE] [--base REF]` | Scan the exact Git staged index snapshot |
-| `smells doctor [--policy FILE] [--path DIR] [--base REF]` | Zero-flag setup audit, 0–100 health score, 23-smell & hotspot diagnostics, and burndown |
-| `smells contracts validate [--policy FILE]` | Validate a policy file against its schema and rule pack |
-| `smells policy show [--policy FILE]` | Print the resolved rule set and parameters |
-| `smells rules [--rule-pack PACK]` | List all rules, categories, and versions in a language pack |
-| `smells --version` | Print the installed scanner version |
+| `smells doctor` | Health score, smell table, worst files, setup tips, and next steps. No config needed |
+| `smells check` | Strict scan of the current folder, findings in `smells-findings.log`. Add `--base origin/main` to check only what changed, or `--path DIR` for another folder |
+| `smells check --staged --base HEAD` | Strict scan of the files staged for commit |
+| `smells policy show` | Show which rules your policy runs and their settings |
+| `smells contracts validate` | Check that your policy file is valid |
+| `smells rules` | List every rule in a language pack |
+| `smells --version` | Print the installed version |
+
+Run `smells --help` (or `smells check --help`) for every option.
 
 ---
 
-## Release provenance & documentation
+## Learn more
 
-| Channel | Package | Install command |
-| --- | --- | --- |
-| PyPI | [`smells`](https://pypi.org/project/smells/0.7.0/) | `uv tool install smells==0.7.0` |
-| npm | [`@mindful-time/smells`](https://www.npmjs.com/package/@mindful-time/smells/v/0.7.0) | `npm install --save-dev --save-exact @mindful-time/smells@0.7.0` |
-| crates.io | [`smells`](https://crates.io/crates/smells/0.7.0) | `cargo install --locked --version 0.7.0 smells` |
-| GitHub | [v0.7.0 release](https://github.com/mindful-time/smells/releases/tag/v0.7.0) | Prebuilt archive for macOS, Linux, or Windows |
-
-All packages originate from one signed, immutable GitHub Release with checksums and CycloneDX/SPDX SBOMs.
-
-### Further reading
-
-- [Project integration & CI setup](docs/project-integration.md)
-- [Report interface & `--base` ratchet semantics](docs/report-interface.md)
+- [Project integration](docs/project-integration.md): policies, tests and migrations (`source_roles`), monorepos, coverage for CRAP scores, rule groups, and CI
+- [Report format and `--base` ratchet](docs/report-interface.md)
 - [Migration code analysis](docs/migration-code-analysis.md)
 - [Provider evidence](docs/provider-evidence.md)
-- Rule contracts: [Rust](docs/rust-rule-contracts.md) · [Python](docs/python-rule-contracts.md) · [TypeScript](docs/typescript-rule-contracts.md)
-- Internals & governance: [Architecture](docs/architecture.md) · [Package distribution](docs/package-distribution.md) · [Release process](docs/release-process.md) · [Repository governance](docs/repository-governance.md)
+- Rule details: [Rust](docs/rust-rule-contracts.md) · [Python](docs/python-rule-contracts.md) · [TypeScript](docs/typescript-rule-contracts.md)
+- Internals: [Architecture](docs/architecture.md) · [Package distribution](docs/package-distribution.md) · [Release process](docs/release-process.md) · [Repository governance](docs/repository-governance.md)
 
-### Developing `smells`
+All packages are built from one signed, immutable GitHub Release with checksums and CycloneDX/SPDX SBOMs.
 
-Run the full local gate before committing or pushing (PRs must originate from a fork):
+## Developing `smells`
+
+Run the full local gate before committing or pushing (PRs must come from a fork):
 
 ```sh
 make pre-commit-push
