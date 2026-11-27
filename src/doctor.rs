@@ -298,9 +298,9 @@ pub(crate) fn diagnose(
 ) -> DoctorReport {
     let mut checks = Vec::new();
     let resolved = resolve_policy(root, policy_path);
-    let owned_policy_target = match &resolved {
-        Ok(ResolvedPolicy::File(path)) => relative_policy_path(root, path),
-        _ => "quality-policy.json".into(),
+    let policy_file = match &resolved {
+        Ok(ResolvedPolicy::File(path)) => path.clone(),
+        _ => root.join("quality-policy.json"),
     };
     let (diagnostics, burndown) = match &resolved {
         Ok(policy_source) => {
@@ -315,7 +315,7 @@ pub(crate) fn diagnose(
             (None, None)
         }
     };
-    append_governance_checks(root, &owned_policy_target, &mut checks);
+    append_governance_checks(root, &policy_file, &mut checks);
     let next_steps = match (&resolved, &diagnostics) {
         (Ok(policy_source), Some(_)) => next_steps(root, policy_source, burndown.as_ref(), &checks),
         (Err(_), _) => missing_policy_steps(root),
@@ -338,11 +338,28 @@ fn starter_policy_file(rule_pack: &str) -> &'static str {
     }
 }
 
+/// `text` as one shell word, single-quoted unless every character is safe unquoted,
+/// so a printed command still works when a path holds a space or a quote.
+fn shell_word(text: &str) -> String {
+    let safe =
+        |character: char| character.is_ascii_alphanumeric() || "/._-:\\+@=,".contains(character);
+    if !text.is_empty() && text.chars().all(safe) {
+        text.to_owned()
+    } else {
+        format!("'{}'", text.replace('\'', r"'\''"))
+    }
+}
+
+/// `path` as one shell word.
+fn shell_path(path: &Path) -> String {
+    shell_word(&path.display().to_string())
+}
+
 /// A command that saves the starter policy for `rule_pack` as `target`.
 fn starter_policy_command(rule_pack: &str, target: &Path) -> String {
     format!(
         "curl -fsSLo {} https://raw.githubusercontent.com/mindful-time/smells/v{}/examples/{}",
-        target.display(),
+        shell_path(target),
         env!("CARGO_PKG_VERSION"),
         starter_policy_file(rule_pack)
     )
@@ -366,7 +383,7 @@ pub(crate) fn missing_policy_hint(root: &Path) -> String {
                     .map(|(name, rule_pack)| format!("{name} ({rule_pack})"))
                     .collect::<Vec<_>>()
                     .join(", "),
-                subfolder(root, first).display()
+                shell_path(&subfolder(root, first))
             ),
         },
     }
@@ -433,7 +450,12 @@ fn missing_policy_steps(root: &Path) -> Vec<String> {
     }
     subprojects
         .iter()
-        .map(|(name, _)| format!("smells doctor --path {}", subfolder(root, name).display()))
+        .map(|(name, _)| {
+            format!(
+                "smells doctor --path {}",
+                shell_path(&subfolder(root, name))
+            )
+        })
         .collect()
 }
 
@@ -451,29 +473,63 @@ fn next_steps(
         ));
     }
     // A check that would exit 2 is not a next step; the error has to be fixed first.
-    if checks.iter().any(|check| check.status == Status::Error) {
+    let errors = checks
+        .iter()
+        .filter(|check| check.status == Status::Error)
+        .collect::<Vec<_>>();
+    if !errors.is_empty() {
         steps.push(
-            "fix the errors above (exclude intentionally broken files, such as parser \
+            if errors.iter().any(|check| check.id == "scan") {
+                "fix the errors above (exclude intentionally broken files, such as parser \
              fixtures, with exclude_directories in quality-policy.json), then rerun smells doctor"
-                .into(),
+            } else {
+                "fix the errors above, then rerun smells doctor"
+            }
+            .into(),
         );
         return steps;
     }
     let mut check = String::from("smells check");
     if root != Path::new(".") {
-        let _ = write!(check, " --path {}", root.display());
+        let _ = write!(check, " --path {}", shell_path(root));
+    }
+    // `smells check` finds only quality-policy.json on its own.
+    if let ResolvedPolicy::File(path) = policy_source
+        && !same_file(path, &root.join("quality-policy.json"))
+    {
+        let _ = write!(check, " --policy {}", shell_path(path));
     }
     if let Some(burndown) = burndown {
-        let _ = write!(check, " --base {}", burndown.base_ref);
+        let _ = write!(check, " --base {}", shell_word(&burndown.base_ref));
     }
     steps.push(check);
     steps
 }
 
+/// Whether two paths name the same file, compared as written when either is missing.
+fn same_file(left: &Path, right: &Path) -> bool {
+    match (fs::canonicalize(left), fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => left == right,
+    }
+}
+
+/// `path` made absolute through its folder, so a policy file that does not exist yet
+/// still resolves.
+fn absolute_file(path: &Path) -> Option<PathBuf> {
+    let path = std::path::absolute(path).ok()?;
+    let existing = path.ancestors().find_map(|folder| {
+        let canonical = fs::canonicalize(folder).ok()?;
+        Some((folder, canonical))
+    })?;
+    let (folder, canonical) = existing;
+    Some(canonical.join(path.strip_prefix(folder).ok()?))
+}
+
 /// Agent instructions apply from the nearest folder that has them, up to the Git
 /// repository root, and GitHub reads CODEOWNERS only at that root, against paths
 /// relative to it.
-fn append_governance_checks(root: &Path, owned_policy_target: &str, checks: &mut Vec<Check>) {
+fn append_governance_checks(root: &Path, policy_file: &Path, checks: &mut Vec<Check>) {
     let folders = repository_folders(root);
     let nearest = |name: &str| {
         folders
@@ -488,17 +544,23 @@ fn append_governance_checks(root: &Path, owned_policy_target: &str, checks: &mut
             .ok()
             .map(|text| (*path, text))
     });
-    let offset = folders[0].strip_prefix(repository).unwrap_or(Path::new(""));
-    let policy_target = offset
-        .join(owned_policy_target)
-        .to_string_lossy()
-        .replace('\\', "/");
-    checks.push(codeowners_check(
-        codeowners
-            .as_ref()
-            .map(|(path, text)| (*path, text.as_str())),
-        &policy_target,
-    ));
+    let policy_target = absolute_file(policy_file)
+        .and_then(|policy| Some(policy.strip_prefix(repository).ok()?.to_path_buf()))
+        .map(|policy| policy.to_string_lossy().replace('\\', "/"));
+    let codeowners = codeowners
+        .as_ref()
+        .map(|(path, text)| (*path, text.as_str()));
+    checks.push(match policy_target {
+        Some(target) => codeowners_check(codeowners, &target),
+        None => check(
+            "codeowners",
+            Status::Warn,
+            format!(
+                "{} is outside the repository, so CODEOWNERS cannot assign it an owner",
+                policy_file.display()
+            ),
+        ),
+    });
 }
 
 /// The folders from `root` up to the Git repository root that holds it, nearest first,
@@ -1676,6 +1738,19 @@ mod tests {
     }
 
     #[test]
+    fn printed_paths_are_quoted_only_when_the_shell_would_split_them() {
+        assert_eq!(
+            shell_word("app/quality-policy.json"),
+            "app/quality-policy.json"
+        );
+        assert_eq!(shell_word(r"C:\repo\app"), r"C:\repo\app");
+        assert_eq!(shell_word("my app"), "'my app'");
+        assert_eq!(shell_word("it's"), r"'it'\''s'");
+        assert_eq!(shell_word("$HOME"), "'$HOME'");
+        assert_eq!(shell_word(""), "''");
+    }
+
+    #[test]
     fn policy_paths_are_reported_relative_to_the_source_root() {
         assert_eq!(
             relative_policy_path(Path::new("."), Path::new("examples/quality-policy.json")),
@@ -2149,7 +2224,7 @@ mod tests {
         .unwrap();
         fs::write(backend.join("CODEOWNERS"), "* @nobody\n").unwrap();
         let mut checks = Vec::new();
-        append_governance_checks(&backend, "quality-policy.json", &mut checks);
+        append_governance_checks(&backend, &backend.join("quality-policy.json"), &mut checks);
         let details: Vec<_> = checks.iter().map(|check| check.detail.as_str()).collect();
         assert_eq!(
             details,
@@ -2161,15 +2236,40 @@ mod tests {
         );
         fs::write(backend.join("AGENTS.md"), "").unwrap();
         let mut checks = Vec::new();
-        append_governance_checks(&backend, "quality-policy.json", &mut checks);
+        append_governance_checks(&backend, &backend.join("quality-policy.json"), &mut checks);
         assert_eq!(checks[0].detail, "AGENTS.md is empty");
+
+        fs::write(repository.join("CODEOWNERS"), "/policies/ @owners\n").unwrap();
+        let mut checks = Vec::new();
+        let shared = repository.join("policies").join("backend.json");
+        // The policy folder does not exist yet; CODEOWNERS still owns the path.
+        append_governance_checks(&backend, &shared, &mut checks);
+        assert_eq!(
+            checks[2].detail,
+            "CODEOWNERS assigns policies/backend.json to @owners"
+        );
+        let mut checks = Vec::new();
+        let outside_policy = base_dir.join("policy.json");
+        append_governance_checks(&backend, &outside_policy, &mut checks);
+        assert_eq!(
+            checks[2],
+            check(
+                "codeowners",
+                Status::Warn,
+                format!(
+                    "{} is outside the repository, so CODEOWNERS cannot assign it an owner",
+                    outside_policy.display()
+                )
+            )
+        );
 
         let outside = base_dir.join("outside").join("inner");
         fs::create_dir_all(&outside).unwrap();
         fs::write(base_dir.join("outside").join("AGENTS.md"), "# Rules\n").unwrap();
+        // Only the first folder is certain: the temporary folder may sit in a checkout.
         assert_eq!(
-            repository_folders(&outside),
-            vec![fs::canonicalize(&outside).unwrap()]
+            repository_folders(&outside).first(),
+            Some(&fs::canonicalize(&outside).unwrap())
         );
         assert_eq!(
             repository_folders(&base_dir.join("missing")),
@@ -2302,9 +2402,22 @@ mod tests {
         let blocked = next_steps(Path::new("."), &built_in, Some(&burndown), &scan_error);
         assert_eq!(blocked.len(), 2);
         assert!(blocked[0].starts_with("curl "));
-        assert!(blocked[1].starts_with("fix the errors above"));
+        assert!(blocked[1].contains("exclude_directories"), "{blocked:?}");
+        let base_error = [check("base_ref", Status::Error, "unknown revision")];
+        assert_eq!(
+            next_steps(Path::new("app"), &file, None, &base_error),
+            vec!["fix the errors above, then rerun smells doctor".to_string()]
+        );
         let steps = next_steps(Path::new("app"), &file, None, &[]);
         assert_eq!(steps, vec!["smells check --path app".to_string()]);
+        let named = ResolvedPolicy::File(PathBuf::from("my app/smells-policy.json"));
+        assert_eq!(
+            next_steps(Path::new("my app"), &named, Some(&burndown), &[]),
+            vec![
+                "smells check --path 'my app' --policy 'my app/smells-policy.json' --base origin/main"
+                    .to_string()
+            ]
+        );
 
         let report = DoctorReport {
             checks: Vec::new(),

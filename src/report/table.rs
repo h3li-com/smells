@@ -415,29 +415,38 @@ pub(super) fn ratchet_summary_note(
 /// The first `limit` errors and blocking findings as Issue Index lines without the
 /// detail pointer, so a short terminal summary names what to fix first.
 pub(super) fn top_issues(report: &Report, limit: usize) -> Vec<String> {
-    let errors = report.errors.iter().enumerate().map(|(index, error)| {
-        format!(
+    finding_log_targets(report)
+        .into_iter()
+        .filter(|target| {
+            matches!(
+                target,
+                FindingLogTarget::Error(..) | FindingLogTarget::Finding(_, "blocking")
+            )
+        })
+        .take(limit)
+        .map(index_line)
+        .collect()
+}
+
+/// One Issue Index line, without the detail pointer the Finding Log appends.
+fn index_line(target: FindingLogTarget<'_>) -> String {
+    match target {
+        FindingLogTarget::Error(index, error) => format!(
             "E{:06} | scanner_error | {} | {}",
             index + 1,
             error.rule_id.as_deref().unwrap_or("scanner"),
             error_location(error.location.as_ref()),
-        )
-    });
-    let blocking = report
-        .findings
-        .iter()
-        .filter(|finding| finding.blocking)
-        .map(|finding| {
-            format!(
-                "{} | blocking | {} | {}:{}:{}",
-                finding.finding_id,
-                finding.rule_id,
-                finding.location.path,
-                finding.location.line,
-                finding.location.column,
-            )
-        });
-    errors.chain(blocking).take(limit).collect()
+        ),
+        FindingLogTarget::Finding(finding, status) => format!(
+            "{} | {} | {} | {}:{}:{}",
+            finding.finding_id,
+            status,
+            finding.rule_id,
+            finding.location.path,
+            finding.location.line,
+            finding.location.column,
+        ),
+    }
 }
 
 fn write_finding_log_header(report: &Report, output: &mut impl Write) -> io::Result<()> {
@@ -471,31 +480,11 @@ fn write_finding_log_index(
     let mut detail_line = targets.len() + 7;
     for target in targets {
         let detail_line_count = log_entry(report, *target).detail.len();
-        match target {
-            FindingLogTarget::Error(index, error) => {
-                writeln!(
-                    output,
-                    "E{:06} | scanner_error | {} | {} | detail line {}",
-                    index + 1,
-                    error.rule_id.as_deref().unwrap_or("scanner"),
-                    error_location(error.location.as_ref()),
-                    detail_line
-                )?;
-            }
-            FindingLogTarget::Finding(finding, status) => {
-                writeln!(
-                    output,
-                    "{} | {} | {} | {}:{}:{} | detail line {}",
-                    finding.finding_id,
-                    status,
-                    finding.rule_id,
-                    finding.location.path,
-                    finding.location.line,
-                    finding.location.column,
-                    detail_line
-                )?;
-            }
-        }
+        writeln!(
+            output,
+            "{} | detail line {detail_line}",
+            index_line(*target)
+        )?;
         detail_line += detail_line_count;
     }
     writeln!(output)?;

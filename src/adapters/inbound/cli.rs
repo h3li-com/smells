@@ -382,8 +382,35 @@ fn consume_show_option(
     Ok(())
 }
 
+/// Options that take the next argument as their value.
+const VALUE_OPTIONS: [&str; 12] = [
+    "--path",
+    "--policy",
+    "--base",
+    "--evidence",
+    "--coverage",
+    "--format",
+    "--report",
+    "--log",
+    "--group",
+    "--only-group",
+    "--no-group",
+    "--rule-pack",
+];
+
+/// Whether `--help` or `-h` is given as an option, not as an option's value: in
+/// `smells check --path -h`, `-h` is the path to scan.
+fn wants_help(args: &[String]) -> bool {
+    args.iter().enumerate().any(|(index, arg)| {
+        matches!(arg.as_str(), "--help" | "-h")
+            && !index
+                .checked_sub(1)
+                .is_some_and(|before| VALUE_OPTIONS.contains(&args[before].as_str()))
+    })
+}
+
 fn command(args: &[String]) -> Result<Command, CommandError> {
-    if args.is_empty() || args.iter().any(|arg| arg == "--help" || arg == "-h") {
+    if args.is_empty() || wants_help(args) {
         return Ok(Command::Help);
     }
     if args == ["--version"] {
@@ -977,9 +1004,31 @@ mod tests {
             vec!["check", "--help"],
             vec!["doctor", "-h"],
             vec!["policy", "show", "--help"],
+            vec!["check", "--path", "src", "-h"],
         ] {
             assert!(
                 matches!(command(&arguments(&args)), Ok(Command::Help)),
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn help_given_as_an_option_value_is_not_help() {
+        for args in [
+            vec!["check", "--path", "-h", "--policy", "quality-policy.json"],
+            vec![
+                "check",
+                "--base",
+                "--help",
+                "--policy",
+                "quality-policy.json",
+            ],
+            vec!["doctor", "--policy", "-h"],
+            vec!["rules", "--rule-pack", "--help"],
+        ] {
+            assert!(
+                !matches!(command(&arguments(&args)), Ok(Command::Help)),
                 "{args:?}"
             );
         }

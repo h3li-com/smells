@@ -1,9 +1,9 @@
 use super::{
-    common::{dunder, location_at, observation, primitive_type},
+    common::{location_at, observation, primitive_type},
     model::{ClassFact, SourceModel},
     syntax::{code_only, import_statements},
 };
-use crate::{core::model::Input, evidence::Observation, policy::Rule};
+use crate::{core::model::Input, evidence::Observation, names::dunder, policy::Rule};
 use regex::Regex;
 use serde_json::json;
 use std::{

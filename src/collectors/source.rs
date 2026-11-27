@@ -1,8 +1,10 @@
 use super::{
-    common::{dunder, location_at, observation, primitive_type, simple_names},
+    common::{location_at, observation, primitive_type, simple_names},
     model::SourceModel,
 };
-use crate::{core::model::Input, evidence::Observation, policy::Rule, report::Location};
+use crate::{
+    core::model::Input, evidence::Observation, names::dunder, policy::Rule, report::Location,
+};
 use regex::Regex;
 use serde_json::json;
 use std::{
@@ -30,7 +32,7 @@ fn member_access() -> &'static Regex {
 fn private_member_access() -> &'static Regex {
     static ACCESS: OnceLock<Regex> = OnceLock::new();
     ACCESS.get_or_init(|| {
-        Regex::new(r"\b([A-Za-z_][A-Za-z0-9_]*)\??\.((?:#|_)[A-Za-z_][A-Za-z0-9_]*)")
+        Regex::new(r"\b([A-Za-z_][A-Za-z0-9_]*)\??\.(_[A-Za-z_][A-Za-z0-9_]*)")
             .expect("valid built-in private-member expression")
     })
 }
@@ -620,14 +622,29 @@ fn enclosing_class_member(model: &SourceModel, path: &str, offset: usize, member
     else {
         return false;
     };
-    let receiver = Regex::new(&format!(
-        r"\b(?:self|this)\s*\.\s*{}\b",
-        regex::escape(member)
-    ))
-    .expect("escaped receiver member expression");
     class.fields.iter().any(|field| field.name == member)
         || class.methods.iter().any(|method| method.name == member)
-        || receiver.is_match(&class.source)
+        || receiver_member(&class.source, member)
+}
+
+/// Whether `source` uses `member` on `self` or `this`, as in `self._key`.
+fn receiver_member(source: &str, member: &str) -> bool {
+    let word = |character: char| character.is_alphanumeric() || character == '_';
+    source.match_indices(member).any(|(start, _)| {
+        let whole = !source[start + member.len()..].starts_with(word);
+        let receiver = source[..start]
+            .trim_end()
+            .strip_suffix('.')
+            .map(str::trim_end)
+            .is_some_and(|before| {
+                ["self", "this"].iter().any(|name| {
+                    before
+                        .strip_suffix(name)
+                        .is_some_and(|rest| !rest.ends_with(word))
+                })
+            });
+        whole && receiver
+    })
 }
 
 pub(super) fn dependency_contract(
@@ -649,7 +666,6 @@ pub(super) fn dependency_contract(
             .captures_iter(code)
             .filter(|capture| !matches!(&capture[1], "self" | "cls" | "this" | "Self" | "super"))
             .filter(|capture| !public_underscore_member(language, &capture[2]))
-            .filter(|capture| !capture[2].starts_with('#'))
             .filter(|capture| {
                 let start = capture.get(0).expect("private member match").start();
                 !enclosing_class_member(model, path, start, &capture[2])
@@ -1325,6 +1341,18 @@ mod tests {
             );
             assert_eq!(observations[0].location.line, line, "{rule_id}");
         }
+    }
+
+    #[test]
+    fn receiver_members_are_whole_names_on_self_or_this() {
+        assert!(receiver_member("return self._key", "_key"));
+        assert!(receiver_member("this . _key = 1", "_key"));
+        assert!(receiver_member("x = other._key + self._key", "_key"));
+        assert!(!receiver_member("return self._keys", "_key"));
+        assert!(!receiver_member("return myself._key", "_key"));
+        assert!(!receiver_member("return other._key", "_key"));
+        assert!(!receiver_member("return self_key", "_key"));
+        assert!(!receiver_member("_key = 1", "_key"));
     }
 
     #[test]

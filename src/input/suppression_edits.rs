@@ -7,8 +7,9 @@
 use crate::suppression_markers::SUPPRESSION_MARKERS;
 use std::{
     collections::{BTreeMap, BTreeSet},
+    io::{self, BufRead, BufReader},
     path::Path,
-    process::Command,
+    process::{Command, Stdio},
 };
 
 /// Rust attributes that only suppress lints.
@@ -46,16 +47,24 @@ pub(super) fn suppression_only_edits(
         args.push(commit);
     }
     args.extend(["--", "."]);
-    let output = Command::new("git")
+    let child = Command::new("git")
         .arg("--no-replace-objects")
         .args(&args)
         .env("GIT_NO_LAZY_FETCH", "1")
         .current_dir(root)
-        .output();
-    match output {
-        Ok(output) if output.status.success() => {
-            parse_patch_log(&String::from_utf8_lossy(&output.stdout), files)
-        }
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn();
+    let Ok(mut child) = child else {
+        return BTreeSet::new();
+    };
+    // Streamed, so memory holds one commit's patch rather than the whole window.
+    let found = child
+        .stdout
+        .take()
+        .map(|stdout| parse_patch_log(BufReader::new(stdout), files));
+    match (found, child.wait()) {
+        (Some(Ok(found)), Ok(status)) if status.success() => found,
         _ => BTreeSet::new(),
     }
 }
@@ -154,13 +163,18 @@ impl FileEdit {
     }
 }
 
-fn parse_patch_log(log: &str, files: &BTreeMap<String, String>) -> BTreeSet<(String, String)> {
+fn parse_patch_log(
+    log: impl BufRead,
+    files: &BTreeMap<String, String>,
+) -> io::Result<BTreeSet<(String, String)>> {
     let mut found = BTreeSet::new();
     let mut commit = String::new();
     let mut edits = Vec::new();
     let mut edit = FileEdit::default();
     let mut hunk = HunkLines::default();
-    for line in log.split('\n') {
+    for line in log.split(b'\n') {
+        let line = String::from_utf8_lossy(&line?).into_owned();
+        let line = line.as_str();
         if hunk.open() {
             hunk.read(line, &mut edit);
         } else if let Some(header) = line.strip_prefix('\u{1e}') {
@@ -176,7 +190,7 @@ fn parse_patch_log(log: &str, files: &BTreeMap<String, String>) -> BTreeSet<(Str
     }
     edits.push(edit);
     found.extend(unchanged_files(&commit, &edits, files));
-    found
+    Ok(found)
 }
 
 /// The `(commit, path)` pairs of one commit whose edit leaves the code as it
@@ -387,7 +401,10 @@ mod tests {
 \u{1e}three\n\ndiff --git a/a.ts b/a.ts\n@@ -1,2 +0,0 @@\n-x = 1;\n-y = 2;\n\
 diff --git a/b.ts b/b.ts\n@@ -9,0 +10,2 @@\n+x = 1;\n+y = 2;\n";
         assert_eq!(
-            parse_patch_log(log, &files).into_iter().collect::<Vec<_>>(),
+            parse_patch_log(log.as_bytes(), &files)
+                .expect("an in-memory log reads")
+                .into_iter()
+                .collect::<Vec<_>>(),
             vec![("two".to_string(), "b.ts".to_string())]
         );
     }
@@ -411,7 +428,7 @@ diff --git a/a.ts b/a.ts\nnew file mode 100644\n@@ -0,0 +1,2 @@\n+x = 1;\n+y = 2
 diff --git a/c.ts b/c.ts\nnew file mode 100644\n@@ -0,0 +1 @@\n+x = 1;\n\
 \u{1e}four\n\ndiff --git a/b.ts b/b.ts\n@@ -3 +3 @@\n-export const version = '1.0';\n+export const version = '1.1';\n\
 diff --git a/c.ts b/c.ts\n@@ -1 +1 @@\n-x = 1;\n+x = 2;\n";
-        let found = parse_patch_log(log, &files);
+        let found = parse_patch_log(log.as_bytes(), &files).expect("an in-memory log reads");
         assert_eq!(
             found.into_iter().collect::<Vec<_>>(),
             vec![

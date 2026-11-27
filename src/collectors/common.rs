@@ -53,12 +53,6 @@ pub(super) fn location_at(path: &str, source: &str, offset: usize) -> Location {
     }
 }
 
-/// Whether a name is a dunder such as `__init__` or `__html__`: wrapped in double
-/// underscores around a non-empty name.
-pub(super) fn dunder(name: &str) -> bool {
-    name.len() > 4 && name.starts_with("__") && name.ends_with("__")
-}
-
 pub(super) fn simple_names(value: &str) -> Vec<String> {
     static NAME: OnceLock<Regex> = OnceLock::new();
     let name = NAME.get_or_init(|| Regex::new(r"[A-Za-z_][A-Za-z0-9_]*").expect("valid name"));

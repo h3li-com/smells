@@ -14,12 +14,15 @@ All notable changes to Smells are recorded here. Release tags use `vMAJOR.MINOR.
   which ask for errors to be fixed before suggesting a check and, in a monorepo
   with no root manifest, name each subproject to run doctor on. Doctor finds
   `AGENTS.md` and `CLAUDE.md` in the nearest folder up to the Git root, and reads
-  CODEOWNERS at the Git root against the repository-relative policy path. Its
+  CODEOWNERS at the Git root against the repository-relative policy path, and
+  warns when the policy lies outside the repository. The commands it prints
+  quote paths that contain spaces or shell characters, and its `smells check`
+  step passes `--policy` when the policy is not `quality-policy.json`. Its
   matched-smell count equals the rows its smell table shows. Its health score
   counts findings per scanned file, so codebases of different sizes compare
   fairly, and its JSON `status` is `checks_passed` or `checks_failed`. `smells
   check --staged` reads the default policy from the index. `--help` works after
-  any command.
+  any command, except as the value of an option such as `--path -h`.
 
 - Scan every Rust configuration variant instead of exiting `2` on conditional
   alternatives. Same-named `cfg` modules, `#[cfg_attr(…, path = "…")]` children
@@ -247,8 +250,9 @@ All notable changes to Smells are recorded here. Release tags use `vMAJOR.MINOR.
   findings were false positives; all 26 are fixed:
   - The history rules do not count a file whose only change is a move with
     unchanged content, or whose only edit replaces string literals assigned to
-    `version`, `VERSION` or `__version__`. Commit subjects naming type hints,
-    type annotations, Python support or Python versions are sweeps.
+    `version`, `VERSION` or `__version__`. Commit subjects that add, fix, drop
+    or update type hints, type annotations, Python support or Python versions
+    are sweeps; a subject that only mentions them, such as a bug fix, is not.
   - TypeScript class properties holding an arrow function or function
     expression are methods, not fields. Overload signatures and their
     implementation count as one method. `comment_share` excludes directive

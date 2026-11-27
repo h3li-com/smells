@@ -14,6 +14,7 @@ mod evidence_evaluators;
 mod input;
 mod metrics;
 mod migration;
+mod names;
 mod patterns;
 mod policy;
 mod portable;

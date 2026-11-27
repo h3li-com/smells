@@ -615,8 +615,7 @@ fn update_python_field(
         None
     };
     // A dunder class attribute such as `__slots__` declares protocol, not state.
-    let dunder = |name: &str| name.len() > 4 && name.starts_with("__") && name.ends_with("__");
-    if let Some(name) = name.filter(|name| !name.is_empty() && !dunder(name)) {
+    if let Some(name) = name.filter(|name| !name.is_empty() && !crate::names::dunder(name)) {
         classes[target.class_index].fields.insert(name);
     }
 }

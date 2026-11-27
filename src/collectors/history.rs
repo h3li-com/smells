@@ -124,12 +124,36 @@ const SWEEP_WORDS: &[&str] = &[
 /// Leading words of version-bump and formatting commits.
 const SWEEP_LEADS: &[&str] = &["bump", "format", "reformat"];
 /// Phrases that name a type-annotation sweep or a supported-Python-version
-/// change, the Python counterpart of an MSRV sweep.
-const SWEEP_PHRASES: &[&str] = &[
-    "type hint",
-    "type annotation",
-    "support for python",
-    "python version",
+/// change, the Python counterpart of an MSRV sweep, as whole words.
+const SWEEP_PHRASES: &[&[&str]] = &[
+    &["type", "hint"],
+    &["type", "annotation"],
+    &["support", "for", "python"],
+    &["python", "version"],
+];
+/// Verbs that make a sweep phrase the object of the commit, as in "add type hints".
+const PHRASE_LEADS: &[&str] = &[
+    "add", "correct", "drop", "fix", "improve", "remove", "update",
+];
+/// Words allowed between a phrase lead and its phrase, as in "drop end of life
+/// python versions".
+const PHRASE_FILLERS: &[&str] = &[
+    "all",
+    "broken",
+    "deprecated",
+    "end",
+    "eol",
+    "incorrect",
+    "life",
+    "missing",
+    "more",
+    "of",
+    "old",
+    "outdated",
+    "some",
+    "the",
+    "unsupported",
+    "wrong",
 ];
 
 /// Whether a commit subject names a mechanical sweep: a no-production-change
@@ -147,7 +171,29 @@ fn mechanical_subject(subject: &str) -> bool {
     words.first().is_some_and(|lead| SWEEP_LEADS.contains(lead))
         || conventional_type(&subject).is_some_and(|kind| SWEEP_TYPES.contains(&kind))
         || words.iter().any(|word| SWEEP_WORDS.contains(word))
-        || SWEEP_PHRASES.iter().any(|phrase| subject.contains(phrase))
+        || sweep_phrase(&words)
+}
+
+/// Whether `words` hold a sweep phrase, each word singular or plural, that a
+/// phrase lead opens: "add missing type hints" is a sweep, while "fix crash when
+/// resolving type hints" and "show prototype hints" are not.
+fn sweep_phrase(words: &[&str]) -> bool {
+    SWEEP_PHRASES.iter().any(|phrase| {
+        words
+            .windows(phrase.len())
+            .enumerate()
+            .any(|(start, window)| {
+                window
+                    .iter()
+                    .zip(*phrase)
+                    .all(|(word, part)| word == part || word.strip_suffix('s') == Some(part))
+                    && words[..start]
+                        .iter()
+                        .rev()
+                        .find(|word| !PHRASE_FILLERS.contains(word))
+                        .is_some_and(|lead| PHRASE_LEADS.contains(lead))
+            })
+    })
 }
 
 /// The type of a conventional-commit subject such as `chore(deps)!: ...`.
@@ -598,6 +644,7 @@ mod tests {
             "Fix type annotation for `before_request`",
             "drop support for Python 3.8",
             "drop end of life python versions",
+            "fix: add type hints",
         ] {
             assert!(mechanical_subject(subject), "{subject} is a sweep");
         }
@@ -608,6 +655,10 @@ mod tests {
             "Support custom date format",
             "taskdump: restore deferred leaf wakes during capture (#8445)",
             "Accept `AsyncIterable` for responses",
+            "Show prototype hints in tooltip",
+            "Fix crash when resolving type hints with forward refs",
+            "Infer type annotations for decorators",
+            "type hints",
             "",
         ] {
             assert!(!mechanical_subject(subject), "{subject} is a change");
