@@ -111,6 +111,8 @@ repos:
 
 Node projects can use `npx --no-install smells check ...`. Rust projects can call `smells check ...` directly.
 
+A commit that adds a new `smells: ignore` is always blocked (`blocked_by_suppression_growth`), so a person reviews every ignore. After reviewing it, commit with `git commit --no-verify`.
+
 **CI:** copy a ready-made template from [`examples/ci/`](examples/ci/) ([GitHub Actions](examples/ci/github-actions-smells.yml), [Azure Pipelines](examples/ci/azure-pipelines-smells.yml)). Check out the full Git history (`fetch-depth: 0`): some rules read history, and a shallow clone exits `2` rather than passing. See [CI setup](docs/project-integration.md#ci-gate-templates).
 
 ---
