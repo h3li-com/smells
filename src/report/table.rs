@@ -412,6 +412,34 @@ pub(super) fn ratchet_summary_note(
     )
 }
 
+/// The first `limit` errors and blocking findings as Issue Index lines without the
+/// detail pointer, so a short terminal summary names what to fix first.
+pub(super) fn top_issues(report: &Report, limit: usize) -> Vec<String> {
+    let errors = report.errors.iter().enumerate().map(|(index, error)| {
+        format!(
+            "E{:06} | scanner_error | {} | {}",
+            index + 1,
+            error.rule_id.as_deref().unwrap_or("scanner"),
+            error_location(error.location.as_ref()),
+        )
+    });
+    let blocking = report
+        .findings
+        .iter()
+        .filter(|finding| finding.blocking)
+        .map(|finding| {
+            format!(
+                "{} | blocking | {} | {}:{}:{}",
+                finding.finding_id,
+                finding.rule_id,
+                finding.location.path,
+                finding.location.line,
+                finding.location.column,
+            )
+        });
+    errors.chain(blocking).take(limit).collect()
+}
+
 fn write_finding_log_header(report: &Report, output: &mut impl Write) -> io::Result<()> {
     writeln!(output, "Smells Finding Log")?;
     let ratchet_note = ratchet_summary_note(report.ratchet.as_ref());

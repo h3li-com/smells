@@ -153,13 +153,21 @@ impl CrapView {
     }
 }
 
+/// Scores findings per scanned file, so codebases of different sizes compare fairly:
+/// every blocking finding per 100 files costs a point (at least one, at most 75), and
+/// every review signal per 20 files costs a point (at most 25). A codebase under 10
+/// files counts as 10, so one finding in a tiny project does not read as critical.
 pub(crate) fn health_score(
     scanned_files: usize,
     blocking_findings: usize,
     review_signals: usize,
 ) -> u8 {
-    let blocking_penalty = blocking_findings.saturating_mul(10).min(75);
-    let review_penalty = (review_signals / scanned_files.max(1)).min(25);
+    let files = scanned_files.max(10);
+    let blocking_penalty = blocking_findings
+        .saturating_mul(100)
+        .div_ceil(files)
+        .min(75);
+    let review_penalty = (review_signals.saturating_mul(5) / files).min(25);
     100u8.saturating_sub(u8::try_from(blocking_penalty + review_penalty).unwrap_or(u8::MAX))
 }
 
@@ -1089,7 +1097,7 @@ pub(crate) fn to_json(report: &DoctorReport) -> Value {
         })
     });
     json!({
-        "status": if exit_code(&report.checks) == 0 { "healthy" } else { "unhealthy" },
+        "status": if exit_code(&report.checks) == 0 { "checks_passed" } else { "checks_failed" },
         "exit_code": exit_code(&report.checks),
         "checks": report
             .checks
@@ -1583,7 +1591,7 @@ mod tests {
         assert_eq!(
             to_json(&warned),
             json!({
-                "status": "healthy",
+                "status": "checks_passed",
                 "exit_code": 0,
                 "checks": [
                     {"id": "a", "status": "ok", "detail": "fine"},
@@ -1611,7 +1619,7 @@ mod tests {
             next_steps: Vec::new(),
         };
         assert_eq!(exit_code(&failed.checks), 2);
-        assert_eq!(to_json(&failed)["status"], "unhealthy");
+        assert_eq!(to_json(&failed)["status"], "checks_failed");
         assert_eq!(to_json(&failed)["checks"][0]["status"], "error");
         assert!(to_table(&failed, true).contains("\x1b[31m✗\x1b[0m"));
     }
@@ -1620,16 +1628,23 @@ mod tests {
     fn health_score_and_grade_cover_every_band_and_cap() {
         assert_eq!(health_score(0, 0, 0), 100);
         assert_eq!(health_grade(100), "Great");
-        assert_eq!(health_score(10, 0, 20), 98);
-        assert_eq!(health_score(1, 0, 30), 75);
+        assert_eq!(health_score(10, 0, 20), 90);
+        assert_eq!(health_score(1, 0, 30), 85);
+        assert_eq!(health_score(1, 1, 0), 90);
+        assert_eq!(health_score(10, 0, 50), 75);
         assert_eq!(health_grade(75), "Great");
-        assert_eq!(health_score(1, 2, 6), 74);
+        // One blocking finding always costs a point, however large the codebase.
+        assert_eq!(health_score(1000, 1, 0), 99);
+        // The same density scores the same at any size.
+        assert_eq!(health_score(1000, 100, 0), 90);
+        assert_eq!(health_score(100, 10, 0), 90);
+        assert_eq!(health_score(100, 26, 0), 74);
         assert_eq!(health_grade(74), "Needs work");
-        assert_eq!(health_score(1, 5, 0), 50);
+        assert_eq!(health_score(100, 50, 0), 50);
         assert_eq!(health_grade(50), "Needs work");
-        assert_eq!(health_score(1, 5, 1), 49);
+        assert_eq!(health_score(100, 50, 20), 49);
         assert_eq!(health_grade(49), "Critical");
-        assert_eq!(health_score(1, 10, 40), 0);
+        assert_eq!(health_score(1, 10, 60), 0);
         assert_eq!(health_grade(0), "Critical");
         assert_eq!(score_color(75), "32");
         assert_eq!(score_color(50), "33");

@@ -1338,6 +1338,11 @@ pub(crate) fn write_finding_log(
     table::write_finding_log(report, output)
 }
 
+/// The first `limit` errors and blocking findings, formatted as Issue Index lines.
+pub(crate) fn top_issues(report: &Report, limit: usize) -> Vec<String> {
+    table::top_issues(report, limit)
+}
+
 pub(crate) fn ratchet_summary_note(report: &Report) -> String {
     table::ratchet_summary_note(report.ratchet.as_ref())
 }

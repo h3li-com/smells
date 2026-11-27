@@ -1577,6 +1577,7 @@ fn hook_mode_saves_one_indexed_finding_log_and_keeps_stdout_compact() {
     assert!(stdout.contains("Finding Log: smells-findings.log"));
     assert!(stdout.contains("Start at the Issue Index"));
     assert!(!stdout.contains("Actionable finding"));
+    assert!(!stdout.contains("more in the Finding Log"), "{stdout}");
 
     let log = fs::read_to_string(workspace.path.join("smells-findings.log")).unwrap();
     let lines: Vec<_> = log.lines().collect();
@@ -2120,6 +2121,33 @@ fn identical_pinned_inputs_produce_identical_reports() {
     let second = Workspace::new(include_str!("fixtures/catalog/lib.rs"));
     assert_eq!(first.check().stdout, first.check().stdout);
     assert_eq!(first.check().stdout, second.check().stdout);
+}
+
+#[test]
+fn default_check_summary_names_the_first_blocking_findings() {
+    let long = |name: &str| {
+        format!("pub fn {name}(a:u8,b:u8,c:u8,d:u8,e:u8,f:u8,g:u8,h:u8)->u8{{a+b+c+d+e+f+g+h}}\n")
+    };
+    let workspace = Workspace::new(&["one", "two", "three", "four"].map(long).concat());
+    let output = workspace.command(&["check", "--only-group", "source"]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let named = stdout
+        .lines()
+        .filter(|line| {
+            line.starts_with("  F")
+                && line.contains(" | blocking | rust.function_arguments | src/lib.rs:")
+        })
+        .count();
+    assert_eq!(named, 3, "{stdout}");
+    assert!(
+        stdout.contains("  +1 more in the Finding Log\n"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("Finding Log: smells-findings.log"),
+        "{stdout}"
+    );
 }
 
 #[test]
@@ -3757,7 +3785,7 @@ fn doctor_reports_governance_gaps_as_warnings_on_a_complete_repository() {
     git_stage_and_commit(&workspace.path, "initial");
     let (code, data) = doctor(&workspace, &[]);
     assert_eq!(code, Some(0), "{data}");
-    assert_eq!(data["status"], "healthy");
+    assert_eq!(data["status"], "checks_passed");
     assert_eq!(data["next_steps"], json!(["smells check"]), "{data}");
     assert_eq!(doctor_check(&data, "policy")["status"], "ok");
     assert_eq!(doctor_check(&data, "git_history")["status"], "ok");
@@ -3797,7 +3825,7 @@ fn doctor_fails_closed_on_missing_history_invalid_policy_and_bad_arguments() {
     let workspace = Workspace::new("pub fn value() -> u8 { 1 }\n");
     let (code, data) = doctor(&workspace, &[]);
     assert_eq!(code, Some(2));
-    assert_eq!(data["status"], "unhealthy");
+    assert_eq!(data["status"], "checks_failed");
     assert_eq!(data["next_steps"], json!([]), "{data}");
     assert_eq!(doctor_check(&data, "git_history")["status"], "error");
 
@@ -3903,7 +3931,7 @@ fn doctor_reports_compact_smell_diagnostics_and_fails_closed_on_scan_errors() {
 
     let (code, data) = doctor(&workspace, &[]);
     assert_eq!(code, Some(0), "{data}");
-    assert_eq!(data["status"], "healthy");
+    assert_eq!(data["status"], "checks_passed");
     assert_eq!(data["diagnostics"]["scanned_files"], 1);
     assert_eq!(data["diagnostics"]["blocking_findings"], 1);
     assert!(data["diagnostics"]["review_signals"].as_u64().unwrap() >= 1);
@@ -3990,7 +4018,7 @@ fn doctor_reports_compact_smell_diagnostics_and_fails_closed_on_scan_errors() {
     workspace.source("src/lib.rs", "pub fn broken( {\n");
     let (code, data) = doctor(&workspace, &[]);
     assert_eq!(code, Some(2), "{data}");
-    assert_eq!(data["status"], "unhealthy");
+    assert_eq!(data["status"], "checks_failed");
     assert_eq!(doctor_check(&data, "scan")["status"], "error");
     assert_eq!(data["diagnostics"]["grade"], "Incomplete", "{data}");
     let steps = data["next_steps"].as_array().unwrap();

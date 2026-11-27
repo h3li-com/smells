@@ -176,6 +176,9 @@ const DEFAULT_POLICY: &str = "quality-policy.json";
 /// terminal gets a short summary instead of every finding.
 const DEFAULT_LOG: &str = "smells-findings.log";
 
+/// How many errors and blocking findings the short summary names before the log.
+const SUMMARY_ISSUES: usize = 3;
+
 /// Uses `--policy` when given, otherwise `quality-policy.json` in `root`; a missing
 /// default is an error so an unconfigured repository never scans with no policy.
 fn policy_or_default(explicit: Option<PathBuf>, root: &Path) -> Result<PathBuf, String> {
@@ -656,6 +659,15 @@ fn print_hook_summary(
         report.summary.error_count,
         report::ratchet_summary_note(report),
     );
+    let issues = report::top_issues(report, SUMMARY_ISSUES);
+    for issue in &issues {
+        println!("  {issue}");
+    }
+    let hidden = (report.summary.blocking_findings + report.summary.error_count)
+        .saturating_sub(issues.len());
+    if hidden > 0 {
+        println!("  +{hidden} more in the Finding Log");
+    }
     println!("Finding Log: {}", log_path.display());
     println!("Start at the Issue Index, then read every referenced detail.");
     if let Some(path) = report_path {
