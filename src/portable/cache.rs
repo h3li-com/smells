@@ -91,7 +91,7 @@ fn fact_cache_key(path: &str, source: &str, registry: &Registry, needs: RuleNeed
             b"portable-facts-v1",
             include_bytes!("../portable.rs"),
             include_bytes!("extract.rs"),
-            include_bytes!("../input/suppression_edits.rs"),
+            include_bytes!("../suppression_markers.rs"),
             include_bytes!("../typescript_compat.rs"),
             include_bytes!("../../Cargo.lock"),
         ])

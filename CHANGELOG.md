@@ -270,6 +270,25 @@ All notable changes to Smells are recorded here. Release tags use `vMAJOR.MINOR.
     an item under `#[allow(dead_code)]` as allowed. `rust.navigation_chains`
     treats `into_owned`, `to_str`, `to_string_lossy`, `as_path` and
     `to_path_buf` as transparent conversions.
+- Fix detector bugs found in code review, without changing any rule version,
+  threshold or policy mode:
+  - The history rules' suppression-only check counts unchanged context lines on
+    both sides of a hunk, so a change next to an added suppression still counts.
+    A reordered line is a change, and a move counts as move-only only when a
+    deleted file's lines reappear in a newly created file. Git's `a/` and `b/`
+    patch prefixes are forced, so `diff.noprefix` or `diff.mnemonicPrefix` in the
+    user's Git config cannot change the result.
+  - `python.library_capabilities` counts an assignment through an imported name,
+    such as `requests.Session.headers = ...`, even when an authored class has a
+    field of that name. Writes through a `@property` or `@cached_property`
+    reached from `self` or `cls` count, and `Class.method.attr = ...` is excluded
+    only when that class declares the method.
+  - `typescript.foreign_accesses` treats a closure parameter as owned only when
+    every use of the closure is a direct call. A closure called inside another
+    call, such as `if (visit(other.root))`, or passed as a callback, such as
+    `forEach(visit)`, binds nothing.
+  - A TypeScript property holding a generator function is a method only, not a
+    field as well.
 - Resolve `mod` declarations in Cargo target roots other than `lib.rs` and
   `main.rs` (files directly in `tests/`, `examples/` and `benches/`,
   `src/bin/*.rs` and `build.rs`) next to the root file. Before, the scan exited

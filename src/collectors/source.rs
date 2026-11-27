@@ -7,6 +7,7 @@ use regex::Regex;
 use serde_json::json;
 use std::{
     collections::{BTreeMap, BTreeSet},
+    ops::Range,
     sync::OnceLock,
 };
 
@@ -310,19 +311,45 @@ fn local_closure() -> &'static Regex {
     })
 }
 
-/// A call whose first argument starts at a name, such as `removeFromMap(this.listeners)`.
-fn named_call() -> &'static Regex {
+/// The opening of a call whose first argument starts at a name, such as
+/// `(this.listeners)` after `removeFromMap`.
+fn call_argument() -> &'static Regex {
     static CALL: OnceLock<Regex> = OnceLock::new();
     CALL.get_or_init(|| {
-        Regex::new(r"([A-Za-z_$][A-Za-z0-9_$]*)\s*\(\s*([A-Za-z_$][A-Za-z0-9_$]*)\b")
-            .expect("valid built-in named-call expression")
+        Regex::new(r"^\s*\(\s*([A-Za-z_$][A-Za-z0-9_$]*)\b")
+            .expect("valid built-in call-argument expression")
     })
 }
 
+/// The root each use of closure `name` outside its declaration passes as its first
+/// argument, or `None` when any use is not such a call, as in `items.forEach(visit)`.
+fn closure_call_roots<'body>(
+    body: &'body str,
+    name: &str,
+    declaration: Range<usize>,
+) -> Option<Vec<&'body str>> {
+    let identifier = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '$';
+    body.match_indices(name)
+        .map(|(start, _)| start)
+        .filter(|start| {
+            let (before, after) = (&body[..*start], &body[start + name.len()..]);
+            !declaration.contains(start)
+                && !before.ends_with(identifier)
+                && !after.starts_with(identifier)
+                && !before.trim_end().ends_with('.')
+        })
+        .map(|start| {
+            call_argument()
+                .captures(&body[start + name.len()..])
+                .map(|call| call.get(1).expect("call argument group").as_str())
+        })
+        .collect()
+}
+
 /// The first parameter of a local closure, bound to the root its calls pass in, when
-/// every call in the body passes an argument from the same root, as in
-/// `removeFromMap(this.a); removeFromMap(this.b)`. A closure that is never called, or
-/// called with arguments from different roots, binds nothing.
+/// every use in the body is a call passing an argument from the same root, as in
+/// `removeFromMap(this.a); removeFromMap(this.b)`. A closure that is never called,
+/// called with arguments from different roots, or passed on as a value binds nothing.
 fn closure_parameter_bindings(body: &str) -> Vec<(usize, &str, Vec<&str>)> {
     local_closure()
         .captures_iter(body)
@@ -330,18 +357,11 @@ fn closure_parameter_bindings(body: &str) -> Vec<(usize, &str, Vec<&str>)> {
             let whole = capture.get(0).expect("closure match");
             let name = capture.get(1).or_else(|| capture.get(2))?.as_str();
             let parameter = capture.get(3).expect("closure parameter group").as_str();
-            let mut roots = named_call()
-                .captures_iter(body)
-                .filter(|call| call.get(1).is_some_and(|callee| callee.as_str() == name))
-                .filter(|call| {
-                    let start = call.get(0).expect("call match").start();
-                    !(whole.start()..whole.end()).contains(&start)
-                        && !body[..start].trim_end().ends_with('.')
-                })
-                .map(|call| call.get(2).expect("call argument group").as_str());
-            let root = roots.next()?;
-            roots
-                .all(|other| other == root)
+            let roots = closure_call_roots(body, name, whole.range())?;
+            let (&root, others) = roots.split_first()?;
+            others
+                .iter()
+                .all(|other| *other == root)
                 .then(|| (whole.start(), root, vec![parameter]))
         })
         .collect()
@@ -1197,6 +1217,15 @@ mod tests {
             "    function visit(node: Node) { node.a(); node.b() }\n",
             "    visit(other.root)\n",
             "    const unused = (x: X) => x.run()\n",
+            "    const walk = (n: Node) => { n.a(); n.b() }\n",
+            "    walk(this.root)\n",
+            "    if (walk(other.root)) {}\n",
+            "    const each = (n: Node) => { n.a(); n.b() }\n",
+            "    each(this.root)\n",
+            "    this.items.forEach(each)\n",
+            "    const keep = (k: Node) => { k.a(); k.b() }\n",
+            "    keep(this.root)\n",
+            "    const my_keep = 1, $keep = 2\n",
             "  }\n",
             "}\n",
         );
@@ -1207,7 +1236,7 @@ mod tests {
                 "sample.ts",
                 source
             ),
-            [("sample.ts::HMRContext.off".into(), 8, 14)]
+            [("sample.ts::HMRContext.off".into(), 13, 25)]
         );
     }
 

@@ -10,7 +10,7 @@ use std::{
     process::Command,
 };
 
-pub(crate) mod suppression_edits;
+mod suppression_edits;
 
 use suppression_edits::suppression_only_edits;
 
@@ -807,7 +807,12 @@ fn validate_staged_policy_path(policy_path: &Path) -> Result<&str, String> {
 
 pub(crate) fn repository_root() -> Result<PathBuf, String> {
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-    let root_text = text(git(&cwd, &["rev-parse", "--show-toplevel"])?, "Git root")?;
+    repository_root_of(&cwd)
+}
+
+/// The top folder of the Git worktree that holds `folder`, as Git reports it.
+pub(crate) fn repository_root_of(folder: &Path) -> Result<PathBuf, String> {
+    let root_text = text(git(folder, &["rev-parse", "--show-toplevel"])?, "Git root")?;
     Ok(PathBuf::from(
         root_text.strip_suffix('\n').unwrap_or(&root_text),
     ))

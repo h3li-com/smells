@@ -643,10 +643,12 @@ fn update_typescript_field(
         && let Ok(name) = name.utf8_text(source.as_bytes())
     {
         // A property holding a function is a method, counted when the function ends.
-        if !node
-            .child_by_field_name("value")
-            .is_some_and(|value| matches!(value.kind(), "arrow_function" | "function_expression"))
-        {
+        if !node.child_by_field_name("value").is_some_and(|value| {
+            matches!(
+                value.kind(),
+                "arrow_function" | "function_expression" | "generator_function"
+            )
+        }) {
             classes[class_index].fields.insert(name.to_string());
         }
     }
@@ -666,7 +668,7 @@ fn update_typescript_field(
 fn ordinary_comment(node: Node<'_>, source: &str, language: &str) -> bool {
     let text = node.utf8_text(source.as_bytes()).unwrap_or_default();
     let documentation = language == "python" && text.starts_with("#:");
-    !documentation && !crate::input::suppression_edits::directive_comment(text)
+    !documentation && !crate::suppression_markers::directive_comment(text)
 }
 
 fn update_metrics(node: Node<'_>, source: &str, language: &str, functions: &mut [ActiveFunction]) {
@@ -1528,14 +1530,15 @@ mod tests {
             "  options: object = {};\n",
             "  createApp = (base: string) => base;\n",
             "  createHandler = function (value: number) { return value; };\n",
+            "  createIds = function* () { yield 1; };\n",
             "}\n",
         );
         let (facts, _) = facts("typescript-v1", "factory.ts", source);
 
         assert_eq!(facts.classes[0].fields, 2);
-        assert_eq!(facts.classes[0].operations, 2);
-        assert_eq!(facts.classes[0].methods, 2);
-        assert_eq!(facts.classes[0].method_lines, 2);
+        assert_eq!(facts.classes[0].operations, 3);
+        assert_eq!(facts.classes[0].methods, 3);
+        assert_eq!(facts.classes[0].method_lines, 3);
     }
 
     #[test]

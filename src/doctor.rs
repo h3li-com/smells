@@ -505,14 +505,18 @@ fn append_governance_checks(root: &Path, owned_policy_target: &str, checks: &mut
 /// or only `root` outside a repository.
 fn repository_folders(root: &Path) -> Vec<PathBuf> {
     let start = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-    let mut folders = Vec::new();
-    for folder in start.ancestors() {
-        folders.push(folder.to_path_buf());
-        if folder.join(".git").exists() {
-            return folders;
-        }
-    }
-    vec![start]
+    let Some(top) = crate::input::repository_root_of(&start)
+        .ok()
+        .and_then(|top| fs::canonicalize(top).ok())
+        .filter(|top| start.starts_with(top))
+    else {
+        return vec![start];
+    };
+    start
+        .ancestors()
+        .take_while(|folder| folder.starts_with(&top))
+        .map(Path::to_path_buf)
+        .collect()
 }
 
 #[derive(Clone, Copy)]
@@ -2129,8 +2133,13 @@ mod tests {
         let _ = fs::remove_dir_all(&base_dir);
         let repository = base_dir.join("repo");
         let backend = repository.join("backend");
-        fs::create_dir_all(repository.join(".git")).unwrap();
         fs::create_dir_all(backend.join("src")).unwrap();
+        let init = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&repository)
+            .status()
+            .unwrap();
+        assert!(init.success());
         fs::write(base_dir.join("CLAUDE.md"), "outside the repository\n").unwrap();
         fs::write(repository.join("AGENTS.md"), "# Rules\n").unwrap();
         fs::write(

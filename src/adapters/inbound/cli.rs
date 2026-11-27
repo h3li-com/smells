@@ -1,5 +1,5 @@
 use std::{
-    fs,
+    fmt, fs,
     io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
 };
@@ -22,6 +22,47 @@ enum Command {
     Show(ShowOptions),
     Check(CheckOptions),
     Doctor(DoctorOptions),
+}
+
+/// Why the arguments do not make a command. A missing default policy stays
+/// separate so the hint about adding one is worked out when the command runs,
+/// not while the arguments are read.
+#[derive(Debug)]
+enum CommandError {
+    Invalid(String),
+    /// No `--policy` was given and the scan root, held here, has no default policy.
+    MissingPolicy(PathBuf),
+}
+
+impl From<String> for CommandError {
+    fn from(message: String) -> Self {
+        Self::Invalid(message)
+    }
+}
+
+impl fmt::Display for CommandError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Invalid(message) => formatter.write_str(message),
+            Self::MissingPolicy(root) => write!(
+                formatter,
+                "no --policy given and {} not found",
+                root.join(DEFAULT_POLICY).display()
+            ),
+        }
+    }
+}
+
+impl CommandError {
+    /// The message for the user, with how to add a policy when one is missing.
+    fn into_message(self) -> String {
+        match &self {
+            Self::Invalid(_) => self.to_string(),
+            Self::MissingPolicy(root) => {
+                format!("{self}; {}", doctor::missing_policy_hint(root))
+            }
+        }
+    }
 }
 
 struct DoctorOptions {
@@ -133,7 +174,7 @@ fn set_once<T>(slot: &mut Option<T>, value: T, allowed: bool, flag: &str) -> Res
     Ok(())
 }
 
-fn operation_command(args: &[String], contracts: bool) -> Result<Command, String> {
+fn operation_command(args: &[String], contracts: bool) -> Result<Command, CommandError> {
     let mut index = if contracts { 2 } else { 1 };
     let mut options = PendingOptions::default();
     for _ in 0..args.len() {
@@ -181,7 +222,7 @@ const SUMMARY_ISSUES: usize = 3;
 
 /// Uses `--policy` when given, otherwise `quality-policy.json` in `root`; a missing
 /// default is an error so an unconfigured repository never scans with no policy.
-fn policy_or_default(explicit: Option<PathBuf>, root: &Path) -> Result<PathBuf, String> {
+fn policy_or_default(explicit: Option<PathBuf>, root: &Path) -> Result<PathBuf, CommandError> {
     if let Some(path) = explicit {
         return Ok(path);
     }
@@ -189,11 +230,7 @@ fn policy_or_default(explicit: Option<PathBuf>, root: &Path) -> Result<PathBuf, 
     if path.is_file() {
         return Ok(path);
     }
-    Err(format!(
-        "no --policy given and {} not found; {}",
-        path.display(),
-        doctor::missing_policy_hint(root)
-    ))
+    Err(CommandError::MissingPolicy(root.to_path_buf()))
 }
 
 /// Validates the source flags and returns the scan root, `.` unless `--path` or `--staged` is given.
@@ -210,7 +247,7 @@ fn check_source(options: &PendingOptions) -> Result<Option<PathBuf>, String> {
     })
 }
 
-fn finish_operation(options: PendingOptions, contracts: bool) -> Result<Command, String> {
+fn finish_operation(options: PendingOptions, contracts: bool) -> Result<Command, CommandError> {
     if contracts {
         return policy_or_default(options.policy_path, Path::new(".")).map(Command::Validate);
     }
@@ -298,7 +335,7 @@ fn boolean_selection_flag(
     Ok(false)
 }
 
-fn show_command(args: &[String]) -> Result<Command, String> {
+fn show_command(args: &[String]) -> Result<Command, CommandError> {
     let mut index = 2;
     let mut policy_path = None;
     let mut format = None;
@@ -345,7 +382,7 @@ fn consume_show_option(
     Ok(())
 }
 
-fn command(args: &[String]) -> Result<Command, String> {
+fn command(args: &[String]) -> Result<Command, CommandError> {
     if args.is_empty() || args.iter().any(|arg| arg == "--help" || arg == "-h") {
         return Ok(Command::Help);
     }
@@ -353,17 +390,17 @@ fn command(args: &[String]) -> Result<Command, String> {
         return Ok(Command::Version);
     }
     if args[0] == "rules" {
-        return rules_command(args);
+        return rules_command(args).map_err(CommandError::from);
     }
     if args.starts_with(&["policy".into(), "show".into()]) {
         return show_command(args);
     }
     if args[0] == "doctor" {
-        return doctor_command(args);
+        return doctor_command(args).map_err(CommandError::from);
     }
     let contracts = args.starts_with(&["contracts".into(), "validate".into()]);
     if !contracts && args[0] != "check" {
-        return Err("unknown command; use --help".into());
+        return Err(CommandError::Invalid("unknown command; use --help".into()));
     }
     operation_command(args, contracts)
 }
@@ -735,7 +772,7 @@ fn write_finding_log(report: &report::Report, path: &std::path::Path) -> Result<
 }
 
 pub(crate) fn run(args: &[String], scanner: &dyn Scanner) -> Result<u8, String> {
-    match command(args)? {
+    match command(args).map_err(CommandError::into_message)? {
         Command::Help => {
             println!("{USAGE}");
             Ok(0)
@@ -810,7 +847,10 @@ mod tests {
         ])) else {
             panic!("contracts mode accepted --staged");
         };
-        assert_eq!(contracts, "unknown, repeated or invalid option: --staged");
+        assert_eq!(
+            contracts.to_string(),
+            "unknown, repeated or invalid option: --staged"
+        );
 
         let Err(repeated) = command(&arguments(&[
             "check",
@@ -821,7 +861,10 @@ mod tests {
         ])) else {
             panic!("check mode accepted repeated --staged");
         };
-        assert_eq!(repeated, "unknown, repeated or invalid option: --staged");
+        assert_eq!(
+            repeated.to_string(),
+            "unknown, repeated or invalid option: --staged"
+        );
     }
 
     #[test]
@@ -850,7 +893,10 @@ mod tests {
         ])) else {
             panic!("check mode accepted --base with --evidence");
         };
-        assert_eq!(conflict, "--evidence cannot be used with --base");
+        assert_eq!(
+            conflict.to_string(),
+            "--evidence cannot be used with --base"
+        );
 
         for invalid in [
             vec![
@@ -920,7 +966,7 @@ mod tests {
         ])) else {
             panic!("check accepted --staged with --path");
         };
-        assert_eq!(both, "--staged and --path cannot be combined");
+        assert_eq!(both.to_string(), "--staged and --path cannot be combined");
     }
 
     #[test]

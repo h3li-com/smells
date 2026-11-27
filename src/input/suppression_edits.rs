@@ -4,50 +4,12 @@
 //! Such a change silences a tool, marks a release or renames a file; it does
 //! not change what the file does, so history rules do not count it.
 
+use crate::suppression_markers::SUPPRESSION_MARKERS;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
     process::Command,
 };
-
-/// Comment markers that suppress a linter, formatter, type checker or coverage
-/// tool for the line or block they annotate.
-const SUPPRESSION_MARKERS: &[&str] = &[
-    "eslint-disable",
-    "eslint-enable",
-    "oxlint-disable",
-    "oxlint-enable",
-    "biome-ignore",
-    "prettier-ignore",
-    "@ts-expect-error",
-    "@ts-ignore",
-    "@ts-nocheck",
-    "istanbul ignore",
-    "c8 ignore",
-    "noqa",
-    "nosec",
-    "type: ignore",
-    "pyright: ignore",
-    "pylint: disable",
-    "pylint: enable",
-    "pragma: no cover",
-    "fmt: off",
-    "fmt: on",
-    "fmt: skip",
-];
-
-/// Whether a comment is a tool directive: after its opener it starts with a
-/// suppression marker, such as `// @ts-expect-error why` or `# type: ignore`.
-pub(crate) fn directive_comment(comment: &str) -> bool {
-    let text = comment
-        .trim_start()
-        .trim_start_matches(['/', '*', '#', '!'])
-        .trim_start()
-        .to_ascii_lowercase();
-    SUPPRESSION_MARKERS
-        .iter()
-        .any(|marker| text.starts_with(marker))
-}
 
 /// Rust attributes that only suppress lints.
 const SUPPRESSION_ATTRIBUTES: &[&str] = &["#[allow(", "#[expect(", "#![allow(", "#![expect("];
@@ -64,6 +26,8 @@ pub(super) fn suppression_only_edits(
     let mut args = vec![
         "-c",
         "core.quotepath=false",
+        "-c",
+        "diff.interHunkContext=0",
         "log",
         "--format=%x1e%H",
         "--patch",
@@ -72,6 +36,8 @@ pub(super) fn suppression_only_edits(
         "--no-ext-diff",
         "--no-textconv",
         "--no-color",
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
         "--relative",
         "-n",
         limit,
@@ -99,6 +65,8 @@ pub(super) fn suppression_only_edits(
 struct FileEdit {
     path: Option<String>,
     hunks: bool,
+    created: bool,
+    deleted: bool,
     removed: Vec<String>,
     added: Vec<String>,
 }
@@ -140,24 +108,61 @@ fn version_assignment(line: &str) -> bool {
 
 /// Parses `git log --patch --unified=0` output. Hunk line counts decide which
 /// lines are content, so changed lines that look like headers are read as
-/// content.
+/// content. Each side is counted separately: a context line uses one line of
+/// both.
+/// The lines of the current hunk still to read on the old and new side.
+#[derive(Default)]
+struct HunkLines {
+    old: usize,
+    new: usize,
+}
+
+impl HunkLines {
+    fn open(&self) -> bool {
+        self.old > 0 || self.new > 0
+    }
+
+    /// Records one hunk line in `edit`. A context line uses up both sides, and a
+    /// `\ No newline at end of file` marker uses up neither.
+    fn read(&mut self, line: &str, edit: &mut FileEdit) {
+        if let Some(added) = line.strip_prefix('+') {
+            self.new = self.new.saturating_sub(1);
+            edit.added.push(added.to_string());
+        } else if let Some(removed) = line.strip_prefix('-') {
+            self.old = self.old.saturating_sub(1);
+            edit.removed.push(removed.to_string());
+        } else if !line.starts_with('\\') {
+            self.old = self.old.saturating_sub(1);
+            self.new = self.new.saturating_sub(1);
+        }
+    }
+}
+
+impl FileEdit {
+    /// Records a file header line, returning the hunk a `@@` line opens.
+    fn read_header(&mut self, line: &str) -> Option<HunkLines> {
+        if line.starts_with("new file mode") {
+            self.created = true;
+        } else if line.starts_with("deleted file mode") {
+            self.deleted = true;
+        } else if let Some(range) = line.strip_prefix("@@ ") {
+            self.hunks = true;
+            let (old, new) = hunk_lines(range);
+            return Some(HunkLines { old, new });
+        }
+        None
+    }
+}
+
 fn parse_patch_log(log: &str, files: &BTreeMap<String, String>) -> BTreeSet<(String, String)> {
     let mut found = BTreeSet::new();
     let mut commit = String::new();
     let mut edits = Vec::new();
     let mut edit = FileEdit::default();
-    let mut remaining = 0_usize;
+    let mut hunk = HunkLines::default();
     for line in log.split('\n') {
-        if remaining > 0 {
-            if line.starts_with('\\') {
-                continue;
-            }
-            remaining -= 1;
-            if let Some(added) = line.strip_prefix('+') {
-                edit.added.push(added.to_string());
-            } else if let Some(removed) = line.strip_prefix('-') {
-                edit.removed.push(removed.to_string());
-            }
+        if hunk.open() {
+            hunk.read(line, &mut edit);
         } else if let Some(header) = line.strip_prefix('\u{1e}') {
             edits.push(std::mem::take(&mut edit));
             found.extend(unchanged_files(&commit, &std::mem::take(&mut edits), files));
@@ -165,9 +170,8 @@ fn parse_patch_log(log: &str, files: &BTreeMap<String, String>) -> BTreeSet<(Str
         } else if let Some(paths) = line.strip_prefix("diff --git ") {
             edits.push(std::mem::take(&mut edit));
             edit.path = diff_path(paths);
-        } else if let Some(range) = line.strip_prefix("@@ ") {
-            edit.hunks = true;
-            remaining = hunk_lines(range);
+        } else if let Some(opened) = edit.read_header(line) {
+            hunk = opened;
         }
     }
     edits.push(edit);
@@ -184,11 +188,11 @@ fn unchanged_files(
     files: &BTreeMap<String, String>,
 ) -> Vec<(String, String)> {
     let moved_from = |edit: &FileEdit| {
-        edit.removed.is_empty()
+        edit.created
             && !edit.added.is_empty()
             && edits
                 .iter()
-                .any(|other| other.added.is_empty() && other.removed == edit.added)
+                .any(|other| other.deleted && other.removed == edit.added)
     };
     edits
         .iter()
@@ -208,19 +212,16 @@ fn diff_path(paths: &str) -> Option<String> {
     (new.strip_prefix("b/")? == path).then(|| path.to_string())
 }
 
-/// The number of content lines in a `-a,b +c,d @@` hunk header.
-fn hunk_lines(range: &str) -> usize {
-    range
-        .split_whitespace()
-        .take(2)
-        .filter_map(|side| {
-            let counts = side.get(1..)?;
-            Some(match counts.split_once(',') {
+/// The old and new line counts in a `-a,b +c,d @@` hunk header.
+fn hunk_lines(range: &str) -> (usize, usize) {
+    let mut sides = range.split_whitespace().take(2).map(|side| {
+        side.get(1..)
+            .map_or(0, |counts| match counts.split_once(',') {
                 Some((_, count)) => count.parse().unwrap_or(0),
                 None => 1,
             })
-        })
-        .sum()
+    });
+    (sides.next().unwrap_or(0), sides.next().unwrap_or(0))
 }
 
 /// Whether the removed and added lines are the same code once suppression
@@ -228,7 +229,7 @@ fn hunk_lines(range: &str) -> usize {
 fn lines_differ_only_in_suppressions(removed: &[String], added: &[String]) -> bool {
     let mut suppressed = false;
     let mut code = |lines: &[String]| {
-        let mut kept = lines
+        lines
             .iter()
             .filter_map(|line| {
                 let stripped = without_suppression(line);
@@ -236,9 +237,7 @@ fn lines_differ_only_in_suppressions(removed: &[String], added: &[String]) -> bo
                 (!stripped.trim().is_empty() || line.trim().is_empty())
                     .then(|| stripped.to_string())
             })
-            .collect::<Vec<_>>();
-        kept.sort();
-        kept
+            .collect::<Vec<_>>()
     };
     let (removed, added) = (code(removed), code(added));
     suppressed && removed == added
@@ -277,8 +276,8 @@ fn without_suppression(line: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{
-        diff_path, directive_comment, hunk_lines, lines_differ_only_in_suppressions,
-        parse_patch_log, version_assignment,
+        diff_path, hunk_lines, lines_differ_only_in_suppressions, parse_patch_log,
+        version_assignment,
     };
     use std::collections::BTreeMap;
 
@@ -299,9 +298,10 @@ mod tests {
 
     #[test]
     fn hunk_headers_count_both_sides_with_an_implicit_one() {
-        assert_eq!(hunk_lines("-3,2 +4,5 @@ fn x()"), 7);
-        assert_eq!(hunk_lines("-3 +4 @@"), 2);
-        assert_eq!(hunk_lines("-3,0 +4 @@"), 1);
+        assert_eq!(hunk_lines("-3,2 +4,5 @@ fn x()"), (2, 5));
+        assert_eq!(hunk_lines("-3 +4 @@"), (1, 1));
+        assert_eq!(hunk_lines("-3,0 +4 @@"), (0, 1));
+        assert_eq!(hunk_lines(""), (0, 0));
     }
 
     #[test]
@@ -339,6 +339,10 @@ mod tests {
             &lines(&["b();", "a();"]),
         ));
         assert!(!lines_differ_only_in_suppressions(
+            &lines(&["a();", "b();"]),
+            &lines(&["b(); // eslint-disable-line", "a();"]),
+        ));
+        assert!(!lines_differ_only_in_suppressions(
             &[],
             &lines(&["// eslint-disable-next-line no-x", "run();"]),
         ));
@@ -347,27 +351,6 @@ mod tests {
             &lines(&["#[allow(dead_code)] fn unused() {}"]),
         ));
         assert!(!lines_differ_only_in_suppressions(&[], &[]));
-    }
-
-    #[test]
-    fn directive_comments_start_with_a_suppression_marker() {
-        for comment in [
-            "// @ts-expect-error wrong overload",
-            "/* eslint-disable no-console */",
-            "# type: ignore[attr-defined]",
-            "#noqa: E501",
-            "// prettier-ignore",
-        ] {
-            assert!(directive_comment(comment), "{comment}");
-        }
-        for comment in [
-            "// explain why",
-            "// see eslint-disable above",
-            "#: doc",
-            "",
-        ] {
-            assert!(!directive_comment(comment), "{comment}");
-        }
     }
 
     #[test]
@@ -390,6 +373,23 @@ mod tests {
         ] {
             assert!(!version_assignment(line), "{line}");
         }
+    }
+
+    #[test]
+    fn context_lines_and_moves_into_existing_files_keep_commits_apart() {
+        let files = BTreeMap::from([
+            ("a.ts".to_string(), String::new()),
+            ("b.ts".to_string(), String::new()),
+        ]);
+        // A merged hunk with a context line, then a commit that only adds an ignore.
+        let log = "\u{1e}one\n\ndiff --git a/a.ts b/a.ts\n@@ -1,3 +1,3 @@\n-a\n+A\n b\n-c\n+C\n\
+\u{1e}two\n\ndiff --git a/b.ts b/b.ts\n@@ -3,0 +4 @@\n+// eslint-disable-next-line no-x\n\
+\u{1e}three\n\ndiff --git a/a.ts b/a.ts\n@@ -1,2 +0,0 @@\n-x = 1;\n-y = 2;\n\
+diff --git a/b.ts b/b.ts\n@@ -9,0 +10,2 @@\n+x = 1;\n+y = 2;\n";
+        assert_eq!(
+            parse_patch_log(log, &files).into_iter().collect::<Vec<_>>(),
+            vec![("two".to_string(), "b.ts".to_string())]
+        );
     }
 
     #[test]

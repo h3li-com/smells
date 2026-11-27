@@ -918,27 +918,53 @@ fn authored_settable_attributes(model: &SourceModel) -> BTreeSet<String> {
     attributes
 }
 
-/// Authored Python class names and the method names they declare.
+/// Names of properties a Python class defines with `@property` or `@cached_property`.
+fn python_properties(source: &str) -> BTreeSet<&str> {
+    static PROPERTY: OnceLock<Regex> = OnceLock::new();
+    let property = PROPERTY.get_or_init(|| {
+        Regex::new(
+            r"@\s*(?:functools\s*\.\s*)?(?:cached_)?property\b[^\n]*\n(?:\s*@[^\n]*\n)*\s*(?:async\s+)?def\s+([A-Za-z_][A-Za-z0-9_]*)",
+        )
+        .expect("valid property decorator expression")
+    });
+    property
+        .captures_iter(source)
+        .filter_map(|captures| captures.get(1).map(|name| name.as_str()))
+        .collect()
+}
+
+/// Authored Python class names and, per class, the methods it declares that are
+/// not properties. A property returns a value that may be a library object.
 struct AuthoredClasses<'model> {
-    classes: BTreeSet<&'model str>,
-    methods: BTreeSet<&'model str>,
+    methods: BTreeMap<&'model str, BTreeSet<&'model str>>,
 }
 
 impl<'model> AuthoredClasses<'model> {
     fn new(model: &'model SourceModel) -> Self {
-        Self {
-            classes: model
-                .classes
-                .iter()
-                .map(|class| class.name.as_str())
-                .collect(),
-            methods: model
-                .classes
-                .iter()
-                .flat_map(|class| &class.methods)
-                .map(|method| method.name.as_str())
-                .collect(),
+        let mut methods = BTreeMap::<&str, BTreeSet<&str>>::new();
+        for class in &model.classes {
+            let properties = python_properties(&class.source);
+            methods.entry(class.name.as_str()).or_default().extend(
+                class
+                    .methods
+                    .iter()
+                    .map(|method| method.name.as_str())
+                    .filter(|name| !properties.contains(name)),
+            );
         }
+        Self { methods }
+    }
+
+    fn class(&self, name: &str) -> bool {
+        self.methods.contains_key(name)
+    }
+
+    /// Whether any authored class declares `member` as a method; a receiver
+    /// does not say which class it belongs to.
+    fn any_method(&self, member: &str) -> bool {
+        self.methods
+            .values()
+            .any(|methods| methods.contains(member))
     }
 
     /// Whether a Python workaround mutates an authored class object or one of its
@@ -952,7 +978,7 @@ impl<'model> AuthoredClasses<'model> {
             .map(str::trim)
             .collect::<Vec<_>>();
         match names.as_slice() {
-            [class] => *class == "cls" || self.classes.contains(class),
+            [class] => *class == "cls" || self.class(class),
             [root, member] => self.authored_member(root, member),
             _ => false,
         }
@@ -961,11 +987,12 @@ impl<'model> AuthoredClasses<'model> {
     /// Whether `root.member` names a dunder or method of an authored class, reached
     /// through `self`, `cls` or the class name, or a class nested in an authored class.
     fn authored_member(&self, root: &str, member: &str) -> bool {
-        let receiver = matches!(root, "self" | "cls");
-        (receiver || self.classes.contains(root))
-            && (dunder(member)
-                || self.methods.contains(member)
-                || (!receiver && self.classes.contains(member)))
+        if matches!(root, "self" | "cls") {
+            return dunder(member) || self.any_method(member);
+        }
+        self.methods
+            .get(root)
+            .is_some_and(|methods| dunder(member) || methods.contains(member) || self.class(member))
     }
 }
 
@@ -985,16 +1012,48 @@ fn mutated_object(matched: &str) -> &str {
 }
 
 /// Whether a dotted Python assignment `a.b.name =` sets an attribute an authored
-/// class declares as assignable.
-fn authored_attribute_assignment(matched: &str, authored: &BTreeSet<String>) -> bool {
+/// class declares as assignable. A chain that starts at an imported name, such as
+/// `requests.Session.headers = ...`, reaches a library object and still counts.
+fn authored_attribute_assignment(
+    matched: &str,
+    authored: &BTreeSet<String>,
+    imported: &BTreeSet<String>,
+) -> bool {
     if matched.starts_with("setattr") || matched.contains(".prototype.") {
         return false;
     }
     let target = matched.split('=').next().unwrap_or_default().trim_end();
-    target
-        .rsplit('.')
-        .next()
-        .is_some_and(|attribute| authored.contains(attribute))
+    let root = target.split('.').next().unwrap_or_default().trim();
+    !imported.contains(root)
+        && target
+            .rsplit('.')
+            .next()
+            .is_some_and(|attribute| authored.contains(attribute.trim()))
+}
+
+/// The names a Python file binds by import: `import a.b` binds `a`, `import a as
+/// b` and `from m import a as b` bind `b`.
+fn python_imported_names(path: &str, source: &str) -> Result<BTreeSet<String>, String> {
+    let mut names = BTreeSet::new();
+    for statement in import_statements(path, source)? {
+        let statement = statement.split('#').next().unwrap_or_default();
+        let bound = match statement.trim().strip_prefix("from ") {
+            Some(rest) => rest.split_once(" import ").map_or("", |(_, names)| names),
+            None => statement.trim().strip_prefix("import ").unwrap_or_default(),
+        };
+        names.extend(bound.split(',').map(python_bound_name).map(str::to_string));
+    }
+    Ok(names)
+}
+
+/// The name one imported item binds: its alias, or else its first dotted part
+/// (the item itself after `from`, which never has dots).
+fn python_bound_name(item: &str) -> &str {
+    let item = item.trim_matches(|c: char| c.is_whitespace() || "()\\".contains(c));
+    match item.split_once(" as ") {
+        Some((_, alias)) => alias.trim(),
+        None => item.split('.').next().unwrap_or_default(),
+    }
 }
 
 pub(super) fn library_capabilities(
@@ -1026,9 +1085,16 @@ pub(super) fn library_capabilities(
         let imported = typescript
             .then(|| typescript_imported_names(path, source, &code))
             .transpose()?;
+        let python_imported = if typescript {
+            BTreeSet::new()
+        } else {
+            python_imported_names(path, source)?
+        };
         let failures = failures
             .filter(|failure| library_target(failure.as_str(), imported.as_ref()))
-            .filter(|failure| !authored_attribute_assignment(failure.as_str(), &authored))
+            .filter(|failure| {
+                !authored_attribute_assignment(failure.as_str(), &authored, &python_imported)
+            })
             .filter(|failure| typescript || !classes.target(failure.as_str()))
             .collect::<Vec<_>>();
         if let Some(first) = failures.first() {
@@ -1739,8 +1805,54 @@ impl Wake for LocalWaker { fn wake(self) {} }
         assert_eq!(observations[0].location.line, 4);
         assert!(!authored_attribute_assignment(
             "a.prototype.elapsed = ",
-            &BTreeSet::from(["elapsed".to_string()])
+            &BTreeSet::from(["elapsed".to_string()]),
+            &BTreeSet::new()
         ));
+    }
+
+    #[test]
+    fn python_mutations_through_imports_properties_and_other_classes_count() {
+        let source = concat!(
+            "import requests\n",
+            "import urllib3.util as retry_util\n",
+            "import os.path\n",
+            "from http import client as http_client, cookies\n",
+            "class Client:\n",
+            "    headers: dict\n",
+            "    @property\n",
+            "    def session(self):\n",
+            "        return self._session\n",
+            "    @functools.cached_property\n",
+            "    async def pool(self):\n",
+            "        return self._pool\n",
+            "    def send(self):\n",
+            "        pass\n",
+            "class Other:\n",
+            "    def close(self):\n",
+            "        pass\n",
+            "def patch(self):\n",
+            "    requests.Session.headers = {}\n",
+            "    retry_util.Retry.headers = {}\n",
+            "    http_client.HTTPConnection.headers = {}\n",
+            "    cookies.SimpleCookie.headers = {}\n",
+            "    os.path.headers = {}\n",
+            "    self.session.trust_env = False\n",
+            "    self.pool.size = 1\n",
+            "    Client.close.cache = {}\n",
+            "    self.send.cache = {}\n",
+            "    Other.close.cache = {}\n",
+            "    self.config.headers = {}\n",
+        );
+        let input = Input::fixture(
+            "python-v1",
+            BTreeMap::from([("src/client.py".to_string(), source.to_string())]),
+        );
+        let rule = rule("python.library_capabilities");
+        let model = super::super::model::source_model(&rule, &input).unwrap();
+        let observations = library_capabilities(&rule, &model, &input).unwrap();
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].measurements["failures"], 8);
+        assert_eq!(observations[0].location.line, 19);
     }
 
     #[test]
