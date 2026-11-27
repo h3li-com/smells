@@ -643,6 +643,108 @@ fn rust_type_parameters(generics: &syn::Generics) -> Vec<String> {
         .collect()
 }
 
+/// Trait type parameters, settled once every impl header in the corpus is read. An
+/// impl header that gives a parameter a concrete argument, as axum's
+/// `impl<F, M, T1> Handler<(M, T1), S> for F` does, uses it to select the impl, so the
+/// trait body is no measure of its use. One passed through, as in
+/// `impl<T> Visitor<T> for V`, still counts only where the trait body names it.
+#[derive(Default)]
+struct RustTraitParameters {
+    declared: Vec<DeclaredTrait>,
+    /// Trait name to each impl header's type arguments, `true` where concrete.
+    impls: BTreeMap<String, Vec<Vec<bool>>>,
+}
+
+struct DeclaredTrait {
+    key: String,
+    name: String,
+    /// Each type parameter with whether it has a default.
+    parameters: Vec<(String, bool)>,
+}
+
+impl RustTraitParameters {
+    fn declare(&mut self, key: String, trait_item: &syn::ItemTrait) {
+        // A marker `trait Sealed<B> {}` has no body to use its parameters in.
+        if trait_item.items.is_empty() {
+            return;
+        }
+        let parameters = trait_item
+            .generics
+            .type_params()
+            .map(|parameter| (parameter.ident.to_string(), parameter.default.is_some()))
+            .collect();
+        self.declared.push(DeclaredTrait {
+            key,
+            name: trait_item.ident.to_string(),
+            parameters,
+        });
+    }
+
+    fn implement(&mut self, implementation: &syn::ItemImpl) {
+        let Some(segment) = implementation
+            .trait_
+            .as_ref()
+            .and_then(|(_, path, _)| path.segments.last())
+        else {
+            return;
+        };
+        let own: BTreeSet<_> = implementation
+            .generics
+            .type_params()
+            .map(|parameter| &parameter.ident)
+            .collect();
+        let passed_through = |argument: &syn::Type| match argument {
+            // A projection such as `<Walker>::T` never reads as a single ident.
+            syn::Type::Path(path) => path
+                .path
+                .get_ident()
+                .is_some_and(|ident| own.contains(ident)),
+            _ => false,
+        };
+        let concrete = match &segment.arguments {
+            syn::PathArguments::AngleBracketed(arguments) => arguments
+                .args
+                .iter()
+                .filter_map(|argument| match argument {
+                    syn::GenericArgument::Type(argument) => Some(!passed_through(argument)),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        self.impls
+            .entry(segment.ident.to_string())
+            .or_default()
+            .push(concrete);
+    }
+
+    /// Keeps the parameters no impl header selects. An omitted argument takes the
+    /// parameter's default, which is concrete when there is one.
+    fn settle(self, classes: &mut BTreeMap<String, ClassFact>) {
+        for DeclaredTrait {
+            key,
+            name,
+            parameters,
+        } in self.declared
+        {
+            let impls = self.impls.get(&name).map_or(&[][..], Vec::as_slice);
+            let Some(class) = classes.get_mut(&key) else {
+                continue;
+            };
+            class.type_parameters = parameters
+                .into_iter()
+                .enumerate()
+                .filter(|(index, (_, default))| {
+                    !impls
+                        .iter()
+                        .any(|arguments| arguments.get(*index).copied().unwrap_or(*default))
+                })
+                .map(|(_, (parameter, _))| parameter)
+                .collect();
+        }
+    }
+}
+
 struct RustModelVisitor<'model> {
     path: String,
     module_path: Vec<String>,
@@ -652,6 +754,7 @@ struct RustModelVisitor<'model> {
     allows_unused: bool,
     model: &'model mut SourceModel,
     classes: &'model mut BTreeMap<String, ClassFact>,
+    traits: &'model mut RustTraitParameters,
 }
 
 impl RustModelVisitor<'_> {
@@ -835,9 +938,8 @@ impl<'ast> Visit<'ast> for RustModelVisitor<'_> {
         class.source = code_only(&self.path, &trait_item.to_token_stream().to_string())
             .expect("Rust trait token masking cannot fail")
             .into();
-        // A trait's own type parameters are chosen by its impl headers and bounds,
-        // as in a marker `trait Sealed<B> {}`, so its body is no measure of their use.
-        class.type_parameters = Vec::new();
+        let key = class.symbol.clone();
+        self.traits.declare(key, trait_item);
         class.methods.extend(functions.iter().cloned());
         self.model.functions.extend(functions);
         for method in &trait_item.items {
@@ -852,6 +954,7 @@ impl<'ast> Visit<'ast> for RustModelVisitor<'_> {
     }
 
     fn visit_item_impl(&mut self, implementation: &'ast syn::ItemImpl) {
+        self.traits.implement(implementation);
         let Some(name) = rust_type_name(&implementation.self_ty) else {
             return;
         };
@@ -927,6 +1030,7 @@ impl<'ast> Visit<'ast> for RustModelVisitor<'_> {
 fn rust_source_model(input: &Input) -> Result<SourceModel, String> {
     let mut model = SourceModel::default();
     let mut classes = BTreeMap::new();
+    let mut traits = RustTraitParameters::default();
     for (path, source) in &input.files {
         model
             .code_by_path
@@ -943,9 +1047,11 @@ fn rust_source_model(input: &Input) -> Result<SourceModel, String> {
             allows_unused: rust_allows_unused(&file.attrs),
             model: &mut model,
             classes: &mut classes,
+            traits: &mut traits,
         }
         .visit_file(&file);
     }
+    traits.settle(&mut classes);
     for class in classes.values_mut() {
         class.bases.sort();
         class.bases.dedup();
@@ -1526,15 +1632,6 @@ mod tests {
             .find(|class| class.name == "Account")
             .unwrap();
         assert_eq!(account.type_parameters, ["T"]);
-        assert!(
-            model
-                .classes
-                .iter()
-                .find(|class| class.name == "Port")
-                .unwrap()
-                .type_parameters
-                .is_empty()
-        );
         assert_eq!(account.bases, ["Port"]);
         assert_eq!(account.methods.len(), 2);
         assert_eq!(
@@ -1561,6 +1658,7 @@ mod tests {
             .find(|class| class.name == "Port")
             .unwrap();
         assert!(port.interface);
+        assert_eq!(port.type_parameters, ["T"]);
         assert_eq!(port.methods.len(), 1);
         let state = model
             .classes
@@ -1573,6 +1671,71 @@ mod tests {
                 .functions
                 .iter()
                 .any(|function| function.symbol.contains("nested@"))
+        );
+    }
+
+    #[test]
+    fn rust_trait_type_parameters_count_as_used_when_an_impl_header_selects_them() {
+        let source = concat!(
+            "pub trait Sealed<B> {}\n",
+            "pub trait Visitor<T> { fn visit(&self); }\n",
+            "impl<T> Visitor<T> for Walker {}\n",
+            "pub trait Lonely<T> { fn alone(&self); }\n",
+            "pub trait Handler<T, S> { fn call(self, state: S); }\n",
+            "impl<F, M, S> Handler<(M,), S> for F { fn call(self, state: S) {} }\n",
+            "pub trait Extract<S, M = ViaRequest> { fn extract(state: &S); }\n",
+            "impl<S> Extract<S> for Body { fn extract(state: &S) {} }\n",
+            "pub trait Tuple<T, U> { fn get(&self); }\n",
+            "impl<A, B> Tuple<A, Vec<B>> for (A, B) { fn get(&self) {} }\n",
+            "impl<A> Tuple<A, A> for Single { fn get(&self) {} }\n",
+            "pub trait Projected<T> { fn project(&self); }\n",
+            "impl<T> Projected<<Walker>::T> for Walker { fn project(&self) {} }\n",
+        );
+        let model = source_model(
+            &rule("rust.unused_type_parameters"),
+            &input("rust-v1", &[("src/traits.rs", source)]),
+        )
+        .unwrap();
+        let parameters = |name: &str| {
+            model
+                .classes
+                .iter()
+                .find(|class| class.name == name)
+                .unwrap()
+                .type_parameters
+                .clone()
+        };
+
+        assert!(parameters("Sealed").is_empty());
+        assert_eq!(parameters("Visitor"), ["T"]);
+        assert_eq!(parameters("Lonely"), ["T"]);
+        assert_eq!(parameters("Handler"), ["S"]);
+        assert_eq!(parameters("Extract"), ["S"]);
+        assert_eq!(parameters("Tuple"), ["T"]);
+        // `<Walker>::T` is a projection, not the impl's own `T` passed through.
+        assert!(parameters("Projected").is_empty());
+        let unused: Vec<_> = super::super::structural::unused_type_parameters(&model)
+            .into_iter()
+            .map(|observation| {
+                (
+                    observation.symbol,
+                    observation.evidence["unused_parameters"].clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            unused,
+            [
+                (
+                    "src/traits.rs::Lonely".to_string(),
+                    serde_json::json!(["T"])
+                ),
+                ("src/traits.rs::Tuple".to_string(), serde_json::json!(["T"])),
+                (
+                    "src/traits.rs::Visitor".to_string(),
+                    serde_json::json!(["T"])
+                ),
+            ]
         );
     }
 

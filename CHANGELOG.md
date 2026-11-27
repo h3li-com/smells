@@ -270,7 +270,8 @@ All notable changes to Smells are recorded here. Release tags use `vMAJOR.MINOR.
     bindings from `match *self` arms as owned.
   - `rust.data_clumps` does not count constructors of the struct that declares
     the group as supporters. `rust.unused_type_parameters` does not count a
-    trait's own type parameters. `rust.unused_code` treats functions nested in
+    marker trait's type parameters, or a trait type parameter that some impl
+    header gives a concrete argument or omits for its default. `rust.unused_code` treats functions nested in
     an item under `#[allow(dead_code)]` as allowed. `rust.navigation_chains`
     treats `into_owned`, `to_str`, `to_string_lossy`, `as_path` and
     `to_path_buf` as transparent conversions.

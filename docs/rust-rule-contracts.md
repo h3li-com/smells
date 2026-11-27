@@ -137,7 +137,7 @@ Fixtures: minimum sizes, alpha-renaming/literal changes, operator changes, repea
 ### 17. Speculative Generality
 
 <a id="rust-unused-type-parameters"></a>
-**Built-in with optional Clippy override: rust.unused_type_parameters@1.** Maximum zero findings. Count authored generic parameters that occur only in their declaration's generic list. A trait's own type parameters are chosen by its impl headers and bounds, as in a marker `trait Sealed<B> {}`, and are not counted. This lexical scope is conservative and does not infer public extension intent; pinned Clippy diagnostics may replace it.
+**Built-in with optional Clippy override: rust.unused_type_parameters@1.** Maximum zero findings. Count authored generic parameters that occur only in their declaration's generic list. A marker trait's type parameters, as in `trait Sealed<B> {}`, are not counted. Nor is a trait type parameter that some impl header in the corpus gives a concrete argument, as in `impl<F, M> Handler<(M,), S> for F`, or omits so that its default applies, because the impl is selected by it. A parameter that every impl passes through, as in `impl<T> Visitor<T> for V`, counts only where the trait body names it. This lexical scope is conservative and does not infer public extension intent; pinned Clippy diagnostics may replace it.
 
 ### 18. Feature Envy
 
