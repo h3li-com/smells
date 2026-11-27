@@ -294,6 +294,12 @@ All notable changes to Smells are recorded here. Release tags use `vMAJOR.MINOR.
     `forEach(visit)`, binds nothing.
   - A TypeScript property holding a generator function is a method only, not a
     field as well.
+  - `library_capabilities` treats a relative import, or a Python import of the
+    project's own top-level package or module, as project code rather than a
+    library, so `flask.session.permanent = True` inside flask and writes to
+    zod's own `core.globalConfig` no longer count. A Python mutation through an
+    imported name, such as `monkeypatch.setattr(FormData, ...)` on starlette's
+    `FormData`, counts even when an authored class shares the name.
 - Resolve `mod` declarations in Cargo target roots other than `lib.rs` and
   `main.rs` (files directly in `tests/`, `examples/` and `benches/`,
   `src/bin/*.rs` and `build.rs`) next to the root file. Before, the scan exited
