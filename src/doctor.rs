@@ -318,6 +318,7 @@ pub(crate) fn diagnose(
     append_governance_checks(root, &owned_policy_target, &mut checks);
     let next_steps = match (&resolved, &diagnostics) {
         (Ok(policy_source), Some(_)) => next_steps(root, policy_source, burndown.as_ref(), &checks),
+        (Err(_), _) => missing_policy_steps(root),
         _ => Vec::new(),
     };
     DoctorReport {
@@ -356,8 +357,84 @@ pub(crate) fn missing_policy_hint(root: &Path) -> String {
             "save the {rule_pack} starter policy with `{}`, or run `smells doctor` to try smells without one",
             starter_policy_command(rule_pack, &target)
         ),
-        _ => "pass --policy FILE, or run `smells doctor` to see which starter policy fits".into(),
+        _ => match starter_subprojects(root).as_slice() {
+            [] => "pass --policy FILE, or run `smells doctor` to see the starter policies".into(),
+            found @ [(first, _), ..] => format!(
+                "no single starter policy fits this folder, but it holds {}; run `smells doctor --path {}` to set one up",
+                found
+                    .iter()
+                    .map(|(name, rule_pack)| format!("{name} ({rule_pack})"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                subfolder(root, first).display()
+            ),
+        },
     }
+}
+
+/// Immediate, non-hidden subfolders whose manifest picks a starter policy, as in a
+/// monorepo with `backend/Cargo.toml` and `frontend/package.json`.
+fn starter_subprojects(root: &Path) -> Vec<(String, &'static str)> {
+    let Ok(entries) = fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut found: Vec<_> = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            if name.starts_with('.') {
+                return None;
+            }
+            match infer_starter_policy(&entry.path()) {
+                Ok(ResolvedPolicy::BuiltIn { rule_pack, .. }) => Some((name, rule_pack)),
+                _ => None,
+            }
+        })
+        .collect();
+    found.sort();
+    found
+}
+
+/// `name` under `root`, written without a leading `./` when `root` is the current folder.
+fn subfolder(root: &Path, name: &str) -> PathBuf {
+    if root == Path::new(".") {
+        PathBuf::from(name)
+    } else {
+        root.join(name)
+    }
+}
+
+/// What to run when doctor finds no policy and cannot pick a starter: doctor on each
+/// subproject a manifest identifies, or else the starter command for every language.
+/// Several policy files at once need `--policy`, which the policy check already says.
+fn missing_policy_steps(root: &Path) -> Vec<String> {
+    if STANDARD_POLICY_FILES
+        .iter()
+        .any(|name| root.join(name).is_file())
+    {
+        return Vec::new();
+    }
+    let subprojects = starter_subprojects(root);
+    if subprojects.is_empty() {
+        let target = root.join("quality-policy.json");
+        return [
+            ("Rust", "rust-v1"),
+            ("Python", "python-v1"),
+            ("TypeScript", "typescript-v1"),
+        ]
+        .into_iter()
+        .map(|(language, rule_pack)| {
+            format!(
+                "for {language} code: {}",
+                starter_policy_command(rule_pack, &target)
+            )
+        })
+        .collect();
+    }
+    subprojects
+        .iter()
+        .map(|(name, _)| format!("smells doctor --path {}", subfolder(root, name).display()))
+        .collect()
 }
 
 fn next_steps(
@@ -2016,6 +2093,62 @@ mod tests {
     }
 
     #[test]
+    fn missing_policy_steps_name_subprojects_or_every_starter() {
+        let base_dir =
+            std::env::temp_dir().join(format!("smells-doctor-monorepo-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base_dir);
+        let empty = base_dir.join("empty");
+        fs::create_dir_all(&empty).unwrap();
+        let steps = missing_policy_steps(&empty);
+        assert_eq!(steps.len(), 3);
+        assert!(steps[0].starts_with("for Rust code: curl "), "{steps:?}");
+        assert!(steps[1].ends_with("/examples/python-quality-policy.json"));
+        assert!(steps[2].starts_with("for TypeScript code: curl "));
+        fs::write(empty.join("smells-policy.json"), "{}").unwrap();
+        assert!(missing_policy_steps(&empty).is_empty());
+
+        let monorepo = base_dir.join("monorepo");
+        for (folder, manifest) in [
+            ("web", "package.json"),
+            ("api", "Cargo.toml"),
+            (".cache", "Cargo.toml"),
+            ("docs", "README.md"),
+        ] {
+            fs::create_dir_all(monorepo.join(folder)).unwrap();
+            fs::write(monorepo.join(folder).join(manifest), "").unwrap();
+        }
+        fs::write(monorepo.join("pyproject.toml.bak"), "").unwrap();
+        assert_eq!(
+            starter_subprojects(&monorepo),
+            vec![
+                ("api".to_string(), "rust-v1"),
+                ("web".to_string(), "typescript-v1"),
+            ]
+        );
+        assert_eq!(
+            missing_policy_steps(&monorepo),
+            vec![
+                format!("smells doctor --path {}", monorepo.join("api").display()),
+                format!("smells doctor --path {}", monorepo.join("web").display()),
+            ]
+        );
+        assert_eq!(
+            missing_policy_hint(&monorepo),
+            format!(
+                "no single starter policy fits this folder, but it holds api (rust-v1), web (typescript-v1); run `smells doctor --path {}` to set one up",
+                monorepo.join("api").display()
+            )
+        );
+        assert_eq!(subfolder(Path::new("."), "api"), PathBuf::from("api"));
+        assert!(starter_subprojects(&base_dir.join("missing")).is_empty());
+        assert_eq!(
+            diagnose(&monorepo, None, None, None).next_steps,
+            missing_policy_steps(&monorepo)
+        );
+        let _ = fs::remove_dir_all(&base_dir);
+    }
+
+    #[test]
     fn starter_policy_hints_and_next_steps_name_the_exact_commands() {
         let base_dir =
             std::env::temp_dir().join(format!("smells-doctor-hints-{}", std::process::id()));
@@ -2043,7 +2176,7 @@ mod tests {
         fs::create_dir_all(&unknown).unwrap();
         assert_eq!(
             missing_policy_hint(&unknown),
-            "pass --policy FILE, or run `smells doctor` to see which starter policy fits"
+            "pass --policy FILE, or run `smells doctor` to see the starter policies"
         );
         let _ = fs::remove_dir_all(&base_dir);
 

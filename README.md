@@ -51,7 +51,7 @@ curl -fsSLo quality-policy.json \
   https://raw.githubusercontent.com/mindful-time/smells/v0.7.0/examples/python-quality-policy.json
 ```
 
-(Use `typescript-quality-policy.json` for TypeScript or `quality-policy.json` for Rust. If you forget, `smells check` prints this command and exits `2`.)
+(Use `typescript-quality-policy.json` for TypeScript or `quality-policy.json` for Rust. If you forget, `smells check` prints this command and exits `2`. In a monorepo, run doctor and check on each project folder with `--path`, and save a policy in each one.)
 
 Then run:
 

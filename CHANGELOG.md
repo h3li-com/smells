@@ -11,7 +11,8 @@ All notable changes to Smells are recorded here. Release tags use `vMAJOR.MINOR.
   still prints every finding. A missing `quality-policy.json` still exits `2`,
   and the error now names the exact `curl` command for the matching starter
   policy. `smells doctor` ends with numbered next steps (`next_steps` in JSON),
-  which ask for errors to be fixed before suggesting a check, and its
+  which ask for errors to be fixed before suggesting a check and, in a monorepo
+  with no root manifest, name each subproject to run doctor on; its
   matched-smell count equals the rows its smell table shows. Its health score
   counts findings per scanned file, so codebases of different sizes compare
   fairly, and its JSON `status` is `checks_passed` or `checks_failed`. `smells
