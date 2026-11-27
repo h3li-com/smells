@@ -397,18 +397,19 @@ fn property_function_class_index(
     language: &str,
     classes: &[ActiveClass],
 ) -> Option<usize> {
+    if language != "typescript" {
+        return None;
+    }
     let class_index = classes.len().checked_sub(1)?;
-    let field = node.parent()?;
-    let property = language == "typescript"
-        && field.kind() == "public_field_definition"
-        && field
-            .child_by_field_name("value")
-            .is_some_and(|value| value.id() == node.id());
+    // A function directly under a field can only be the field's value.
+    let field = node
+        .parent()
+        .filter(|field| field.kind() == "public_field_definition")?;
     let owner = field
         .parent()
         .filter(|body| body.kind() == "class_body")?
         .parent()?;
-    (property && owner.id() == classes[class_index].node_id).then_some(class_index)
+    (owner.id() == classes[class_index].node_id).then_some(class_index)
 }
 
 fn sole_statement(body: Node<'_>) -> Option<Node<'_>> {

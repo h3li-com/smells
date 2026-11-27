@@ -572,11 +572,10 @@ fn rust_dependency_contract(
 /// `__NAME` binding constant such as a Cloudflare `__STATIC_CONTENT`.
 fn public_underscore_member(language: &str, member: &str) -> bool {
     let sunder = language == "python"
-        && member.len() > 2
-        && member.starts_with('_')
-        && member.ends_with('_')
-        && !member.starts_with("__")
-        && !member.ends_with("__");
+        && member
+            .strip_prefix('_')
+            .and_then(|rest| rest.strip_suffix('_'))
+            .is_some_and(|name| !name.is_empty() && !name.starts_with('_') && !name.ends_with('_'));
     let constant = language == "typescript"
         && member.strip_prefix("__").is_some_and(|name| {
             name.starts_with(|character: char| character.is_ascii_uppercase())
@@ -741,6 +740,8 @@ mod tests {
         assert!(public_underscore_member("python", "_a_"));
         assert!(!public_underscore_member("python", "_value"));
         assert!(!public_underscore_member("python", "___"));
+        assert!(!public_underscore_member("python", "__"));
+        assert!(!public_underscore_member("python", "_"));
         assert!(!public_underscore_member("python", "_a__"));
         assert!(!public_underscore_member("python", "__a_"));
         assert!(!public_underscore_member("typescript", "_value_"));
