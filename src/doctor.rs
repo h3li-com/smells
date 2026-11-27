@@ -309,7 +309,7 @@ pub(crate) fn diagnose(
     };
     append_governance_checks(root, &owned_policy_target, &mut checks);
     let next_steps = match (&resolved, &diagnostics) {
-        (Ok(policy_source), Some(_)) => next_steps(root, policy_source, burndown.as_ref()),
+        (Ok(policy_source), Some(_)) => next_steps(root, policy_source, burndown.as_ref(), &checks),
         _ => Vec::new(),
     };
     DoctorReport {
@@ -356,6 +356,7 @@ fn next_steps(
     root: &Path,
     policy_source: &ResolvedPolicy,
     burndown: Option<&Burndown>,
+    checks: &[Check],
 ) -> Vec<String> {
     let mut steps = Vec::new();
     if let ResolvedPolicy::BuiltIn { rule_pack, .. } = policy_source {
@@ -363,6 +364,15 @@ fn next_steps(
             rule_pack,
             &root.join("quality-policy.json"),
         ));
+    }
+    // A check that would exit 2 is not a next step; the error has to be fixed first.
+    if checks.iter().any(|check| check.status == Status::Error) {
+        steps.push(
+            "fix the errors above (exclude intentionally broken files, such as parser \
+             fixtures, with exclude_directories in quality-policy.json), then rerun smells doctor"
+                .into(),
+        );
+        return steps;
     }
     let mut check = String::from("smells check");
     if root != Path::new(".") {
@@ -2044,7 +2054,7 @@ mod tests {
             smell_deltas: Vec::new(),
         };
         assert_eq!(
-            next_steps(Path::new("."), &built_in, Some(&burndown)),
+            next_steps(Path::new("."), &built_in, Some(&burndown), &[]),
             vec![
                 format!(
                     "curl -fsSLo ./quality-policy.json https://raw.githubusercontent.com/mindful-time/smells/v{}/examples/python-quality-policy.json",
@@ -2054,7 +2064,12 @@ mod tests {
             ]
         );
         let file = ResolvedPolicy::File(PathBuf::from("app/quality-policy.json"));
-        let steps = next_steps(Path::new("app"), &file, None);
+        let scan_error = [check("scan", Status::Error, "1 scan error(s)")];
+        let blocked = next_steps(Path::new("."), &built_in, Some(&burndown), &scan_error);
+        assert_eq!(blocked.len(), 2);
+        assert!(blocked[0].starts_with("curl "));
+        assert!(blocked[1].starts_with("fix the errors above"));
+        let steps = next_steps(Path::new("app"), &file, None, &[]);
         assert_eq!(steps, vec!["smells check --path app".to_string()]);
 
         let report = DoctorReport {

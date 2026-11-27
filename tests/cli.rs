@@ -2135,8 +2135,6 @@ fn staged_scan_ignores_unstaged_source_and_policy() {
     let output = workspace.command(&[
         "check",
         "--staged",
-        "--policy",
-        "quality-policy.json",
         "--only-group",
         "source",
         "--format",
@@ -2165,6 +2163,8 @@ fn unstaged_policy_and_escaping_staged_paths_error() {
             workspace.command(&["check", "--staged", "--policy", path, "--format", "json"]);
         assert_eq!(output.status.code(), Some(2));
     }
+    let output = workspace.command(&["check", "--staged", "--format", "json"]);
+    assert_eq!(output.status.code(), Some(2));
 }
 
 #[test]
@@ -3993,6 +3993,15 @@ fn doctor_reports_compact_smell_diagnostics_and_fails_closed_on_scan_errors() {
     assert_eq!(data["status"], "unhealthy");
     assert_eq!(doctor_check(&data, "scan")["status"], "error");
     assert_eq!(data["diagnostics"]["grade"], "Incomplete", "{data}");
+    let steps = data["next_steps"].as_array().unwrap();
+    assert_eq!(steps.len(), 1, "{data}");
+    assert!(
+        steps[0]
+            .as_str()
+            .unwrap()
+            .starts_with("fix the errors above"),
+        "{data}"
+    );
 
     // A base commit with a parser error also fails closed with exit 2.
     git_stage_and_commit(&workspace.path, "broken base");

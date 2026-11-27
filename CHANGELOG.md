@@ -10,8 +10,10 @@ All notable changes to Smells are recorded here. Release tags use `vMAJOR.MINOR.
   `smells-findings.log`; `--format table` still prints every finding. A
   missing `quality-policy.json` still exits `2`, and the error now names the
   exact `curl` command for the matching starter policy. `smells doctor` ends
-  with numbered next steps (`next_steps` in JSON), and its matched-smell count
-  equals the rows its smell table shows. `--help` works after any command.
+  with numbered next steps (`next_steps` in JSON), which ask for errors to be
+  fixed before suggesting a check, and its matched-smell count equals the rows
+  its smell table shows. `smells check --staged` reads the default policy from
+  the index. `--help` works after any command.
 
 - Scan every Rust configuration variant instead of exiting `2` on conditional
   alternatives. Same-named `cfg` modules, `#[cfg_attr(…, path = "…")]` children

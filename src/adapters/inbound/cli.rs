@@ -213,7 +213,12 @@ fn finish_operation(options: PendingOptions, contracts: bool) -> Result<Command,
     }
     let source = check_source(&options)?;
     let root = source.as_deref().unwrap_or(Path::new("."));
-    let policy_path = policy_or_default(options.policy_path, root)?;
+    // A staged scan reads the policy from the index, so the default stays a bare
+    // repository-relative path and its absence is reported by the staged reader.
+    let policy_path = match options.policy_path {
+        None if options.staged => PathBuf::from(DEFAULT_POLICY),
+        explicit => policy_or_default(explicit, root)?,
+    };
     let log_path = match (options.log_path, &options.format) {
         (None, None) => Some(PathBuf::from(DEFAULT_LOG)),
         (log_path, _) => log_path,
