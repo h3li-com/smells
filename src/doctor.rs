@@ -470,19 +470,49 @@ fn next_steps(
     steps
 }
 
+/// Agent instructions apply from the nearest folder that has them, up to the Git
+/// repository root, and GitHub reads CODEOWNERS only at that root, against paths
+/// relative to it.
 fn append_governance_checks(root: &Path, owned_policy_target: &str, checks: &mut Vec<Check>) {
-    let read = |name: &str| fs::read_to_string(root.join(name)).ok();
-    checks.push(agents_check(read("AGENTS.md").as_deref()));
-    checks.push(claude_check(read("CLAUDE.md").as_deref()));
-    let codeowners = CODEOWNERS_PATHS
-        .iter()
-        .find_map(|path| read(path).map(|text| (*path, text)));
+    let folders = repository_folders(root);
+    let nearest = |name: &str| {
+        folders
+            .iter()
+            .find_map(|folder| fs::read_to_string(folder.join(name)).ok())
+    };
+    checks.push(agents_check(nearest("AGENTS.md").as_deref()));
+    checks.push(claude_check(nearest("CLAUDE.md").as_deref()));
+    let repository = folders.last().expect("the scanned folder is listed");
+    let codeowners = CODEOWNERS_PATHS.iter().find_map(|path| {
+        fs::read_to_string(repository.join(path))
+            .ok()
+            .map(|text| (*path, text))
+    });
+    let offset = folders[0].strip_prefix(repository).unwrap_or(Path::new(""));
+    let policy_target = offset
+        .join(owned_policy_target)
+        .to_string_lossy()
+        .replace('\\', "/");
     checks.push(codeowners_check(
         codeowners
             .as_ref()
             .map(|(path, text)| (*path, text.as_str())),
-        owned_policy_target,
+        &policy_target,
     ));
+}
+
+/// The folders from `root` up to the Git repository root that holds it, nearest first,
+/// or only `root` outside a repository.
+fn repository_folders(root: &Path) -> Vec<PathBuf> {
+    let start = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let mut folders = Vec::new();
+    for folder in start.ancestors() {
+        folders.push(folder.to_path_buf());
+        if folder.join(".git").exists() {
+            return folders;
+        }
+    }
+    vec![start]
 }
 
 #[derive(Clone, Copy)]
@@ -2090,6 +2120,53 @@ mod tests {
         assert!(checks.is_empty());
         record_base_error(true, "bad ref".into(), &mut checks);
         assert_eq!(checks, vec![check("base_ref", Status::Error, "bad ref")]);
+    }
+
+    #[test]
+    fn governance_checks_search_up_to_the_repository_root() {
+        let base_dir =
+            std::env::temp_dir().join(format!("smells-doctor-governance-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base_dir);
+        let repository = base_dir.join("repo");
+        let backend = repository.join("backend");
+        fs::create_dir_all(repository.join(".git")).unwrap();
+        fs::create_dir_all(backend.join("src")).unwrap();
+        fs::write(base_dir.join("CLAUDE.md"), "outside the repository\n").unwrap();
+        fs::write(repository.join("AGENTS.md"), "# Rules\n").unwrap();
+        fs::write(
+            repository.join("CODEOWNERS"),
+            "/backend/quality-policy.json @team\n",
+        )
+        .unwrap();
+        fs::write(backend.join("CODEOWNERS"), "* @nobody\n").unwrap();
+        let mut checks = Vec::new();
+        append_governance_checks(&backend, "quality-policy.json", &mut checks);
+        let details: Vec<_> = checks.iter().map(|check| check.detail.as_str()).collect();
+        assert_eq!(
+            details,
+            [
+                "AGENTS.md present",
+                "CLAUDE.md not present",
+                "CODEOWNERS assigns backend/quality-policy.json to @team",
+            ]
+        );
+        fs::write(backend.join("AGENTS.md"), "").unwrap();
+        let mut checks = Vec::new();
+        append_governance_checks(&backend, "quality-policy.json", &mut checks);
+        assert_eq!(checks[0].detail, "AGENTS.md is empty");
+
+        let outside = base_dir.join("outside").join("inner");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(base_dir.join("outside").join("AGENTS.md"), "# Rules\n").unwrap();
+        assert_eq!(
+            repository_folders(&outside),
+            vec![fs::canonicalize(&outside).unwrap()]
+        );
+        assert_eq!(
+            repository_folders(&base_dir.join("missing")),
+            vec![base_dir.join("missing")]
+        );
+        let _ = fs::remove_dir_all(&base_dir);
     }
 
     #[test]

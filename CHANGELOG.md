@@ -12,7 +12,9 @@ All notable changes to Smells are recorded here. Release tags use `vMAJOR.MINOR.
   and the error now names the exact `curl` command for the matching starter
   policy. `smells doctor` ends with numbered next steps (`next_steps` in JSON),
   which ask for errors to be fixed before suggesting a check and, in a monorepo
-  with no root manifest, name each subproject to run doctor on; its
+  with no root manifest, name each subproject to run doctor on. Doctor finds
+  `AGENTS.md` and `CLAUDE.md` in the nearest folder up to the Git root, and reads
+  CODEOWNERS at the Git root against the repository-relative policy path. Its
   matched-smell count equals the rows its smell table shows. Its health score
   counts findings per scanned file, so codebases of different sizes compare
   fairly, and its JSON `status` is `checks_passed` or `checks_failed`. `smells
