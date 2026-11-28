@@ -4276,6 +4276,29 @@ fn coverage_replaces_estimated_crap_and_rejects_stale_artifacts() {
         json!({"numerator": 58, "denominator": 27})
     );
     assert!(!matched(&measured, "rust.function_crap"));
+    let found = check(&[]);
+    assert_eq!(found.status.code(), Some(0));
+    assert!(
+        String::from_utf8_lossy(&found.stderr).contains(
+            "smells: reading coverage from ./coverage/lcov.info (found automatically; pass --coverage FILE to choose another)"
+        ),
+        "{found:?}"
+    );
+    let crap = finding(&report(&found), "rust.function_crap", "::pick").clone();
+    assert_eq!(
+        crap["evaluation"]["observed"],
+        json!({"numerator": 58, "denominator": 27}),
+        "check finds coverage without --coverage"
+    );
+    let based = check(&["--base", "HEAD"]);
+    assert_eq!(based.status.code(), Some(0), "{based:?}");
+    assert!(based.stderr.is_empty(), "{based:?}");
+    let crap = finding(&report(&based), "rust.function_crap", "::pick").clone();
+    assert_eq!(
+        crap["evaluation"]["observed"],
+        json!({"numerator": 6, "denominator": 1}),
+        "--base scans skip discovered coverage the reference cannot match"
+    );
     let (code, data) = doctor(&workspace, &[]);
     assert_eq!(code, Some(0), "{data}");
     let coverage = doctor_check(&data, "coverage");

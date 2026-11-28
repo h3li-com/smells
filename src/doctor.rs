@@ -34,12 +34,6 @@ const STANDARD_POLICY_FILES: [&str; 5] = [
     "smells-policy.json",
 ];
 const DEFAULT_BASE_REFS: [&str; 2] = ["origin/main", "origin/master"];
-/// Conventional LCOV outputs of `cargo llvm-cov`, `pytest-cov` and `vitest`/`jest`.
-const COVERAGE_FILES: [&str; 3] = [
-    "lcov.info",
-    "coverage/lcov.info",
-    "target/llvm-cov/lcov.info",
-];
 const HISTORY_WINDOW: usize = 200;
 const HOTSPOT_LIMIT: usize = 5;
 
@@ -630,13 +624,6 @@ fn diagnose_inputs(
     (Some(diagnostics), burndown)
 }
 
-fn discover_coverage(root: &Path) -> Option<PathBuf> {
-    COVERAGE_FILES
-        .iter()
-        .map(|name| root.join(name))
-        .find(|path| path.is_file())
-}
-
 /// Loads explicit or conventional LCOV into the captured input. A coverage file that is
 /// present but unusable is an error rather than a silent fallback to the upper bound.
 fn attach_coverage(
@@ -647,7 +634,7 @@ fn attach_coverage(
 ) -> Option<String> {
     let path = explicit
         .map(Path::to_path_buf)
-        .or_else(|| discover_coverage(root))?;
+        .or_else(|| coverage::discover(root))?;
     let label = relative_policy_path(root, &path);
     match coverage::load(&path, root, &captured.input.files) {
         Ok(loaded) => {
@@ -687,7 +674,7 @@ fn coverage_check(file: Option<&str>, captured: &CapturedInput, hidden: usize) -
             "coverage",
             Status::Warn,
             format!(
-                "no LCOV coverage found; hid {hidden} non-blocking CRAP estimate(s) that assume 0% coverage. Run `{}` or pass --coverage FILE",
+                "no LCOV coverage found; hid {hidden} non-blocking CRAP estimate(s) that assume 0% coverage. Run `{}` (doctor and check offer to run it at a terminal) or pass --coverage FILE",
                 coverage_hint(&captured.registry.language)
             ),
         ),

@@ -28,6 +28,21 @@ impl LineCoverage {
     }
 }
 
+/// Conventional LCOV outputs of `cargo llvm-cov`, `pytest-cov` and `vitest`/`jest`.
+const COVERAGE_FILES: [&str; 3] = [
+    "lcov.info",
+    "coverage/lcov.info",
+    "target/llvm-cov/lcov.info",
+];
+
+/// Finds an LCOV file at a conventional path under `root`.
+pub(crate) fn discover(root: &Path) -> Option<PathBuf> {
+    COVERAGE_FILES
+        .iter()
+        .map(|name| root.join(name))
+        .find(|path| path.is_file())
+}
+
 /// Reads an LCOV artifact and keeps only records for files in the scanned corpus.
 pub(crate) fn load(
     path: &Path,

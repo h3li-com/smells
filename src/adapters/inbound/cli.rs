@@ -4,15 +4,17 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use super::coverage_prompt::Terminal;
 use crate::{
+    adapters::outbound::coverage_tool,
     core::{
         model::{ScanRequest, ScanTarget},
         ports::inbound::Scanner,
     },
-    doctor, metrics, policy, report,
+    coverage, doctor, metrics, policy, report,
 };
 
-const USAGE: &str = "smells --version\nsmells check [--path DIR | --staged] [--policy FILE] [--base REF] [--evidence FILE] [--coverage LCOV] [--format table|json] [--report FILE] [--log FILE] [policy group selectors]\nsmells policy show [--policy FILE] [--format table|json] [policy group selectors]\nsmells contracts validate [--policy FILE]\nsmells doctor [--policy FILE] [--path DIR] [--coverage LCOV] [--base REF] [--format table|json]\nsmells rules [--rule-pack rust-v1|python-v1|typescript-v1]\n\ncheck scans --path . unless --path or --staged is given.\n--policy defaults to quality-policy.json in the --path directory (or the current directory).\n--log defaults to smells-findings.log unless --format is given; --format table prints every finding instead.\n--coverage reads LCOV line coverage for exact CRAP scores; doctor also finds lcov.info, coverage/lcov.info or target/llvm-cov/lcov.info.\n\npolicy group selectors: --group NAME | --only-group NAME | --all-groups | --no-default-groups | --no-group NAME";
+const USAGE: &str = "smells --version\nsmells check [--path DIR | --staged] [--policy FILE] [--base REF] [--evidence FILE] [--coverage LCOV] [--format table|json] [--report FILE] [--log FILE] [policy group selectors]\nsmells policy show [--policy FILE] [--format table|json] [policy group selectors]\nsmells contracts validate [--policy FILE]\nsmells doctor [--policy FILE] [--path DIR] [--coverage LCOV] [--base REF] [--format table|json]\nsmells rules [--rule-pack rust-v1|python-v1|typescript-v1]\n\ncheck scans --path . unless --path or --staged is given.\n--policy defaults to quality-policy.json in the --path directory (or the current directory).\n--log defaults to smells-findings.log unless --format is given; --format table prints every finding instead.\n--coverage reads LCOV line coverage for exact CRAP scores. Without it, doctor and check (on --path without --base) find lcov.info, coverage/lcov.info or target/llvm-cov/lcov.info, and at a terminal offer to run the project's coverage tool.\n\npolicy group selectors: --group NAME | --only-group NAME | --all-groups | --no-default-groups | --no-group NAME";
 
 enum Command {
     Help,
@@ -492,10 +494,15 @@ fn color_enabled(is_tty: bool, no_color: bool, force: Option<&str>) -> bool {
 }
 
 fn run_doctor(options: &DoctorOptions) -> Result<u8, String> {
+    let coverage = Terminal::detect(options.format.as_deref()).coverage(
+        options.coverage_path.as_deref(),
+        &options.source,
+        coverage_tool::plan,
+    );
     let report = doctor::diagnose(
         &options.source,
         options.policy_path.as_deref(),
-        options.coverage_path.as_deref(),
+        coverage.as_deref(),
         options.base_ref.as_deref(),
     );
     if options.format.as_deref() == Some("json") {
@@ -695,17 +702,38 @@ fn check(options: &CheckOptions, scanner: &dyn Scanner) -> Result<u8, String> {
         Some(source) => ScanTarget::WorkingTree(source),
         None => ScanTarget::Staged,
     };
+    let coverage_path = check_coverage(options);
     let request = ScanRequest {
         target,
         policy_path: &options.policy_path,
         evidence_path: options.evidence_path.as_deref(),
-        coverage_path: options.coverage_path.as_deref(),
+        coverage_path: coverage_path.as_deref(),
         base_ref: options.base_ref.as_deref(),
         selection: &options.selection,
     };
     let report = scanner.check(&request)?;
     metrics::write(emit_report(&report, options)?)?;
     Ok(report.exit())
+}
+
+/// Uses `--coverage`, else finds or offers coverage for a plain working-tree scan. Staged
+/// and `--base` scans skip it because the ratchet reference has no coverage to match.
+fn check_coverage(options: &CheckOptions) -> Option<PathBuf> {
+    if options.coverage_path.is_some() {
+        return options.coverage_path.clone();
+    }
+    let source = options.source.as_deref()?;
+    if options.base_ref.is_some() {
+        return None;
+    }
+    if let Some(found) = coverage::discover(source) {
+        eprintln!(
+            "smells: reading coverage from {} (found automatically; pass --coverage FILE to choose another)",
+            found.display()
+        );
+        return Some(found);
+    }
+    Terminal::detect(options.format.as_deref()).offer(source, coverage_tool::plan)
 }
 
 fn print_hook_summary(

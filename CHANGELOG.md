@@ -62,6 +62,20 @@ All notable changes to Smells are recorded here. Release tags use `vMAJOR.MINOR.
   command that produces LCOV for the project's language. Blocking findings are
   never hidden. The burndown compares both sides without non-blocking CRAP so
   that adding coverage does not read as a regression.
+- Find and measure coverage without `--coverage`. `smells check` on a working
+  tree without `--base` reads the same `lcov.info`, `coverage/lcov.info` or
+  `target/llvm-cov/lcov.info` as doctor and names the file on stderr; staged and
+  `--base` scans still read coverage only from `--coverage`, because the
+  reference has none. With no file, `doctor` and `check` at a terminal offer to
+  measure it: they print the install step when the tool is missing
+  (`cargo-llvm-cov`, `pytest-cov`, or `@vitest/coverage-v8` matching the
+  installed vitest) and the test run (`cargo llvm-cov`, `pytest --cov` through
+  `uv` or the project virtualenv, `vitest run --coverage` or `jest --coverage`
+  through the lockfile's package manager), and run nothing unless the answer is
+  `y`. A spinner shows the elapsed time, test output goes to a log file, and a
+  failed run names the log and continues on the 0%-coverage estimates. No offer
+  appears when `CI` is set, with `--format json`, or when stdin or stderr is not
+  a terminal.
 - Count cyclomatic complexity on the syntax tree in every language. The old lexical count read keywords inside
   strings and comments, missed Rust `?`, and counted closure `||` and `=>`.
   Rust now uses cargo-crap's decision points (each `?` and match arm, `if`,

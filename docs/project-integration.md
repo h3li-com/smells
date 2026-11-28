@@ -37,7 +37,9 @@ Instead of excluding test suites or migration directories and losing visibility,
 
 ## Measured CRAP scores (`--coverage`)
 
-Pass `--coverage lcov.info` (any LCOV file from `cargo llvm-cov`, `pytest --cov`, or `vitest --coverage`) to score CRAP from real line coverage. Starter policies score CRAP in bands: 5 or less is fine, 6 to 10 is a non-blocking warning, and above 10 blocks. Only a score measured from coverage can block; without coverage, scores assume 0% coverage and stay warnings. `smells doctor` finds `lcov.info`, `coverage/lcov.info`, or `target/llvm-cov/lcov.info` automatically and, without one, hides those 0%-coverage estimates.
+Pass `--coverage lcov.info` (any LCOV file from `cargo llvm-cov`, `pytest --cov`, or `vitest --coverage`) to score CRAP from real line coverage. Starter policies score CRAP in bands: 5 or less is fine, 6 to 10 is a non-blocking warning, and above 10 blocks. Only a score measured from coverage can block; without coverage, scores assume 0% coverage and stay warnings. `smells doctor` finds `lcov.info`, `coverage/lcov.info`, or `target/llvm-cov/lcov.info` automatically and, without one, hides those 0%-coverage estimates. `smells check` finds the same files for a working-tree scan without `--base`; staged and `--base` scans read coverage only from `--coverage`, because the ratchet reference has no coverage to compare against.
+
+When no file is found and you run `doctor` or `check` at a terminal, smells offers to measure coverage. It shows the exact commands first: an install step if the tool is missing (`cargo-llvm-cov`, `pytest-cov`, or `@vitest/coverage-v8` at your installed vitest version), then the test run (`cargo llvm-cov`, `pytest --cov`, `vitest run --coverage` or `jest --coverage`, through `uv` or your lockfile's package manager). Nothing runs unless you answer `y`. A spinner shows progress, test output goes to a log file, and a failed run leaves the scan on its 0%-coverage estimates. The offer never appears when `CI` is set, with `--format json`, or when stdin or stderr is not a terminal.
 
 ## Commands
 
@@ -106,7 +108,7 @@ The example hook is not installed. A consuming project must validate the actual 
 
 Hook stdout names both artifacts and tells the agent to start at the Finding Log Issue Index. The agent must then read every referenced error, blocking, ignored, and review detail. Each finding supplies all locations, exact policy evaluation, why it matched, rule/version, URL, resolved `when_to_ignore`, and exact suppression form. Before review, remediation, or suppression, the agent must open and read the exact Refactoring.Guru URL, then inspect the declaration, callers, and tests. If research is unavailable, it must report that fact and stop those actions. It may never add a suppression merely to make the hook pass.
 
-The quality runner continues to own security scans, compilation/lints, application tests, fresh coverage and any future evidence production. The scanner never executes a consuming project's build scripts or tests. The source scanner is not a substitute for those checks.
+The quality runner continues to own security scans, compilation/lints, application tests, fresh coverage and any future evidence production. The scanner never executes a consuming project's build scripts or tests, except a coverage run a person accepts at the interactive prompt. The source scanner is not a substitute for those checks.
 
 ## Live reference E2E
 
