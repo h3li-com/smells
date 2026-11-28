@@ -19,7 +19,7 @@ use crate::{
         model::{CapturedInput, History},
     },
     coverage, input,
-    policy::SelectionOptions,
+    policy::{self, SelectionOptions},
     report::{Finding, Report},
     suppressions::{self, ParsedSuppressions},
 };
@@ -233,6 +233,18 @@ fn resolve_policy(root: &Path, explicit: Option<&Path>) -> Result<ResolvedPolicy
             ))
         }
     }
+}
+
+/// The language (`rust`, `python` or `typescript`) of the policy `diagnose` would use,
+/// or `None` when no single policy resolves and parses.
+pub(crate) fn policy_language(root: &Path, explicit: Option<&Path>) -> Option<String> {
+    let text = match resolve_policy(root, explicit).ok()? {
+        ResolvedPolicy::File(path) => fs::read_to_string(path).ok()?,
+        ResolvedPolicy::BuiltIn { text, .. } => text.to_string(),
+    };
+    policy::registry_for_policy(&text)
+        .ok()
+        .map(|registry| registry.language)
 }
 
 fn infer_starter_policy(root: &Path) -> Result<ResolvedPolicy, String> {
@@ -660,15 +672,25 @@ fn coverage_hint(language: &str) -> &'static str {
     }
 }
 
+/// Names the estimates still hidden for scanned files the LCOV omits, so the doctor
+/// totals reconcile with `smells check`, which reports them.
+fn measured_coverage_detail(file: &str, covered: usize, hidden: usize) -> String {
+    let detail =
+        format!("{file} covers {covered} scanned file(s); CRAP scores use measured line coverage");
+    if hidden == 0 {
+        return detail;
+    }
+    format!(
+        "{detail}; hid {hidden} non-blocking CRAP estimate(s) in files it does not cover, which `smells check` still reports"
+    )
+}
+
 fn coverage_check(file: Option<&str>, captured: &CapturedInput, hidden: usize) -> Check {
     match (file, captured.input.coverage.as_ref()) {
         (Some(file), Some(coverage)) => check(
             "coverage",
             Status::Ok,
-            format!(
-                "{file} covers {} scanned file(s); CRAP scores use measured line coverage",
-                coverage.files.len()
-            ),
+            measured_coverage_detail(file, coverage.files.len(), hidden),
         ),
         _ => check(
             "coverage",
@@ -2115,6 +2137,49 @@ mod tests {
         assert_eq!(hotspots[1].path, "src/a.rs");
         assert_eq!(hotspots[1].review, 2);
         assert!(!hotspots.iter().any(|row| row.path == "src/b.rs"));
+    }
+
+    #[test]
+    fn measured_coverage_detail_names_estimates_in_uncovered_files() {
+        assert_eq!(
+            measured_coverage_detail("lcov.info", 48, 0),
+            "lcov.info covers 48 scanned file(s); CRAP scores use measured line coverage"
+        );
+        assert_eq!(
+            measured_coverage_detail("lcov.info", 48, 104),
+            "lcov.info covers 48 scanned file(s); CRAP scores use measured line coverage; hid 104 non-blocking CRAP estimate(s) in files it does not cover, which `smells check` still reports"
+        );
+    }
+
+    #[test]
+    fn policy_language_follows_the_policy_doctor_resolves() {
+        let dir =
+            std::env::temp_dir().join(format!("smells-doctor-language-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        // A maturin crate has both manifests, so only its policy names the language.
+        fs::write(dir.join("Cargo.toml"), "").unwrap();
+        fs::write(dir.join("pyproject.toml"), "").unwrap();
+        assert_eq!(policy_language(&dir, None), None);
+        fs::write(dir.join("quality-policy.json"), RUST_STARTER_POLICY).unwrap();
+        assert_eq!(policy_language(&dir, None).as_deref(), Some("rust"));
+        let python = dir.join("python.json");
+        fs::write(&python, PYTHON_STARTER_POLICY).unwrap();
+        assert_eq!(
+            policy_language(&dir, Some(&python)).as_deref(),
+            Some("python")
+        );
+        fs::write(&python, "not json").unwrap();
+        assert_eq!(policy_language(&dir, Some(&python)), None);
+        assert_eq!(policy_language(&dir, Some(&dir.join("missing.json"))), None);
+        let starter = dir.join("starter");
+        fs::create_dir_all(&starter).unwrap();
+        fs::write(starter.join("package.json"), "{}").unwrap();
+        assert_eq!(
+            policy_language(&starter, None).as_deref(),
+            Some("typescript")
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

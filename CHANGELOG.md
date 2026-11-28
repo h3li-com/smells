@@ -75,7 +75,11 @@ All notable changes to Smells are recorded here. Release tags use `vMAJOR.MINOR.
   `y`. A spinner shows the elapsed time, test output goes to a log file, and a
   failed run names the log and continues on the 0%-coverage estimates. No offer
   appears when `CI` is set, with `--format json`, or when stdin or stderr is not
-  a terminal.
+  a terminal. The policy's language picks the tool, so a Rust crate packaged
+  with maturin gets `cargo llvm-cov`; manifests decide only without a readable
+  policy. With coverage, doctor's `coverage` check also counts the CRAP
+  estimates it still hides in scanned files the LCOV omits, such as Rust
+  integration tests, which `check` reports.
 - Count cyclomatic complexity on the syntax tree in every language. The old lexical count read keywords inside
   strings and comments, missed Rust `?`, and counted closure `||` and `=>`.
   Rust now uses cargo-crap's decision points (each `?` and match arm, `if`,

@@ -497,7 +497,10 @@ fn run_doctor(options: &DoctorOptions) -> Result<u8, String> {
     let coverage = Terminal::detect(options.format.as_deref()).coverage(
         options.coverage_path.as_deref(),
         &options.source,
-        coverage_tool::plan,
+        |root| {
+            let language = doctor::policy_language(root, options.policy_path.as_deref());
+            coverage_tool::plan(root, language.as_deref())
+        },
     );
     let report = doctor::diagnose(
         &options.source,
@@ -733,7 +736,10 @@ fn check_coverage(options: &CheckOptions) -> Option<PathBuf> {
         );
         return Some(found);
     }
-    Terminal::detect(options.format.as_deref()).offer(source, coverage_tool::plan)
+    Terminal::detect(options.format.as_deref()).offer(source, |root| {
+        let language = doctor::policy_language(root, Some(&options.policy_path));
+        coverage_tool::plan(root, language.as_deref())
+    })
 }
 
 fn print_hook_summary(

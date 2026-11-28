@@ -67,21 +67,37 @@ pub(crate) struct CoveragePlan {
     pub(crate) output: PathBuf,
 }
 
-/// Picks the coverage tool from the project's single language manifest. Returns
-/// `None` when the language is ambiguous or no supported test runner is set up.
-pub(crate) fn plan(root: &Path) -> Option<CoveragePlan> {
-    plan_with(root, &|step: &Step| step.succeeds(root))
+/// Picks the coverage tool for the policy's `language`, or, without a readable policy,
+/// from the project's single language manifest. Returns `None` when the language is
+/// ambiguous or no supported test runner is set up.
+pub(crate) fn plan(root: &Path, language: Option<&str>) -> Option<CoveragePlan> {
+    plan_with(root, language, &|step: &Step| step.succeeds(root))
 }
 
-fn plan_with(root: &Path, available: &dyn Fn(&Step) -> bool) -> Option<CoveragePlan> {
+fn plan_with(
+    root: &Path,
+    language: Option<&str>,
+    available: &dyn Fn(&Step) -> bool,
+) -> Option<CoveragePlan> {
+    match language.or_else(|| manifest_language(root))? {
+        "rust" => Some(rust_plan(available)),
+        "python" => Some(python_plan(root, available)),
+        "typescript" => typescript_plan(root),
+        _ => None,
+    }
+}
+
+/// A Rust crate packaged for Python with maturin has both manifests, so manifests
+/// name a language only when exactly one kind is present.
+fn manifest_language(root: &Path) -> Option<&'static str> {
     let has = |names: &[&str]| names.iter().any(|name| root.join(name).is_file());
     let rust = has(&["Cargo.toml"]);
     let python = has(&["pyproject.toml", "setup.py", "requirements.txt"]);
     let typescript = has(&["tsconfig.json", "package.json"]);
     match (rust, python, typescript) {
-        (true, false, false) => Some(rust_plan(available)),
-        (false, true, false) => Some(python_plan(root, available)),
-        (false, false, true) => typescript_plan(root),
+        (true, false, false) => Some("rust"),
+        (false, true, false) => Some("python"),
+        (false, false, true) => Some("typescript"),
         _ => None,
     }
 }
@@ -265,7 +281,7 @@ mod tests {
     #[test]
     fn rust_installs_cargo_llvm_cov_only_when_missing() {
         let project = Project::new("rust", &[("Cargo.toml", "")]);
-        let missing = plan_with(&project.0, &|_| false).expect("rust plan");
+        let missing = plan_with(&project.0, None, &|_| false).expect("rust plan");
         assert_eq!(missing.tool, "cargo-llvm-cov");
         assert_eq!(
             commands(&missing),
@@ -278,7 +294,7 @@ mod tests {
                 Path::new("lcov.info"),
             )
         );
-        let present = plan_with(&project.0, &|step| {
+        let present = plan_with(&project.0, None, &|step| {
             step.display() == "cargo llvm-cov --version"
         })
         .expect("rust plan");
@@ -291,7 +307,8 @@ mod tests {
     #[test]
     fn python_prefers_uv_then_the_project_virtualenv() {
         let uv = Project::new("uv", &[("pyproject.toml", ""), ("uv.lock", "")]);
-        let with_uv = plan_with(&uv.0, &|step| step.display() == "uv --version").expect("plan");
+        let with_uv =
+            plan_with(&uv.0, None, &|step| step.display() == "uv --version").expect("plan");
         assert_eq!(
             commands(&with_uv),
             (
@@ -301,7 +318,7 @@ mod tests {
                 Path::new("lcov.info"),
             )
         );
-        let without_uv = plan_with(&uv.0, &|_| false).expect("plan");
+        let without_uv = plan_with(&uv.0, None, &|_| false).expect("plan");
         assert_eq!(
             commands(&without_uv),
             (
@@ -313,7 +330,7 @@ mod tests {
 
         let venv = Project::new("venv", &[("setup.py", ""), (".venv/bin/python", "")]);
         let python = venv.0.join(".venv/bin/python").display().to_string();
-        let ready = plan_with(&venv.0, &|step| {
+        let ready = plan_with(&venv.0, None, &|step| {
             step.display() == format!("{python} -c import pytest, pytest_cov")
         })
         .expect("plan");
@@ -338,7 +355,7 @@ mod tests {
                 ("node_modules/vitest/package.json", vitest),
             ],
         );
-        let plan = plan_with(&pnpm.0, &|_| false).expect("plan");
+        let plan = plan_with(&pnpm.0, None, &|_| false).expect("plan");
         assert_eq!(
             commands(&plan),
             (
@@ -356,7 +373,7 @@ mod tests {
                 ("node_modules/@vitest/coverage-istanbul/package.json", "{}"),
             ],
         );
-        let plan = plan_with(&ready.0, &|_| false).expect("plan");
+        let plan = plan_with(&ready.0, None, &|_| false).expect("plan");
         assert!(plan.install.is_empty(), "an installed provider is reused");
         assert_eq!(
             plan.run.display(),
@@ -394,7 +411,7 @@ mod tests {
             );
             let manager = PackageManager::detect(&project.0);
             assert_eq!(manager.add_dev.display(), add, "{lockfile}");
-            let plan = plan_with(&project.0, &|_| false).expect("jest plan");
+            let plan = plan_with(&project.0, None, &|_| false).expect("jest plan");
             assert_eq!(plan.tool, "jest");
             assert!(plan.install.is_empty(), "jest ships coverage");
             assert_eq!(plan.run.display(), run, "{lockfile}");
@@ -404,29 +421,29 @@ mod tests {
     #[test]
     fn plan_probes_the_real_environment() {
         let project = Project::new("probe", &[("Cargo.toml", "")]);
-        let rust = plan(&project.0).expect("a Cargo.toml project has a plan");
+        let rust = plan(&project.0, None).expect("a Cargo.toml project has a plan");
         assert_eq!(
             rust.run.display(),
             "cargo llvm-cov --lcov --output-path lcov.info"
         );
-        assert_eq!(plan(&Project::new("probe-none", &[]).0), None);
+        assert_eq!(plan(&Project::new("probe-none", &[]).0, None), None);
     }
 
     #[test]
     fn no_plan_without_a_single_language_or_test_runner() {
         let none = Project::new("none", &[]);
-        assert_eq!(plan_with(&none.0, &|_| true), None);
+        assert_eq!(plan_with(&none.0, None, &|_| true), None);
         let mixed = Project::new("mixed", &[("Cargo.toml", ""), ("package.json", "{}")]);
-        assert_eq!(plan_with(&mixed.0, &|_| true), None);
+        assert_eq!(plan_with(&mixed.0, None, &|_| true), None);
         let mixed = Project::new("mixed-py", &[("Cargo.toml", ""), ("pyproject.toml", "")]);
-        assert_eq!(plan_with(&mixed.0, &|_| true), None);
+        assert_eq!(plan_with(&mixed.0, None, &|_| true), None);
         let mixed = Project::new(
             "mixed-ts",
             &[("requirements.txt", ""), ("tsconfig.json", "")],
         );
-        assert_eq!(plan_with(&mixed.0, &|_| true), None);
+        assert_eq!(plan_with(&mixed.0, None, &|_| true), None);
         let bare = Project::new("bare-ts", &[("package.json", "{}")]);
-        assert_eq!(plan_with(&bare.0, &|_| true), None);
+        assert_eq!(plan_with(&bare.0, None, &|_| true), None);
         let broken = Project::new(
             "broken-ts",
             &[
@@ -435,7 +452,27 @@ mod tests {
                 ("node_modules/jest/package.json", r#"{"version":1}"#),
             ],
         );
-        assert_eq!(plan_with(&broken.0, &|_| true), None);
+        assert_eq!(plan_with(&broken.0, None, &|_| true), None);
+    }
+
+    #[test]
+    fn the_policy_language_settles_a_project_with_several_manifests() {
+        let maturin = Project::new("maturin", &[("Cargo.toml", ""), ("pyproject.toml", "")]);
+        let rust = plan_with(&maturin.0, Some("rust"), &|_| true).expect("rust plan");
+        assert_eq!(rust.tool, "cargo-llvm-cov");
+        let python = plan_with(&maturin.0, Some("python"), &|_| true).expect("python plan");
+        assert_eq!(python.tool, "pytest-cov");
+        let typescript = Project::new(
+            "policy-ts",
+            &[
+                ("Cargo.toml", ""),
+                ("package.json", "{}"),
+                ("node_modules/jest/package.json", r#"{"version":"29.0.0"}"#),
+            ],
+        );
+        let jest = plan_with(&typescript.0, Some("typescript"), &|_| true).expect("jest plan");
+        assert_eq!(jest.tool, "jest");
+        assert_eq!(plan_with(&maturin.0, Some("java"), &|_| true), None);
     }
 
     #[cfg(unix)]
