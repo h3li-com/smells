@@ -300,6 +300,11 @@ All notable changes to Smells are recorded here. Release tags use `vMAJOR.MINOR.
     zod's own `core.globalConfig` no longer count. A Python mutation through an
     imported name, such as `monkeypatch.setattr(FormData, ...)` on starlette's
     `FormData`, counts even when an authored class shares the name.
+- When a `--base` ratchet run has several blockers of one rule with equal
+  burden, mark the ones already in the base as legacy and report the newly added
+  one as the regression. Before, the tie went to path order, so adding a copy of
+  flask's `send_file` in `src/flask/attachments.py` was reported as
+  `helpers.py:417` and `testing.py:49`. The number of regressions is unchanged.
 - Resolve `mod` declarations in Cargo target roots other than `lib.rs` and
   `main.rs` (files directly in `tests/`, `examples/` and `benches/`,
   `src/bin/*.rs` and `build.rs`) next to the root file. Before, the scan exited

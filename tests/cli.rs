@@ -3356,6 +3356,67 @@ fn duplicate_pair(alpha_prefix: &str, beta_prefix: &str) -> String {
 }
 
 #[test]
+fn git_reference_ratchet_reports_the_added_finding_when_burdens_tie() {
+    let legacy = "pub fn legacy(a: i32, b: i32, c: i32, d: i32, e: i32, f: i32, g: i32, h: i32) -> i32 { a + b + c + d + e + f + g + h }\n";
+    let workspace = Workspace::new(legacy);
+    init_git_repo(&workspace.path);
+    git_stage_and_commit(&workspace.path, "initial legacy debt");
+
+    // `src/added.rs` sorts before `src/lib.rs`, so a path-order tie-break would
+    // blame the legacy function instead of the one this change adds.
+    fs::write(
+        workspace.path.join("src/added.rs"),
+        "pub fn added(a: u8, b: u8, c: u8, d: u8, e: u8, f: u8, g: u8, h: u8) -> u8 { a ^ b ^ c ^ d ^ e ^ f ^ g ^ h }\n",
+    )
+    .unwrap();
+    assert!(
+        Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(&workspace.path)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_smells"))
+        .args([
+            "check",
+            "--staged",
+            "--base",
+            "HEAD",
+            "--policy",
+            "quality-policy.json",
+            "--format",
+            "json",
+        ])
+        .current_dir(&workspace.path)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let data = report(&output);
+    assert_eq!(data["ratchet"]["regressed_blockers"], 1);
+    let arguments: Vec<_> = data["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|finding| finding["rule_id"] == "rust.function_arguments")
+        .map(|finding| {
+            (
+                finding["location"]["path"].as_str().unwrap(),
+                finding["status"].as_str().unwrap(),
+                finding["blocking"].as_bool().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        arguments,
+        vec![
+            ("src/added.rs", "violation", true),
+            ("src/lib.rs", "legacy_within_envelope", false),
+        ]
+    );
+}
+
+#[test]
 fn git_reference_ratchet_gates_duplicate_code_by_shared_token_mass() {
     let workspace = Workspace::new(&duplicate_pair("", ""));
     workspace.modify("/rules/rust.duplicate_functions/mode", json!("required"));

@@ -58,6 +58,17 @@ struct EnvelopeScope {
 
 type ReferenceEnvelope = BTreeMap<EnvelopeScope, Vec<f64>>;
 type CandidateGroups = BTreeMap<EnvelopeScope, Vec<(usize, f64)>>;
+/// Rule, path and symbol of a reference blocker, used only to decide which of
+/// several equal-burden candidates the envelope covers.
+type FindingKey = (String, String, String);
+
+fn finding_key(finding: &Finding) -> FindingKey {
+    (
+        finding.rule_id.clone(),
+        finding.location.path.clone(),
+        finding.symbol.clone(),
+    )
+}
 
 /// Extract a deterministic numeric burden for ordering findings within one rule.
 pub(crate) fn finding_burden(finding: &Finding) -> f64 {
@@ -167,9 +178,11 @@ fn parameter_weakened(name: &str, reference: u64, candidate: u64) -> bool {
     (name.starts_with("maximum") || name.starts_with("minimum")) && candidate > reference
 }
 
-fn reference_envelope(reference_report: Option<&Report>) -> (ReferenceEnvelope, usize, usize) {
+fn reference_envelope(
+    reference_report: Option<&Report>,
+) -> (ReferenceEnvelope, BTreeSet<FindingKey>, usize, usize) {
     let Some(report) = reference_report else {
-        return (BTreeMap::new(), 0, 0);
+        return (BTreeMap::new(), BTreeSet::new(), 0, 0);
     };
     let scopes = &report.implementation_scopes;
     let findings = &report.evidence.findings;
@@ -178,7 +191,9 @@ fn reference_envelope(reference_report: Option<&Report>) -> (ReferenceEnvelope, 
         .filter(|finding| finding.status == "ignored_match")
         .count();
     let mut envelope: BTreeMap<EnvelopeScope, Vec<f64>> = BTreeMap::new();
+    let mut known = BTreeSet::new();
     for finding in findings.iter().filter(|finding| finding.blocking) {
+        known.insert(finding_key(finding));
         let scope = EnvelopeScope {
             rule_id: finding.rule_id.clone(),
             implementations: finding_implementation_scope(finding, scopes),
@@ -192,10 +207,18 @@ fn reference_envelope(reference_report: Option<&Report>) -> (ReferenceEnvelope, 
     for burdens in envelope.values_mut() {
         burdens.sort_by(|left, right| right.total_cmp(left));
     }
-    (envelope, blockers, suppressions)
+    (envelope, known, blockers, suppressions)
 }
 
-fn candidate_blocker_groups(candidate_report: &Report) -> (CandidateGroups, usize, usize) {
+/// Group candidate blockers by envelope scope in descending burden order.
+///
+/// Among equal burdens, findings already present in the reference sort first, so
+/// the two-pointer match covers them and reports the newly added instance as the
+/// regression. The tie-break never changes how many findings regress.
+fn candidate_blocker_groups(
+    candidate_report: &Report,
+    known: &BTreeSet<FindingKey>,
+) -> (CandidateGroups, usize, usize) {
     let scopes = &candidate_report.implementation_scopes;
     let findings = &candidate_report.evidence.findings;
     let suppressions = findings
@@ -203,6 +226,7 @@ fn candidate_blocker_groups(candidate_report: &Report) -> (CandidateGroups, usiz
         .filter(|finding| finding.status == "ignored_match")
         .count();
     let mut groups: BTreeMap<EnvelopeScope, Vec<(usize, f64)>> = BTreeMap::new();
+    let is_new = |index: usize| !known.contains(&finding_key(&findings[index]));
     for (index, finding) in findings.iter().enumerate() {
         if !finding.blocking {
             continue;
@@ -221,6 +245,7 @@ fn candidate_blocker_groups(candidate_report: &Report) -> (CandidateGroups, usiz
         entries.sort_by(|(left_idx, left_burden), (right_idx, right_burden)| {
             right_burden
                 .total_cmp(left_burden)
+                .then_with(|| is_new(*left_idx).cmp(&is_new(*right_idx)))
                 .then_with(|| left_idx.cmp(right_idx))
         });
     }
@@ -243,10 +268,10 @@ pub(crate) fn apply_ratchet(
         ));
     }
 
-    let (envelope, reference_blockers, reference_suppressions) =
+    let (envelope, known, reference_blockers, reference_suppressions) =
         reference_envelope(reference_report);
     let (candidate_groups, candidate_blockers, candidate_suppressions) =
-        candidate_blocker_groups(candidate_report);
+        candidate_blocker_groups(candidate_report, &known);
 
     let mut regressed = BTreeSet::new();
     for (scope, candidates) in &candidate_groups {
